@@ -959,6 +959,73 @@ class CallController {
             Logger.setStatus("Leave error: " + e.message);
         }
     }
+    async toggleScreenShare() {
+        if (!this.plugin)
+            return;
+        if (!this.screenEnabled) {
+            const ss = await this.screenManager.start();
+            const track = ss.getVideoTracks()[0];
+            if (!track)
+                return;
+            this.screenEnabled = true;
+            this.replaceVideoTrack(track);
+            Logger.setStatus("Screen share started");
+            this.bus.emit("screen-changed", true);
+            track.onended = () => { if (this.screenEnabled)
+                this.toggleScreenShare(); };
+        }
+        else {
+            this.screenManager.stop();
+            this.screenEnabled = false;
+            const cam = await this.ensureCameraStream();
+            const track = cam.getVideoTracks()[0];
+            if (track)
+                this.replaceVideoTrack(track);
+            Logger.setStatus("Screen share stopped");
+            this.bus.emit("screen-changed", false);
+        }
+    }
+    async toggleVirtualBackground() {
+        if (!this.plugin)
+            return;
+        if (this.screenEnabled) {
+            Logger.setStatus("Disable screen share before virtual background");
+            return;
+        }
+        if (!this.vbEnabled) {
+            const cam = await this.ensureCameraStream();
+            const processed = await this.vbManager.enable(cam);
+            const track = processed.getVideoTracks()[0];
+            if (!track)
+                return;
+            this.vbEnabled = true;
+            this.replaceVideoTrack(track);
+            this.bus.emit("vb-changed", true);
+        }
+        else {
+            this.vbManager.disable();
+            this.vbEnabled = false;
+            const cam = await this.ensureCameraStream();
+            const track = cam.getVideoTracks()[0];
+            if (track)
+                this.replaceVideoTrack(track);
+            this.bus.emit("vb-changed", false);
+        }
+    }
+    async ensureCameraStream() {
+        if (!this.cameraStream) {
+            this.cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        }
+        return this.cameraStream;
+    }
+    replaceVideoTrack(track) {
+        if (!this.plugin)
+            return;
+        this.plugin.replaceTracks({
+            tracks: [{ type: "video", capture: track, recv: false }]
+        });
+        this.media.setLocalTrack(this.localVideo, track);
+    }
 }
 // import {Dom} from "./Dom";
 // import {CallController} from "../managers/CallController";
