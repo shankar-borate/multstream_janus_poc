@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "none",
+    "outFile": "./dist/app.js",
+    "sourceMap": true,
+    "inlineSources": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "lib": ["DOM", "ES2020"]
+  },
+  "files": [
+    "src/globals.d.ts",
+    "src/core/Logger.ts",
+    "src/core/EventBus.ts",
+    "src/core/Types.ts",
+    "src/core/UrlConfig.ts",
+    "src/core/ParentBridge.ts",
+    "src/core/UrlConfig.ts",
+    "src/core/http/HttpClient.ts",
+    "src/core/clients/ims/ImsClient.ts",
+    "src/core/clients/ims/ims.types.ts",
+    "src/core/http/Cookie.ts",
+    "src/core/http/Correlation.ts",
+    "src/core/http/HttpError.ts",
+     "src/core/http/HttpTypes.ts",
+    "src/managers/ParticipantRoster.ts",
+    "src/managers/MediaManager.ts",
+    "src/managers/VirtualBackgroundManager.ts",
+    "src/managers/ScreenShareManager.ts",
+    "src/managers/NetworkQualityManager.ts",
+    "src/managers/JanusGateway.ts",
+    "src/managers/RemoteFeedManager.ts",
+    "src/managers/CallController.ts",
+    "src/ui/UIController.ts",
+    "src/app.ts"
+  ]
+}
