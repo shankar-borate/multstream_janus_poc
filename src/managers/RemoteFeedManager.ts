@@ -1,5 +1,6 @@
 class RemoteFeedManager {
   private feeds = new Map<number, any>();
+  private feedTracks = new Map<number, Map<string, MediaStreamTrack>>();
 
   constructor(
     private janus:any,
@@ -35,20 +36,54 @@ class RemoteFeedManager {
       },
       onlocaltrack:()=>{},
       onremotetrack:(track:MediaStreamTrack,_mid:string,on:boolean)=>{
-        if(!on) return;
+        let byId = this.feedTracks.get(feedId);
+        if(!byId){
+          byId = new Map<string, MediaStreamTrack>();
+          this.feedTracks.set(feedId, byId);
+        }
+
+        if(!on){
+          const prev = byId.get(track.id);
+          if(prev){
+            this.media.removeRemoteTrack(this.remoteVideo, prev);
+            byId.delete(track.id);
+          } else {
+            this.media.removeRemoteTrack(this.remoteVideo, track);
+          }
+          return;
+        }
+
+        const existingSameKind = Array.from(byId.values()).find(t => t.kind === track.kind && t.id !== track.id);
+        if(existingSameKind){
+          this.media.removeRemoteTrack(this.remoteVideo, existingSameKind);
+          byId.delete(existingSameKind.id);
+        }
+
+        byId.set(track.id, track);
         this.media.setRemoteTrack(this.remoteVideo, track);
       },
-      oncleanup:()=>this.removeFeed(feedId)
+      oncleanup:()=>this.removeFeed(feedId, false)
     });
   }
 
-  removeFeed(id:number){
+  removeFeed(id:number, detach:boolean = true){
     const h = this.feeds.get(id);
-    if(h){ try{h.detach();}catch{} this.feeds.delete(id); }
+    if(h){
+      if(detach){
+        try{h.detach();}catch{}
+      }
+      this.feeds.delete(id);
+    }
+
+    const tracks = this.feedTracks.get(id);
+    if(tracks){
+      tracks.forEach(t => this.media.removeRemoteTrack(this.remoteVideo, t));
+      this.feedTracks.delete(id);
+    }
   }
 
   cleanupAll(){
-    this.feeds.forEach(h=>{ try{h.detach();}catch{} });
-    this.feeds.clear();
+    Array.from(this.feeds.keys()).forEach(id => this.removeFeed(id, true));
+    this.media.clearRemote(this.remoteVideo);
   }
 }

@@ -297,9 +297,32 @@ class MediaManager {
     }
     setRemoteTrack(video, track) {
         const ms = video.srcObject || new MediaStream();
+        // Keep one active track per kind for this single remote renderer.
+        ms.getTracks().forEach(t => {
+            if (t.kind === track.kind && t.id !== track.id) {
+                ms.removeTrack(t);
+                try {
+                    t.stop();
+                }
+                catch { }
+            }
+        });
         ms.addTrack(track);
         video.srcObject = ms;
         video.play().catch(() => { });
+    }
+    removeRemoteTrack(video, track) {
+        const ms = video.srcObject;
+        if (!ms)
+            return;
+        ms.getTracks().forEach(t => {
+            if (t === track || t.id === track.id) {
+                ms.removeTrack(t);
+            }
+        });
+        if (ms.getTracks().length === 0) {
+            video.srcObject = null;
+        }
     }
     clearLocal(video) {
         const ms = video.srcObject;
@@ -579,55 +602,6 @@ class JanusGateway {
         this.janus = null;
     }
 }
-/*class JanusGateway {
-  private janus:any = null;
-  private publisher:any = null;
-  private opaqueId = "videocx-ui-" + Janus.randomString(12);
-
-  constructor(){}
-
-  init(){
-    Janus.init({ debug:"all", callback: ()=>Logger.setStatus("Janus initialized") });
-  }
-
-  createSession(server:string, ok:()=>void, destroyed:()=>void){
-    Logger.setStatus("Creating Janus session...");
-    Logger.user(`Creating Janus session: ${server}`);
-      this.janus = new Janus({
-      server,
-      success: ok,
-      error: (e:any)=>Logger.setStatus("Janus error: "+JSON.stringify(e)),
-      destroyed
-    });
-  }
-
-  attachPublisher(
-    onAttached:(h:any)=>void,
-    onMessage:(msg:any,jsep:any)=>void,
-    onLocalTrack:(track:MediaStreamTrack,on:boolean)=>void,
-    onCleanup:()=>void
-  ){
-    this.janus.attach({
-      plugin:"janus.plugin.videoroom",
-      opaqueId:this.opaqueId,
-      success:(h:any)=>{ this.publisher=h; onAttached(h); },
-      error:(e:any)=>Logger.setStatus("Attach error: "+JSON.stringify(e)),
-      onmessage:onMessage,
-      onlocaltrack:onLocalTrack,
-      oncleanup:onCleanup
-    });
-  }
-
-  getJanus(){ return this.janus; }
-  getOpaqueId(){ return this.opaqueId; }
-
-  destroy(){
-    try{ this.publisher?.detach(); }catch{}
-    this.publisher = null;
-    try{ this.janus?.destroy(); }catch{}
-    this.janus = null;
-  }
-}*/
 class RemoteFeedManager {
     constructor(janus, roomId, privateId, opaqueId, media, remoteVideo) {
         this.janus = janus;
@@ -637,6 +611,7 @@ class RemoteFeedManager {
         this.media = media;
         this.remoteVideo = remoteVideo;
         this.feeds = new Map();
+        this.feedTracks = new Map();
     }
     addFeed(feedId) {
         if (this.feeds.has(feedId))
@@ -663,29 +638,53 @@ class RemoteFeedManager {
             },
             onlocaltrack: () => { },
             onremotetrack: (track, _mid, on) => {
-                if (!on)
+                let byId = this.feedTracks.get(feedId);
+                if (!byId) {
+                    byId = new Map();
+                    this.feedTracks.set(feedId, byId);
+                }
+                if (!on) {
+                    const prev = byId.get(track.id);
+                    if (prev) {
+                        this.media.removeRemoteTrack(this.remoteVideo, prev);
+                        byId.delete(track.id);
+                    }
+                    else {
+                        this.media.removeRemoteTrack(this.remoteVideo, track);
+                    }
                     return;
+                }
+                const existingSameKind = Array.from(byId.values()).find(t => t.kind === track.kind && t.id !== track.id);
+                if (existingSameKind) {
+                    this.media.removeRemoteTrack(this.remoteVideo, existingSameKind);
+                    byId.delete(existingSameKind.id);
+                }
+                byId.set(track.id, track);
                 this.media.setRemoteTrack(this.remoteVideo, track);
             },
-            oncleanup: () => this.removeFeed(feedId)
+            oncleanup: () => this.removeFeed(feedId, false)
         });
     }
-    removeFeed(id) {
+    removeFeed(id, detach = true) {
         const h = this.feeds.get(id);
         if (h) {
-            try {
-                h.detach();
+            if (detach) {
+                try {
+                    h.detach();
+                }
+                catch { }
             }
-            catch { }
             this.feeds.delete(id);
+        }
+        const tracks = this.feedTracks.get(id);
+        if (tracks) {
+            tracks.forEach(t => this.media.removeRemoteTrack(this.remoteVideo, t));
+            this.feedTracks.delete(id);
         }
     }
     cleanupAll() {
-        this.feeds.forEach(h => { try {
-            h.detach();
-        }
-        catch { } });
-        this.feeds.clear();
+        Array.from(this.feeds.keys()).forEach(id => this.removeFeed(id, true));
+        this.media.clearRemote(this.remoteVideo);
     }
 }
 // import { HttpClient } from "../core/http/HttpClient";
@@ -710,6 +709,7 @@ class CallController {
         this.recording = false;
         this.currentRecordingId = null;
         this.currentRoomId = null;
+        this.participantSyncTimer = null;
         this.gateway = new JanusGateway();
         this.media = new MediaManager();
         this.vbManager = new VirtualBackgroundManager();
@@ -730,6 +730,7 @@ class CallController {
             this.roomCreateAttempted = false;
             this.selfId = null;
             this.roster.reset();
+            this.stopParticipantSync();
             // reset recording
             this.recording = false;
             this.currentRecordingId = null;
@@ -821,6 +822,7 @@ class CallController {
             this.publish();
             this.reconcile(cfg, data["publishers"]);
             this.bus.emit("joined", true);
+            this.startParticipantSync(cfg);
         }
         if (event === "event") {
             this.reconcile(cfg, data["publishers"]);
@@ -832,6 +834,7 @@ class CallController {
             if (typeof unpublished === "number") {
                 this.removeParticipant(cfg, unpublished);
             }
+            this.syncParticipantsFromServer(cfg);
         }
         if (event === "destroyed") {
             this.leave();
@@ -853,6 +856,51 @@ class CallController {
             }
         });
         this.bus.emit("participants", this.roster.snapshot(cfg.roomId));
+    }
+    startParticipantSync(cfg) {
+        this.stopParticipantSync();
+        this.syncParticipantsFromServer(cfg);
+        this.participantSyncTimer = window.setInterval(() => {
+            this.syncParticipantsFromServer(cfg);
+        }, 4000);
+    }
+    stopParticipantSync() {
+        if (this.participantSyncTimer !== null) {
+            window.clearInterval(this.participantSyncTimer);
+            this.participantSyncTimer = null;
+        }
+    }
+    syncParticipantsFromServer(cfg) {
+        if (!this.plugin || !this.joinedRoom)
+            return;
+        this.plugin.send({
+            message: { request: "listparticipants", room: cfg.roomId },
+            success: (res) => {
+                const data = this.getVideoRoomData(res);
+                const participants = Array.isArray(data?.participants) ? data.participants : [];
+                const serverIds = new Set();
+                participants.forEach((p) => {
+                    const feedId = Number(p?.id);
+                    if (!Number.isFinite(feedId))
+                        return;
+                    serverIds.add(feedId);
+                    this.roster.add(feedId);
+                    if (this.remoteFeeds && feedId !== this.selfId) {
+                        this.remoteFeeds.addFeed(feedId);
+                    }
+                });
+                const localIds = this.roster.snapshot(cfg.roomId).participantIds;
+                localIds.forEach((id) => {
+                    if (id === this.selfId)
+                        return;
+                    if (!serverIds.has(id)) {
+                        this.roster.remove(id);
+                        this.remoteFeeds?.removeFeed(id);
+                    }
+                });
+                this.bus.emit("participants", this.roster.snapshot(cfg.roomId));
+            }
+        });
     }
     removeParticipant(cfg, feedId) {
         if (feedId === this.selfId)
@@ -1016,6 +1064,7 @@ class CallController {
             this.remoteFeeds = null;
             this.plugin = null;
             this.gateway.destroy();
+            this.stopParticipantSync();
             this.joinedRoom = false;
             this.recording = false;
             this.currentRecordingId = null;

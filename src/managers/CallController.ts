@@ -26,6 +26,7 @@ class CallController {
   private recording = false;
   private currentRecordingId: string | null = null;
   private currentRoomId: number | null = null;
+  private participantSyncTimer: number | null = null;
 
   constructor(
     private bus: EventBus,
@@ -65,6 +66,7 @@ class CallController {
         this.roomCreateAttempted = false;
         this.selfId = null;
         this.roster.reset();
+        this.stopParticipantSync();
 
         // reset recording
         this.recording = false;
@@ -183,6 +185,7 @@ class CallController {
       this.publish();
       this.reconcile(cfg, data["publishers"]);
       this.bus.emit("joined", true);
+      this.startParticipantSync(cfg);
     }
 
     if (event === "event") {
@@ -197,6 +200,8 @@ class CallController {
       if (typeof unpublished === "number") {
         this.removeParticipant(cfg, unpublished);
       }
+
+      this.syncParticipantsFromServer(cfg);
     }
 
     if (event === "destroyed") {
@@ -220,6 +225,55 @@ class CallController {
     });
 
     this.bus.emit("participants", this.roster.snapshot(cfg.roomId));
+  }
+
+  private startParticipantSync(cfg: JoinConfig) {
+    this.stopParticipantSync();
+    this.syncParticipantsFromServer(cfg);
+    this.participantSyncTimer = window.setInterval(() => {
+      this.syncParticipantsFromServer(cfg);
+    }, 4000);
+  }
+
+  private stopParticipantSync() {
+    if (this.participantSyncTimer !== null) {
+      window.clearInterval(this.participantSyncTimer);
+      this.participantSyncTimer = null;
+    }
+  }
+
+  private syncParticipantsFromServer(cfg: JoinConfig) {
+    if (!this.plugin || !this.joinedRoom) return;
+
+    this.plugin.send({
+      message: { request: "listparticipants", room: cfg.roomId },
+      success: (res: any) => {
+        const data = this.getVideoRoomData(res);
+        const participants = Array.isArray(data?.participants) ? data.participants : [];
+        const serverIds = new Set<number>();
+
+        participants.forEach((p: any) => {
+          const feedId = Number(p?.id);
+          if (!Number.isFinite(feedId)) return;
+          serverIds.add(feedId);
+          this.roster.add(feedId);
+          if (this.remoteFeeds && feedId !== this.selfId) {
+            this.remoteFeeds.addFeed(feedId);
+          }
+        });
+
+        const localIds = this.roster.snapshot(cfg.roomId).participantIds;
+        localIds.forEach((id: number) => {
+          if (id === this.selfId) return;
+          if (!serverIds.has(id)) {
+            this.roster.remove(id);
+            this.remoteFeeds?.removeFeed(id);
+          }
+        });
+
+        this.bus.emit("participants", this.roster.snapshot(cfg.roomId));
+      }
+    });
   }
 
   private removeParticipant(cfg: JoinConfig, feedId: number) {
@@ -406,6 +460,7 @@ class CallController {
 
       this.plugin = null;
       this.gateway.destroy();
+      this.stopParticipantSync();
 
       this.joinedRoom = false;
       this.recording = false;
