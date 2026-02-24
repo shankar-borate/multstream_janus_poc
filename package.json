@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "build:watch": "tsc -w -p tsconfig.json"
+    "build:watch": "tsc -w -p tsconfig.json",
+    "test:e2e": "npx playwright test"
   },
   "devDependencies": {
     "typescript": "^5.6.3"

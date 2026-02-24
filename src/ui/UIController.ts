@@ -42,7 +42,8 @@ class UIController {
   private audioMuted = false;
   private videoMuted = false;
   private ended = false;
-  private folderPath:string = "/opt/efs-janus-app/dev/VideoRecDownloads"
+  private folderPath:string = "/opt/efs-janus-app/dev/VideoRecDownloads";
+  private autoRecordParticipantThreshold = 2;
 
   // ✅ recording state
   private recording = false;
@@ -64,7 +65,13 @@ class UIController {
 
     this.controller = new CallController(this.bus, localVideo, remoteVideo);
 
-    this.bus.on<boolean>("joined", j => this.setJoinedState(j));
+    this.bus.on<boolean>("joined", j=>{
+        this.setJoinedState(j);
+        console.log("VCX_JOINED=" + j);
+        this.updateDebugState({
+          joined: j
+        });
+    });
 
     this.bus.on<boolean>("mute-changed", muted => {
       this.btnMute.innerHTML =
@@ -80,6 +87,35 @@ class UIController {
     this.bus.on<boolean>("vb-changed", on => {
       this.btnVB.title = on ? "Disable Virtual Background" : "Enable Virtual Background";
     });
+    this.bus.on<boolean>("recording-changed", isRecording => {
+        this.recording = isRecording;
+        this.updateRecordUI();
+        this.updateDebugState({
+          recording: isRecording
+        });
+        this.bridge.emit({
+          type: "RECORDING_CHANGED",
+          recording: isRecording
+        });
+    });
+
+    this.bus.on<any>("participants", (snapshot) => {
+        const count = snapshot.participantIds.length;
+        Logger.user(`Participants count: ${count}`);
+        // SIMPLE LOG (automation-friendly)
+        console.log("VCX_PARTICIPANTS=" + count);
+        this.updateDebugState({
+          participants: count
+        });
+        this.syncAutoRecordingByParticipants(count);
+    });
+    this.bus.on<any>("connectivity", (s) => {
+        this.updateDebugState({
+          iceState: s.ice,
+          signalingState: s.signaling,
+          connectionState: s.connection
+        });
+    });  
 
     this.wire();
     this.setupNetworkUI();
@@ -165,25 +201,41 @@ class UIController {
     // ✅ RECORD BUTTON
     if (this.btnRecord) {
       this.btnRecord.onclick = () => {
-        this.recording = !this.recording;
-        this.updateRecordUI();
-
         if (this.recording) {
-          //const rid = this.folderPath+"rec_" + Date.now();
-          const rid = this.createRecordingId()
-          Logger.user("start recording");
-          this.controller.startRecording(rid);
+          this.stopRecording("manual");
         } else {
-          Logger.user("stop recording");
-          this.controller.stopRecording();
+          this.startRecording("manual");
         }
-
-        this.bridge.emit({
-          type: "RECORDING_CHANGED",
-          recording: this.recording
-        });
       };
     }
+  }
+
+  private syncAutoRecordingByParticipants(participantCount: number) {
+    const shouldRecord = participantCount >= this.autoRecordParticipantThreshold;
+
+    if (shouldRecord && !this.recording) {
+      this.startRecording("auto");
+      return;
+    }
+
+    if (!shouldRecord && this.recording) {
+      this.stopRecording("auto");
+    }
+  }
+
+  private startRecording(source: "manual" | "auto") {
+    if (this.recording) return;
+
+    const rid = this.createRecordingId();
+    Logger.user(`${source} start recording`);
+    this.controller.startRecording(rid);
+  }
+
+  private stopRecording(source: "manual" | "auto") {
+    if (!this.recording) return;
+
+    Logger.user(`${source} stop recording`);
+    this.controller.stopRecording();
   }
 
   private createRecordingId(): string{
@@ -214,6 +266,8 @@ class UIController {
   private autoJoin() {
     const cfg = UrlConfig.buildJoinConfig();
     this.lastCfg = cfg;
+    this.recording = false;
+    this.updateRecordUI();
 
     Logger.setStatus(
       `Joining... roomId=${cfg.roomId}, name=${cfg.display}`
@@ -301,11 +355,11 @@ class UIController {
 
         // ✅ recording events
         case "START_RECORDING":
-          if (!this.recording) this.btnRecord.click();
+          this.startRecording("manual");
           break;
 
         case "STOP_RECORDING":
-          if (this.recording) this.btnRecord.click();
+          this.stopRecording("manual");
           break;
 
         case "TOGGLE_RECORDING":
@@ -313,5 +367,15 @@ class UIController {
           break;
       }
     });
+  }
+  private updateDebugState(extra:any = {}) {
+    const dbg = (window as any).__vcxDebug || {};
+    (window as any).__vcxDebug = {
+      ...dbg,
+      ...extra,
+      timestamp: Date.now()
+    };
+
+    console.log("VCX_DEBUG", (window as any).__vcxDebug);
   }
 }

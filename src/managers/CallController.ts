@@ -233,18 +233,100 @@ class CallController {
   // MEDIA
   // =====================================
 
+  // public publish() {
+  //   this.plugin.createOffer({
+  //     tracks: [
+  //       { type: "audio", capture: true, recv: false },
+  //       { type: "video", capture: true, recv: false }
+  //     ],
+  //     success: (jsep: any) => {
+  //       this.plugin.send({
+  //         message: { request: "configure", audio: true, video: true },
+  //         jsep
+  //       });
+  //     }
+  //   });
+  // }
+
   public publish() {
+    if (!this.plugin) {
+      Logger.setStatus("Publish ignored: plugin not ready");
+      return;
+    }
+
     this.plugin.createOffer({
       tracks: [
         { type: "audio", capture: true, recv: false },
-        { type: "video", capture: true, recv: false }
+        { type: "video", capture: true, recv: false },
       ],
+
       success: (jsep: any) => {
+        // ✅ Point #4: capture and emit connectivity info from RTCPeerConnection
+        try {
+          const pc: RTCPeerConnection | undefined = this.plugin?.webrtcStuff?.pc;
+
+          if (pc) {
+            const emit = () => {
+              const payload = {
+                ice: pc.iceConnectionState,
+                signaling: pc.signalingState,
+                connection: (pc as any).connectionState ?? "n/a",
+                gathering: pc.iceGatheringState,
+                ts: Date.now(),
+              };
+
+              console.log("VCX_CONNECTIVITY=", payload);
+              this.bus.emit("connectivity", payload);
+            };
+
+            // emit once immediately
+            emit();
+
+            pc.oniceconnectionstatechange = () => {
+              console.log("VCX_ICE=" + pc.iceConnectionState);
+              emit();
+            };
+
+            pc.onsignalingstatechange = () => {
+              console.log("VCX_SIGNALING=" + pc.signalingState);
+              emit();
+            };
+
+            // connectionState exists on modern browsers; not always present everywhere
+            (pc as any).onconnectionstatechange = () => {
+              console.log("VCX_CONNECTION=" + ((pc as any).connectionState ?? "n/a"));
+              emit();
+            };
+
+            pc.onicegatheringstatechange = () => {
+              console.log("VCX_GATHERING=" + pc.iceGatheringState);
+              emit();
+            };
+          } else {
+            console.log("VCX_CONNECTIVITY=pc_not_available");
+            this.bus.emit("connectivity", {
+              ice: "n/a",
+              signaling: "n/a",
+              connection: "n/a",
+              gathering: "n/a",
+              ts: Date.now(),
+            });
+          }
+        } catch (e: any) {
+          console.log("VCX_CONNECTIVITY=hook_error", e?.message || e);
+        }
+
+        // ✅ normal Janus publish configure
         this.plugin.send({
           message: { request: "configure", audio: true, video: true },
-          jsep
+          jsep,
         });
-      }
+      },
+
+      error: (e: any) => {
+        Logger.setStatus("Offer error: " + JSON.stringify(e));
+        console.log("VCX_OFFER_ERROR=", e);
+      },
     });
   }
 
@@ -274,6 +356,7 @@ class CallController {
       message: {
         request: "configure",
         record: true,
+        room:this.currentRoomId,
         filename: recordingId
       },
       success: () => {

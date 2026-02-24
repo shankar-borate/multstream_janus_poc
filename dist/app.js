@@ -864,18 +864,90 @@ class CallController {
     // =====================================
     // MEDIA
     // =====================================
+    // public publish() {
+    //   this.plugin.createOffer({
+    //     tracks: [
+    //       { type: "audio", capture: true, recv: false },
+    //       { type: "video", capture: true, recv: false }
+    //     ],
+    //     success: (jsep: any) => {
+    //       this.plugin.send({
+    //         message: { request: "configure", audio: true, video: true },
+    //         jsep
+    //       });
+    //     }
+    //   });
+    // }
     publish() {
+        if (!this.plugin) {
+            Logger.setStatus("Publish ignored: plugin not ready");
+            return;
+        }
         this.plugin.createOffer({
             tracks: [
                 { type: "audio", capture: true, recv: false },
-                { type: "video", capture: true, recv: false }
+                { type: "video", capture: true, recv: false },
             ],
             success: (jsep) => {
+                // ✅ Point #4: capture and emit connectivity info from RTCPeerConnection
+                try {
+                    const pc = this.plugin?.webrtcStuff?.pc;
+                    if (pc) {
+                        const emit = () => {
+                            const payload = {
+                                ice: pc.iceConnectionState,
+                                signaling: pc.signalingState,
+                                connection: pc.connectionState ?? "n/a",
+                                gathering: pc.iceGatheringState,
+                                ts: Date.now(),
+                            };
+                            console.log("VCX_CONNECTIVITY=", payload);
+                            this.bus.emit("connectivity", payload);
+                        };
+                        // emit once immediately
+                        emit();
+                        pc.oniceconnectionstatechange = () => {
+                            console.log("VCX_ICE=" + pc.iceConnectionState);
+                            emit();
+                        };
+                        pc.onsignalingstatechange = () => {
+                            console.log("VCX_SIGNALING=" + pc.signalingState);
+                            emit();
+                        };
+                        // connectionState exists on modern browsers; not always present everywhere
+                        pc.onconnectionstatechange = () => {
+                            console.log("VCX_CONNECTION=" + (pc.connectionState ?? "n/a"));
+                            emit();
+                        };
+                        pc.onicegatheringstatechange = () => {
+                            console.log("VCX_GATHERING=" + pc.iceGatheringState);
+                            emit();
+                        };
+                    }
+                    else {
+                        console.log("VCX_CONNECTIVITY=pc_not_available");
+                        this.bus.emit("connectivity", {
+                            ice: "n/a",
+                            signaling: "n/a",
+                            connection: "n/a",
+                            gathering: "n/a",
+                            ts: Date.now(),
+                        });
+                    }
+                }
+                catch (e) {
+                    console.log("VCX_CONNECTIVITY=hook_error", e?.message || e);
+                }
+                // ✅ normal Janus publish configure
                 this.plugin.send({
                     message: { request: "configure", audio: true, video: true },
-                    jsep
+                    jsep,
                 });
-            }
+            },
+            error: (e) => {
+                Logger.setStatus("Offer error: " + JSON.stringify(e));
+                console.log("VCX_OFFER_ERROR=", e);
+            },
         });
     }
     toggleMute() {
@@ -901,6 +973,7 @@ class CallController {
             message: {
                 request: "configure",
                 record: true,
+                room: this.currentRoomId,
                 filename: recordingId
             },
             success: () => {
@@ -1062,6 +1135,7 @@ class UIController {
         this.videoMuted = false;
         this.ended = false;
         this.folderPath = "/opt/efs-janus-app/dev/VideoRecDownloads";
+        this.autoRecordParticipantThreshold = 2;
         // ✅ recording state
         this.recording = false;
         const qn = this.getQueryParam("name");
@@ -1073,7 +1147,13 @@ class UIController {
         const localVideo = document.getElementById("localVideo");
         const remoteVideo = document.getElementById("remoteVideo");
         this.controller = new CallController(this.bus, localVideo, remoteVideo);
-        this.bus.on("joined", j => this.setJoinedState(j));
+        this.bus.on("joined", j => {
+            this.setJoinedState(j);
+            console.log("VCX_JOINED=" + j);
+            this.updateDebugState({
+                joined: j
+            });
+        });
         this.bus.on("mute-changed", muted => {
             this.btnMute.innerHTML =
                 muted
@@ -1085,6 +1165,34 @@ class UIController {
         });
         this.bus.on("vb-changed", on => {
             this.btnVB.title = on ? "Disable Virtual Background" : "Enable Virtual Background";
+        });
+        this.bus.on("recording-changed", isRecording => {
+            this.recording = isRecording;
+            this.updateRecordUI();
+            this.updateDebugState({
+                recording: isRecording
+            });
+            this.bridge.emit({
+                type: "RECORDING_CHANGED",
+                recording: isRecording
+            });
+        });
+        this.bus.on("participants", (snapshot) => {
+            const count = snapshot.participantIds.length;
+            Logger.user(`Participants count: ${count}`);
+            // SIMPLE LOG (automation-friendly)
+            console.log("VCX_PARTICIPANTS=" + count);
+            this.updateDebugState({
+                participants: count
+            });
+            this.syncAutoRecordingByParticipants(count);
+        });
+        this.bus.on("connectivity", (s) => {
+            this.updateDebugState({
+                iceState: s.ice,
+                signalingState: s.signaling,
+                connectionState: s.connection
+            });
         });
         this.wire();
         this.setupNetworkUI();
@@ -1151,24 +1259,37 @@ class UIController {
         // ✅ RECORD BUTTON
         if (this.btnRecord) {
             this.btnRecord.onclick = () => {
-                this.recording = !this.recording;
-                this.updateRecordUI();
                 if (this.recording) {
-                    //const rid = this.folderPath+"rec_" + Date.now();
-                    const rid = this.createRecordingId();
-                    Logger.user("start recording");
-                    this.controller.startRecording(rid);
+                    this.stopRecording("manual");
                 }
                 else {
-                    Logger.user("stop recording");
-                    this.controller.stopRecording();
+                    this.startRecording("manual");
                 }
-                this.bridge.emit({
-                    type: "RECORDING_CHANGED",
-                    recording: this.recording
-                });
             };
         }
+    }
+    syncAutoRecordingByParticipants(participantCount) {
+        const shouldRecord = participantCount >= this.autoRecordParticipantThreshold;
+        if (shouldRecord && !this.recording) {
+            this.startRecording("auto");
+            return;
+        }
+        if (!shouldRecord && this.recording) {
+            this.stopRecording("auto");
+        }
+    }
+    startRecording(source) {
+        if (this.recording)
+            return;
+        const rid = this.createRecordingId();
+        Logger.user(`${source} start recording`);
+        this.controller.startRecording(rid);
+    }
+    stopRecording(source) {
+        if (!this.recording)
+            return;
+        Logger.user(`${source} stop recording`);
+        this.controller.stopRecording();
     }
     createRecordingId() {
         // Generate 6 digit integer (100000 – 999999)
@@ -1197,6 +1318,8 @@ class UIController {
     autoJoin() {
         const cfg = UrlConfig.buildJoinConfig();
         this.lastCfg = cfg;
+        this.recording = false;
+        this.updateRecordUI();
         Logger.setStatus(`Joining... roomId=${cfg.roomId}, name=${cfg.display}`);
         this.ended = false;
         this.endedOverlay.style.display = "none";
@@ -1263,18 +1386,25 @@ class UIController {
                     break;
                 // ✅ recording events
                 case "START_RECORDING":
-                    if (!this.recording)
-                        this.btnRecord.click();
+                    this.startRecording("manual");
                     break;
                 case "STOP_RECORDING":
-                    if (this.recording)
-                        this.btnRecord.click();
+                    this.stopRecording("manual");
                     break;
                 case "TOGGLE_RECORDING":
                     this.btnRecord.click();
                     break;
             }
         });
+    }
+    updateDebugState(extra = {}) {
+        const dbg = window.__vcxDebug || {};
+        window.__vcxDebug = {
+            ...dbg,
+            ...extra,
+            timestamp: Date.now()
+        };
+        console.log("VCX_DEBUG", window.__vcxDebug);
     }
 }
 // src/app.ts
