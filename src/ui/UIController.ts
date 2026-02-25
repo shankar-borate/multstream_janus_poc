@@ -40,6 +40,7 @@ class UIController {
   private remoteQ = document.getElementById("remoteQuality") as HTMLDivElement;
   private localQD = document.getElementById("localQualityDetails") as HTMLDivElement;
   private remoteQD = document.getElementById("remoteQualityDetails") as HTMLDivElement;
+  private callMeta = document.getElementById("callMeta") as HTMLDivElement;
 
   private audioMuted = false;
   private videoMuted = false;
@@ -263,6 +264,7 @@ class UIController {
     this.lastCfg = cfg;
     this.recording = false;
     this.updateRecordUI();
+    this.renderCallMeta(cfg);
 
     Logger.setStatus(
       `Joining... roomId=${cfg.roomId}, name=${cfg.display}`
@@ -278,6 +280,11 @@ class UIController {
 
     this.controller.join(cfg);
     this.bridge.emit({ type: "CALL_STARTED" });
+  }
+
+  private renderCallMeta(cfg: JoinConfig) {
+    if (!this.callMeta) return;
+    this.callMeta.textContent = `RoomId: ${cfg.roomId} | Name: ${cfg.display}`;
   }
 
   private reconnect() {
@@ -378,7 +385,15 @@ class UIController {
     if (!ms) return false;
     const tracks = ms.getVideoTracks();
     if (!tracks || tracks.length === 0) return false;
-    return tracks.some(t => t.readyState === "live" && t.enabled !== false);
+    const hasLiveTrack = tracks.some(t => t.readyState === "live" && t.enabled !== false);
+    if (!hasLiveTrack) return false;
+
+    const hasDecodedFrame =
+      this.remoteVideoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+      this.remoteVideoEl.videoWidth > 0 &&
+      this.remoteVideoEl.videoHeight > 0;
+    const hasStartedPlayback = this.remoteVideoEl.currentTime > 0.05;
+    return hasDecodedFrame && hasStartedPlayback;
   }
 
   private renderRemoteFallback() {

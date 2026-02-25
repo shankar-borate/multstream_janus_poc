@@ -132,7 +132,10 @@ const APP_CONFIG = {
         reconnectDelayMs: 800,
         participantSyncIntervalMs: 8000,
         participantSyncCooldownMs: 2500,
+        participantSyncRequestTimeoutMs: 7000,
         remoteFeedRetryDelayMs: 1200,
+        remoteFeedAttachTimeoutMs: 8000,
+        remoteFeedStartTimeoutMs: 12000,
         retry: {
             serverMaxAttempts: 3,
             serverDelayMs: 3000,
@@ -738,7 +741,9 @@ class MediaManager {
         });
         ms.addTrack(track);
         video.srcObject = ms;
-        video.play().catch(() => { });
+        video.play().catch((e) => {
+            Logger.error("Remote video play failed", e);
+        });
     }
     removeRemoteTrack(video, track) {
         const ms = video.srcObject;
@@ -1107,7 +1112,6 @@ class ConnectionStatusEngine {
         if (on) {
             const now = Date.now();
             this.remoteTrackSeenAt = now;
-            this.remoteMediaFlowAt = now;
             this.remoteNegotiationReady = true;
             tracks.add(track.id);
             if (!this.subscriberBytes.has(feedId)) {
@@ -1315,7 +1319,9 @@ class ConnectionStatusEngine {
             return;
         }
         this.disconnectedSince = null;
-        if ((connectedIce && (mediaFlowing || liveRemoteVideo)) || (hasRemote && liveRemoteVideo)) {
+        // Consider call connected only when remote media bytes are actually flowing.
+        // Track signals alone can be false positives on weak/reloading networks.
+        if ((connectedIce && mediaFlowing) || (hasRemote && mediaFlowing)) {
             this.transition("CONNECTED");
             return;
         }
@@ -1470,7 +1476,7 @@ class JanusGateway {
             success: ok,
             error: (e) => {
                 Logger.setStatus("Janus error: " + JSON.stringify(e));
-                Logger.user("Janus session create error: " + JSON.stringify(e));
+                Logger.error("Janus session create error: " + JSON.stringify(e));
                 onError?.(e);
             },
             destroyed: () => {
@@ -1496,7 +1502,7 @@ class JanusGateway {
             },
             error: (e) => {
                 Logger.setStatus("Attach error: " + JSON.stringify(e));
-                Logger.user("Attach error: " + JSON.stringify(e));
+                Logger.error("Attach error: " + JSON.stringify(e));
                 onError?.(e);
             },
             onmessage: (msg, jsep) => {
@@ -1543,11 +1549,56 @@ class RemoteFeedManager {
         this.feeds = new Map();
         this.feedTracks = new Map();
         this.pendingFeedAttach = new Set();
+        this.pendingAttachTimers = new Map();
+        this.feedStartTimers = new Map();
+        this.retryTimers = new Map();
+    }
+    clearAttachTimer(feedId) {
+        const t = this.pendingAttachTimers.get(feedId);
+        if (t !== undefined) {
+            window.clearTimeout(t);
+            this.pendingAttachTimers.delete(feedId);
+        }
+    }
+    clearFeedStartTimer(feedId) {
+        const t = this.feedStartTimers.get(feedId);
+        if (t !== undefined) {
+            window.clearTimeout(t);
+            this.feedStartTimers.delete(feedId);
+        }
+    }
+    clearRetryTimer(feedId) {
+        const t = this.retryTimers.get(feedId);
+        if (t !== undefined) {
+            window.clearTimeout(t);
+            this.retryTimers.delete(feedId);
+        }
+    }
+    scheduleReattach(feedId, reason) {
+        if (this.retryTimers.has(feedId))
+            return;
+        Logger.error(`Remote feed ${feedId} retry scheduled: ${reason}`);
+        const t = window.setTimeout(() => {
+            this.retryTimers.delete(feedId);
+            this.addFeed(feedId);
+        }, APP_CONFIG.call.remoteFeedRetryDelayMs);
+        this.retryTimers.set(feedId, t);
     }
     addFeed(feedId) {
         if (this.feeds.has(feedId) || this.pendingFeedAttach.has(feedId))
             return;
+        this.clearRetryTimer(feedId);
         this.pendingFeedAttach.add(feedId);
+        this.clearAttachTimer(feedId);
+        const attachTimer = window.setTimeout(() => {
+            if (!this.pendingFeedAttach.has(feedId))
+                return;
+            this.pendingFeedAttach.delete(feedId);
+            this.clearAttachTimer(feedId);
+            Logger.error(`Remote feed ${feedId} attach timed out`);
+            this.scheduleReattach(feedId, "attach timeout");
+        }, APP_CONFIG.call.remoteFeedAttachTimeoutMs);
+        this.pendingAttachTimers.set(feedId, attachTimer);
         let remoteHandle = null;
         this.janus.attach({
             plugin: "janus.plugin.videoroom",
@@ -1555,15 +1606,36 @@ class RemoteFeedManager {
             success: (h) => {
                 remoteHandle = h;
                 this.pendingFeedAttach.delete(feedId);
+                this.clearAttachTimer(feedId);
                 this.feeds.set(feedId, h);
+                this.clearFeedStartTimer(feedId);
+                const startTimer = window.setTimeout(() => {
+                    if (!this.feeds.has(feedId))
+                        return;
+                    Logger.error(`Remote feed ${feedId} did not start media in time`);
+                    this.removeFeed(feedId, true, true);
+                }, APP_CONFIG.call.remoteFeedStartTimeoutMs);
+                this.feedStartTimers.set(feedId, startTimer);
                 h.send({ message: { request: "join", room: this.roomId, ptype: "subscriber", feed: feedId, private_id: this.privateId } });
             },
             error: (e) => {
                 this.pendingFeedAttach.delete(feedId);
-                Logger.setStatus("Remote attach error: " + JSON.stringify(e));
+                this.clearAttachTimer(feedId);
+                Logger.error("Remote attach error: " + JSON.stringify(e));
+                this.scheduleReattach(feedId, `attach error: ${JSON.stringify(e)}`);
             },
             onmessage: (msg, jsep) => {
+                const data = msg?.plugindata?.data;
+                if (data?.error || data?.error_code) {
+                    Logger.error(`Remote feed ${feedId} plugin error: ${JSON.stringify(data)}`);
+                }
+                if (msg?.janus === "hangup") {
+                    Logger.error(`Remote feed ${feedId} hangup: ${msg?.reason || "unknown"}`);
+                    this.removeFeed(feedId, true, true);
+                    return;
+                }
                 if (jsep) {
+                    this.clearFeedStartTimer(feedId);
                     // TODO: If Janus internals change and webrtcStuff.pc is unavailable, pass the subscriber PC from a Janus plugin callback here.
                     const pc = remoteHandle?.webrtcStuff?.pc;
                     if (pc) {
@@ -1573,13 +1645,19 @@ class RemoteFeedManager {
                         jsep,
                         tracks: [{ type: "audio", capture: false, recv: true }, { type: "video", capture: false, recv: true }],
                         success: (ans) => remoteHandle.send({ message: { request: "start", room: this.roomId }, jsep: ans }),
-                        error: (e) => Logger.setStatus("Remote answer error: " + JSON.stringify(e))
+                        error: (e) => {
+                            Logger.error("Remote answer error: " + JSON.stringify(e));
+                            this.removeFeed(feedId, true, true);
+                        }
                     });
                 }
             },
             onlocaltrack: () => { },
             onremotetrack: (track, _mid, on) => {
                 this.observer?.onRemoteTrackSignal?.(feedId, track, on);
+                if (on) {
+                    this.clearFeedStartTimer(feedId);
+                }
                 let byId = this.feedTracks.get(feedId);
                 if (!byId) {
                     byId = new Map();
@@ -1604,11 +1682,17 @@ class RemoteFeedManager {
                 byId.set(track.id, track);
                 this.media.setRemoteTrack(this.remoteVideo, track);
             },
-            oncleanup: () => this.removeFeed(feedId, false, true)
+            oncleanup: () => {
+                this.clearFeedStartTimer(feedId);
+                this.removeFeed(feedId, false, true);
+            }
         });
     }
     removeFeed(id, detach = true, notify = true) {
         this.pendingFeedAttach.delete(id);
+        this.clearAttachTimer(id);
+        this.clearFeedStartTimer(id);
+        this.clearRetryTimer(id);
         let removed = false;
         const h = this.feeds.get(id);
         if (h) {
@@ -1632,7 +1716,14 @@ class RemoteFeedManager {
         }
     }
     cleanupAll() {
-        Array.from(this.feeds.keys()).forEach(id => this.removeFeed(id, true, true));
+        this.pendingAttachTimers.forEach(t => window.clearTimeout(t));
+        this.pendingAttachTimers.clear();
+        this.feedStartTimers.forEach(t => window.clearTimeout(t));
+        this.feedStartTimers.clear();
+        this.retryTimers.forEach(t => window.clearTimeout(t));
+        this.retryTimers.clear();
+        this.pendingFeedAttach.clear();
+        Array.from(this.feeds.keys()).forEach(id => this.removeFeed(id, true, false));
         this.media.clearRemote(this.remoteVideo);
     }
 }
@@ -1667,6 +1758,9 @@ class CallController {
         this.peerRetryAttempt = 0;
         this.isLeaving = false;
         this.suppressPublisherCleanupRetry = false;
+        this.suppressRemoteFeedRetry = false;
+        this.participantSyncRequestTimer = null;
+        this.participantSyncRequestSeq = 0;
         this.gateway = new JanusGateway();
         this.media = new MediaManager();
         this.vbManager = new VirtualBackgroundManager();
@@ -1712,7 +1806,14 @@ class CallController {
             this.retryTimer = null;
         }
     }
+    clearParticipantSyncRequestTimer() {
+        if (this.participantSyncRequestTimer !== null) {
+            window.clearTimeout(this.participantSyncRequestTimer);
+            this.participantSyncRequestTimer = null;
+        }
+    }
     cleanupForRetry() {
+        this.suppressRemoteFeedRetry = true;
         this.remoteFeeds?.cleanupAll();
         this.remoteFeeds = null;
         this.plugin = null;
@@ -1763,7 +1864,7 @@ class CallController {
             else {
                 Logger.setStatus("TURN/peer connection failed. Retry limit reached.");
             }
-            Logger.user(`[retry] ${kind} retries exhausted. reason=${reason}`);
+            Logger.error(`[retry] ${kind} retries exhausted. reason=${reason}`);
             return;
         }
         if (kind === "server") {
@@ -1774,7 +1875,7 @@ class CallController {
             this.connectionEngine.onPeerRetrying(attempt, maxAttempts);
             Logger.setStatus(`TURN/peer connection failed. Retrying (${attempt}/${maxAttempts})...`);
         }
-        Logger.user(`[retry] ${kind} scheduled (${attempt}/${maxAttempts}). reason=${reason}`);
+        Logger.warn(`[retry] ${kind} scheduled (${attempt}/${maxAttempts}). reason=${reason}`);
         this.cleanupForRetry();
         this.retryTimer = window.setTimeout(() => {
             this.retryTimer = null;
@@ -1870,6 +1971,7 @@ class CallController {
     onPublisherMessage(cfg, msg, jsep) {
         if (msg?.janus === "hangup") {
             const reason = String(msg?.reason || "Peer hangup");
+            Logger.error(`Publisher hangup: ${reason}`);
             if (reason.toLowerCase().includes("ice")) {
                 this.schedulePeerRetry(`Publisher hangup: ${reason}`);
             }
@@ -1878,14 +1980,16 @@ class CallController {
         const data = this.getVideoRoomData(msg);
         const event = data["videoroom"];
         const errorCode = data["error_code"];
+        if (data?.error || errorCode) {
+            Logger.error(`Publisher plugin error: ${JSON.stringify(data)}`);
+        }
         if (event === "event" && errorCode === 426) {
             if (!this.roomCreateAttempted) {
                 this.roomCreateAttempted = true;
                 this.sendCreateRoom(cfg);
             }
             else {
-                this.connectionEngine.onFailed();
-                this.leave();
+                this.scheduleServerRetry("Room join failed with 426 after create attempt");
             }
             return;
         }
@@ -1895,6 +1999,7 @@ class CallController {
             this.serverRetryAttempt = 0;
             this.peerRetryAttempt = 0;
             this.clearRetryTimer();
+            this.suppressRemoteFeedRetry = false;
             this.connectionEngine.onJoinedRoom();
             const myId = data["id"];
             this.privateId = data["private_id"];
@@ -1910,7 +2015,12 @@ class CallController {
                 },
                 onRemoteFeedCleanup: (feedId) => {
                     this.connectionEngine.unregisterSubscriber(feedId);
+                    if (this.isLeaving || this.suppressRemoteFeedRetry) {
+                        Logger.warn(`Remote feed ${feedId} cleanup ignored (controlled cleanup)`);
+                        return;
+                    }
                     if (this.remoteFeeds && this.roster.has(feedId) && feedId !== this.selfId) {
+                        Logger.warn(`Remote feed ${feedId} cleaned up. Scheduling re-subscribe.`);
                         window.setTimeout(() => {
                             this.remoteFeeds?.addFeed(feedId);
                         }, APP_CONFIG.call.remoteFeedRetryDelayMs);
@@ -1976,6 +2086,8 @@ class CallController {
             window.clearInterval(this.participantSyncTimer);
             this.participantSyncTimer = null;
         }
+        this.clearParticipantSyncRequestTimer();
+        this.participantSyncRequestSeq = 0;
         this.participantSyncInFlight = false;
         this.lastParticipantSyncAt = 0;
     }
@@ -1989,9 +2101,21 @@ class CallController {
             return;
         this.lastParticipantSyncAt = now;
         this.participantSyncInFlight = true;
+        const requestSeq = ++this.participantSyncRequestSeq;
+        this.clearParticipantSyncRequestTimer();
+        this.participantSyncRequestTimer = window.setTimeout(() => {
+            if (!this.participantSyncInFlight || requestSeq !== this.participantSyncRequestSeq)
+                return;
+            this.participantSyncInFlight = false;
+            this.participantSyncRequestTimer = null;
+            Logger.error(`listparticipants timeout (request=${requestSeq}, room=${cfg.roomId})`);
+        }, APP_CONFIG.call.participantSyncRequestTimeoutMs);
         this.plugin.send({
             message: { request: "listparticipants", room: cfg.roomId },
             success: (res) => {
+                if (requestSeq !== this.participantSyncRequestSeq)
+                    return;
+                this.clearParticipantSyncRequestTimer();
                 const data = this.getVideoRoomData(res);
                 const participants = Array.isArray(data?.participants) ? data.participants : [];
                 const serverIds = new Set();
@@ -2017,8 +2141,12 @@ class CallController {
                 this.publishParticipants(cfg);
                 this.participantSyncInFlight = false;
             },
-            error: () => {
+            error: (e) => {
+                if (requestSeq !== this.participantSyncRequestSeq)
+                    return;
+                this.clearParticipantSyncRequestTimer();
                 this.participantSyncInFlight = false;
+                Logger.error(`listparticipants error (request=${requestSeq}): ${JSON.stringify(e)}`);
             }
         });
     }
@@ -2222,6 +2350,7 @@ class CallController {
     leave() {
         try {
             this.isLeaving = true;
+            this.suppressRemoteFeedRetry = true;
             this.clearRetryTimer();
             this.serverRetryAttempt = 0;
             this.peerRetryAttempt = 0;
@@ -2359,6 +2488,7 @@ class UIController {
         this.remoteQ = document.getElementById("remoteQuality");
         this.localQD = document.getElementById("localQualityDetails");
         this.remoteQD = document.getElementById("remoteQualityDetails");
+        this.callMeta = document.getElementById("callMeta");
         this.audioMuted = false;
         this.videoMuted = false;
         this.ended = false;
@@ -2545,6 +2675,7 @@ class UIController {
         this.lastCfg = cfg;
         this.recording = false;
         this.updateRecordUI();
+        this.renderCallMeta(cfg);
         Logger.setStatus(`Joining... roomId=${cfg.roomId}, name=${cfg.display}`);
         this.ended = false;
         this.endedOverlay.style.display = "none";
@@ -2554,6 +2685,11 @@ class UIController {
         this.btnLeave.title = "End";
         this.controller.join(cfg);
         this.bridge.emit({ type: "CALL_STARTED" });
+    }
+    renderCallMeta(cfg) {
+        if (!this.callMeta)
+            return;
+        this.callMeta.textContent = `RoomId: ${cfg.roomId} | Name: ${cfg.display}`;
     }
     reconnect() {
         if (!this.lastCfg)
@@ -2644,7 +2780,14 @@ class UIController {
         const tracks = ms.getVideoTracks();
         if (!tracks || tracks.length === 0)
             return false;
-        return tracks.some(t => t.readyState === "live" && t.enabled !== false);
+        const hasLiveTrack = tracks.some(t => t.readyState === "live" && t.enabled !== false);
+        if (!hasLiveTrack)
+            return false;
+        const hasDecodedFrame = this.remoteVideoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            this.remoteVideoEl.videoWidth > 0 &&
+            this.remoteVideoEl.videoHeight > 0;
+        const hasStartedPlayback = this.remoteVideoEl.currentTime > 0.05;
+        return hasDecodedFrame && hasStartedPlayback;
     }
     renderRemoteFallback() {
         if (!this.remoteFallback)

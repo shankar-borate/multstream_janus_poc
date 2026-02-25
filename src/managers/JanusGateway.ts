@@ -39,7 +39,7 @@ class JanusGateway {
       success: ok,
       error: (e: any) => {
         Logger.setStatus("Janus error: " + JSON.stringify(e));
-        Logger.user("Janus session create error: " + JSON.stringify(e));
+        Logger.error("Janus session create error: " + JSON.stringify(e));
         onError?.(e);
       },
       destroyed: () => {
@@ -74,7 +74,7 @@ class JanusGateway {
       },
       error: (e: any) => {
         Logger.setStatus("Attach error: " + JSON.stringify(e));
-        Logger.user("Attach error: " + JSON.stringify(e));
+        Logger.error("Attach error: " + JSON.stringify(e));
         onError?.(e);
       },
       onmessage: (msg: any, jsep: any) => {

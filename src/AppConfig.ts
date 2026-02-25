@@ -134,7 +134,10 @@ const APP_CONFIG = {
     reconnectDelayMs: 800,
     participantSyncIntervalMs: 8000,
     participantSyncCooldownMs: 2500,
+    participantSyncRequestTimeoutMs: 7000,
     remoteFeedRetryDelayMs: 1200,
+    remoteFeedAttachTimeoutMs: 8000,
+    remoteFeedStartTimeoutMs: 12000,
     retry: {
       serverMaxAttempts: 3,
       serverDelayMs: 3000,

@@ -36,6 +36,9 @@ class CallController {
   private peerRetryAttempt = 0;
   private isLeaving = false;
   private suppressPublisherCleanupRetry = false;
+  private suppressRemoteFeedRetry = false;
+  private participantSyncRequestTimer: number | null = null;
+  private participantSyncRequestSeq = 0;
 
   constructor(
     private bus: EventBus,
@@ -97,7 +100,15 @@ class CallController {
     }
   }
 
+  private clearParticipantSyncRequestTimer() {
+    if (this.participantSyncRequestTimer !== null) {
+      window.clearTimeout(this.participantSyncRequestTimer);
+      this.participantSyncRequestTimer = null;
+    }
+  }
+
   private cleanupForRetry() {
+    this.suppressRemoteFeedRetry = true;
     this.remoteFeeds?.cleanupAll();
     this.remoteFeeds = null;
     this.plugin = null;
@@ -151,7 +162,7 @@ class CallController {
       } else {
         Logger.setStatus("TURN/peer connection failed. Retry limit reached.");
       }
-      Logger.user(`[retry] ${kind} retries exhausted. reason=${reason}`);
+      Logger.error(`[retry] ${kind} retries exhausted. reason=${reason}`);
       return;
     }
 
@@ -162,7 +173,7 @@ class CallController {
       this.connectionEngine.onPeerRetrying(attempt, maxAttempts);
       Logger.setStatus(`TURN/peer connection failed. Retrying (${attempt}/${maxAttempts})...`);
     }
-    Logger.user(`[retry] ${kind} scheduled (${attempt}/${maxAttempts}). reason=${reason}`);
+    Logger.warn(`[retry] ${kind} scheduled (${attempt}/${maxAttempts}). reason=${reason}`);
 
     this.cleanupForRetry();
     this.retryTimer = window.setTimeout(() => {
@@ -276,6 +287,7 @@ class CallController {
   private onPublisherMessage(cfg: JoinConfig, msg: any, jsep: any) {
     if (msg?.janus === "hangup") {
       const reason = String(msg?.reason || "Peer hangup");
+      Logger.error(`Publisher hangup: ${reason}`);
       if (reason.toLowerCase().includes("ice")) {
         this.schedulePeerRetry(`Publisher hangup: ${reason}`);
       }
@@ -285,14 +297,16 @@ class CallController {
     const data = this.getVideoRoomData(msg);
     const event = data["videoroom"];
     const errorCode = data["error_code"];
+    if (data?.error || errorCode) {
+      Logger.error(`Publisher plugin error: ${JSON.stringify(data)}`);
+    }
 
     if (event === "event" && errorCode === 426) {
       if (!this.roomCreateAttempted) {
         this.roomCreateAttempted = true;
         this.sendCreateRoom(cfg);
       } else {
-        this.connectionEngine.onFailed();
-        this.leave();
+        this.scheduleServerRetry("Room join failed with 426 after create attempt");
       }
       return;
     }
@@ -304,6 +318,7 @@ class CallController {
       this.serverRetryAttempt = 0;
       this.peerRetryAttempt = 0;
       this.clearRetryTimer();
+      this.suppressRemoteFeedRetry = false;
       this.connectionEngine.onJoinedRoom();
 
       const myId = data["id"];
@@ -329,7 +344,12 @@ class CallController {
           },
           onRemoteFeedCleanup: (feedId: number) => {
             this.connectionEngine.unregisterSubscriber(feedId);
+            if (this.isLeaving || this.suppressRemoteFeedRetry) {
+              Logger.warn(`Remote feed ${feedId} cleanup ignored (controlled cleanup)`);
+              return;
+            }
             if (this.remoteFeeds && this.roster.has(feedId) && feedId !== this.selfId) {
+              Logger.warn(`Remote feed ${feedId} cleaned up. Scheduling re-subscribe.`);
               window.setTimeout(() => {
                 this.remoteFeeds?.addFeed(feedId);
               }, APP_CONFIG.call.remoteFeedRetryDelayMs);
@@ -407,6 +427,8 @@ class CallController {
       window.clearInterval(this.participantSyncTimer);
       this.participantSyncTimer = null;
     }
+    this.clearParticipantSyncRequestTimer();
+    this.participantSyncRequestSeq = 0;
     this.participantSyncInFlight = false;
     this.lastParticipantSyncAt = 0;
   }
@@ -419,10 +441,20 @@ class CallController {
     if (now - this.lastParticipantSyncAt < APP_CONFIG.call.participantSyncCooldownMs) return;
     this.lastParticipantSyncAt = now;
     this.participantSyncInFlight = true;
+    const requestSeq = ++this.participantSyncRequestSeq;
+    this.clearParticipantSyncRequestTimer();
+    this.participantSyncRequestTimer = window.setTimeout(() => {
+      if (!this.participantSyncInFlight || requestSeq !== this.participantSyncRequestSeq) return;
+      this.participantSyncInFlight = false;
+      this.participantSyncRequestTimer = null;
+      Logger.error(`listparticipants timeout (request=${requestSeq}, room=${cfg.roomId})`);
+    }, APP_CONFIG.call.participantSyncRequestTimeoutMs);
 
     this.plugin.send({
       message: { request: "listparticipants", room: cfg.roomId },
       success: (res: any) => {
+        if (requestSeq !== this.participantSyncRequestSeq) return;
+        this.clearParticipantSyncRequestTimer();
         const data = this.getVideoRoomData(res);
         const participants = Array.isArray(data?.participants) ? data.participants : [];
         const serverIds = new Set<number>();
@@ -449,8 +481,11 @@ class CallController {
         this.publishParticipants(cfg);
         this.participantSyncInFlight = false;
       },
-      error: () => {
+      error: (e: any) => {
+        if (requestSeq !== this.participantSyncRequestSeq) return;
+        this.clearParticipantSyncRequestTimer();
         this.participantSyncInFlight = false;
+        Logger.error(`listparticipants error (request=${requestSeq}): ${JSON.stringify(e)}`);
       }
     });
   }
@@ -679,6 +714,7 @@ class CallController {
 
     try {
       this.isLeaving = true;
+      this.suppressRemoteFeedRetry = true;
       this.clearRetryTimer();
       this.serverRetryAttempt = 0;
       this.peerRetryAttempt = 0;

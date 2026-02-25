@@ -21,7 +21,9 @@ class MediaManager {
     });
     ms.addTrack(track);
     video.srcObject = ms;
-    video.play().catch(()=>{});
+    video.play().catch((e:any)=>{
+      Logger.error("Remote video play failed", e);
+    });
   }
 
   removeRemoteTrack(video: HTMLVideoElement, track: MediaStreamTrack){

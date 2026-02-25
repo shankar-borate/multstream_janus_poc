@@ -181,7 +181,6 @@ class ConnectionStatusEngine {
     if (on) {
       const now = Date.now();
       this.remoteTrackSeenAt = now;
-      this.remoteMediaFlowAt = now;
       this.remoteNegotiationReady = true;
       tracks.add(track.id);
       if (!this.subscriberBytes.has(feedId)) {
@@ -406,7 +405,9 @@ class ConnectionStatusEngine {
     }
     this.disconnectedSince = null;
 
-    if ((connectedIce && (mediaFlowing || liveRemoteVideo)) || (hasRemote && liveRemoteVideo)) {
+    // Consider call connected only when remote media bytes are actually flowing.
+    // Track signals alone can be false positives on weak/reloading networks.
+    if ((connectedIce && mediaFlowing) || (hasRemote && mediaFlowing)) {
       this.transition("CONNECTED");
       return;
     }
