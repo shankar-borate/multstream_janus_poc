@@ -3,6 +3,14 @@ class Logger {
 
   private static userName = "User";
   private static remoteName = "Remote";
+  private static level: LogLevel = APP_CONFIG.logging.level;
+  private static readonly LEVEL_PRIORITY: Record<LogLevel, number> = {
+    debug: 10,
+    info: 20,
+    warn: 30,
+    error: 40,
+    silent: 50
+  };
 
   constructor(
     private statusEl?: HTMLElement,
@@ -21,6 +29,14 @@ class Logger {
     Logger.remote(`Remote name set`);
   }
 
+  static setLevel(level: LogLevel): void {
+    Logger.level = level;
+  }
+
+  private static canLog(level: LogLevel): boolean {
+    return Logger.LEVEL_PRIORITY[level] >= Logger.LEVEL_PRIORITY[Logger.level];
+  }
+
   // Instance UI updates
   setStatus(msg: string): void {
     if (this.statusEl) this.statusEl.textContent = msg;
@@ -33,26 +49,46 @@ class Logger {
   }
 
   // Static UI updates (backward compatible)
-  static setStatus(msg: string): void { Logger.instance?.setStatus(msg); Logger.user(msg); }
-  static setInfo(msg: string): void { Logger.instance?.setInfo(msg); Logger.flow(msg); }
+  static setStatus(msg: string): void {
+    if (Logger.instance) {
+      Logger.instance.setStatus(msg);
+      return;
+    }
+    Logger.user(msg);
+  }
+  static setInfo(msg: string): void {
+    if (Logger.instance) {
+      Logger.instance.setInfo(msg);
+      return;
+    }
+    Logger.flow(msg);
+  }
   static info(msg: string): void { Logger.setInfo(msg); }
-  static warn(msg: string): void { console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#f59e0b;font-weight:bold"); }
+  static warn(msg: string): void {
+    if (!Logger.canLog("warn")) return;
+    console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#f59e0b;font-weight:bold");
+  }
   static error(msg: string, err?: unknown): void {
+    if (!Logger.canLog("error")) return;
     console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#fb7185;font-weight:bold");
     if (err) console.error(err);
   }
 
   // Friendly narration logs
   static user(msg: string, data?: any): void {
+    if (!Logger.canLog("info")) return;
     console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#22c55e;font-weight:bold", data ?? "");
   }
   static remote(msg: string, data?: any): void {
+    if (!Logger.canLog("info")) return;
     console.log(`%cRemote(${Logger.remoteName}): ${msg}`, "color:#60a5fa;font-weight:bold", data ?? "");
   }
   static net(msg: string, data?: any): void {
+    if (!Logger.canLog("debug")) return;
     console.log(`%cNet: ${msg}`, "color:#f59e0b;font-weight:bold", data ?? "");
   }
   static flow(msg: string, data?: any): void {
+    if (!Logger.canLog("debug")) return;
     console.log(`%cFlow: ${msg}`, "color:#a78bfa;font-weight:bold", data ?? "");
   }
 }

@@ -27,6 +27,9 @@ class CallController {
   private currentRecordingId: string | null = null;
   private currentRoomId: number | null = null;
   private participantSyncTimer: number | null = null;
+  private participantSyncInFlight = false;
+  private lastParticipantSyncAt = 0;
+  private connectionEngine: ConnectionStatusEngine;
 
   constructor(
     private bus: EventBus,
@@ -36,24 +39,39 @@ class CallController {
     this.gateway = new JanusGateway();
     this.media = new MediaManager();
     this.vbManager = new VirtualBackgroundManager();
+    this.connectionEngine = new ConnectionStatusEngine((status: ConnectionStatusView) => {
+      this.bus.emit("connection-status", status);
+    });
+    this.bus.emit("connection-status", this.connectionEngine.getStatus());
     this.gateway.init();
   }
 
   async join(cfg: JoinConfig) {
+    this.connectionEngine.onJoinStarted();
+    try {
+      const server = UrlConfig.getVcxServer().server;
+      const clientId = UrlConfig.getVcxServer().client_id;
 
-    const server = UrlConfig.getVcxServer().server;
-    const clientId = UrlConfig.getVcxServer().client_id;
+      const http: HttpClient = new HttpClient(server, clientId);
+      const ims = new ImsClient(http);
+      const payload = await ims.getMediaConstraints();
 
-    const http: HttpClient = new HttpClient(server, clientId);
-    const ims = new ImsClient(http);
-    const payload = await ims.getMediaConstraints();
-
-    this.gateway.createSession(
-      cfg.server,
-      payload.PC_CONFIG?.iceServers,
-      () => this.attachAndEnsureRoomThenJoin(cfg),
-      () => Logger.setStatus("Session destroyed")
-    );
+      this.gateway.createSession(
+        cfg.server,
+        payload.PC_CONFIG?.iceServers,
+        () => {
+          this.connectionEngine.onSessionReady();
+          this.attachAndEnsureRoomThenJoin(cfg);
+        },
+        () => {
+          this.connectionEngine.onSessionDestroyed();
+          Logger.setStatus("Session destroyed");
+        }
+      );
+    } catch (e: any) {
+      this.connectionEngine.onFailed();
+      Logger.setStatus("Join error: " + (e?.message || e));
+    }
   }
 
   private attachAndEnsureRoomThenJoin(cfg: JoinConfig) {
@@ -72,6 +90,7 @@ class CallController {
         this.recording = false;
         this.currentRecordingId = null;
         this.bus.emit("recording-changed", false);
+        this.connectionEngine.onPublisherAttached();
 
         Logger.setStatus("Plugin attached. Checking room...");
         this.ensureRoomThenJoin(cfg);
@@ -82,7 +101,10 @@ class CallController {
           this.media.setLocalTrack(this.localVideo, track);
         }
       },
-      () => Logger.setStatus("Publisher cleanup")
+      () => {
+        this.connectionEngine.onReconnect();
+        Logger.setStatus("Publisher cleanup");
+      }
     );
   }
 
@@ -110,7 +132,10 @@ class CallController {
           this.sendCreateRoom(cfg);
         }
       },
-      error: () => this.leave()
+      error: () => {
+        this.connectionEngine.onFailed();
+        this.leave();
+      }
     });
   }
 
@@ -134,14 +159,17 @@ class CallController {
       message: {
         request: "create",
         room: cfg.roomId,
-        publishers: 10,
+        publishers: APP_CONFIG.videoroom.maxPublishers,
         description: `Room ${cfg.roomId}`
       },
       success: () => {
         Logger.setStatus("Room created. Joining...");
         this.sendPublisherJoin(cfg);
       },
-      error: () => this.leave()
+      error: () => {
+        this.connectionEngine.onFailed();
+        this.leave();
+      }
     });
   }
 
@@ -156,6 +184,7 @@ class CallController {
         this.roomCreateAttempted = true;
         this.sendCreateRoom(cfg);
       } else {
+        this.connectionEngine.onFailed();
         this.leave();
       }
       return;
@@ -165,6 +194,7 @@ class CallController {
 
       this.joinedRoom = true;
       this.currentRoomId = cfg.roomId;
+      this.connectionEngine.onJoinedRoom();
 
       const myId = data["id"];
       this.privateId = data["private_id"];
@@ -179,7 +209,18 @@ class CallController {
         this.privateId!,
         this.gateway.getOpaqueId(),
         this.media,
-        this.remoteVideo
+        this.remoteVideo,
+        {
+          onSubscriberPcReady: (feedId: number, pc: RTCPeerConnection) => {
+            this.connectionEngine.registerSubscriberPc(feedId, pc);
+          },
+          onRemoteTrackSignal: (feedId: number, track: MediaStreamTrack, on: boolean) => {
+            this.connectionEngine.onRemoteTrackSignal(feedId, track, on);
+          },
+          onRemoteFeedCleanup: (feedId: number) => {
+            this.connectionEngine.unregisterSubscriber(feedId);
+          }
+        }
       );
 
       this.publish();
@@ -205,6 +246,7 @@ class CallController {
     }
 
     if (event === "destroyed") {
+      this.connectionEngine.onFailed();
       this.leave();
       return;
     }
@@ -220,11 +262,22 @@ class CallController {
 
       this.roster.add(feedId);
       if (this.remoteFeeds && feedId !== this.selfId) {
+        this.connectionEngine.onSubscriberRequested();
         this.remoteFeeds.addFeed(feedId);
       }
     });
 
-    this.bus.emit("participants", this.roster.snapshot(cfg.roomId));
+    this.publishParticipants(cfg);
+  }
+
+  private publishParticipants(cfg: JoinConfig) {
+    const snapshot = this.roster.snapshot(cfg.roomId);
+    this.bus.emit("participants", snapshot);
+
+    const remoteCount = snapshot.participantIds
+      .filter((id: number) => id !== this.selfId)
+      .length;
+    this.connectionEngine.setRemoteParticipantCount(remoteCount);
   }
 
   private startParticipantSync(cfg: JoinConfig) {
@@ -232,7 +285,7 @@ class CallController {
     this.syncParticipantsFromServer(cfg);
     this.participantSyncTimer = window.setInterval(() => {
       this.syncParticipantsFromServer(cfg);
-    }, 4000);
+    }, APP_CONFIG.call.participantSyncIntervalMs);
   }
 
   private stopParticipantSync() {
@@ -240,10 +293,18 @@ class CallController {
       window.clearInterval(this.participantSyncTimer);
       this.participantSyncTimer = null;
     }
+    this.participantSyncInFlight = false;
+    this.lastParticipantSyncAt = 0;
   }
 
   private syncParticipantsFromServer(cfg: JoinConfig) {
     if (!this.plugin || !this.joinedRoom) return;
+    if (this.participantSyncInFlight) return;
+
+    const now = Date.now();
+    if (now - this.lastParticipantSyncAt < APP_CONFIG.call.participantSyncCooldownMs) return;
+    this.lastParticipantSyncAt = now;
+    this.participantSyncInFlight = true;
 
     this.plugin.send({
       message: { request: "listparticipants", room: cfg.roomId },
@@ -271,7 +332,11 @@ class CallController {
           }
         });
 
-        this.bus.emit("participants", this.roster.snapshot(cfg.roomId));
+        this.publishParticipants(cfg);
+        this.participantSyncInFlight = false;
+      },
+      error: () => {
+        this.participantSyncInFlight = false;
       }
     });
   }
@@ -280,12 +345,43 @@ class CallController {
     if (feedId === this.selfId) return;
     this.roster.remove(feedId);
     this.remoteFeeds?.removeFeed(feedId);
-    this.bus.emit("participants", this.roster.snapshot(cfg.roomId));
+    this.publishParticipants(cfg);
   }
 
   // =====================================
   // MEDIA
   // =====================================
+
+  private getVideoConfig(): VcxVideoConfig {
+    const cfg = UrlConfig.getVcxVideoConfig();
+    const bitrateBps = Number.isFinite(cfg.bitrate_bps) ? Math.floor(cfg.bitrate_bps) : APP_CONFIG.media.bitrateBps;
+    const maxFramerate = Number.isFinite(cfg.max_framerate) ? Math.floor(cfg.max_framerate) : APP_CONFIG.media.maxFramerate;
+
+    return {
+      bitrate_bps: Math.max(APP_CONFIG.media.minBitrateBps, Math.min(APP_CONFIG.media.maxBitrateBps, bitrateBps)),
+      bitrate_cap: cfg.bitrate_cap !== false,
+      max_framerate: Math.max(APP_CONFIG.media.minFramerate, Math.min(APP_CONFIG.media.maxFramerateCap, maxFramerate))
+    };
+  }
+
+  private tuneVideoSenderBitrate(pc: RTCPeerConnection, bitrateBps: number, maxFramerate: number) {
+    try {
+      const sender = pc.getSenders().find(s => s.track?.kind === "video");
+      if (!sender || typeof sender.getParameters !== "function" || typeof sender.setParameters !== "function") return;
+
+      const p = sender.getParameters();
+      const encodings = (p.encodings && p.encodings.length > 0) ? p.encodings : [{} as RTCRtpEncodingParameters];
+      encodings[0].maxBitrate = bitrateBps;
+      encodings[0].maxFramerate = maxFramerate;
+      p.encodings = encodings;
+
+      sender.setParameters(p).catch((e: any) => {
+        console.log("VCX_SET_PARAMETERS_ERROR=", e?.message || e);
+      });
+    } catch (e: any) {
+      console.log("VCX_SET_PARAMETERS_HOOK_ERROR=", e?.message || e);
+    }
+  }
 
   // public publish() {
   //   this.plugin.createOffer({
@@ -307,6 +403,7 @@ class CallController {
       Logger.setStatus("Publish ignored: plugin not ready");
       return;
     }
+    const videoCfg = this.getVideoConfig();
 
     this.plugin.createOffer({
       tracks: [
@@ -317,9 +414,12 @@ class CallController {
       success: (jsep: any) => {
         // ✅ Point #4: capture and emit connectivity info from RTCPeerConnection
         try {
+          // TODO: If Janus internals change and webrtcStuff.pc is unavailable, bind the publisher PC from Janus plugin callbacks.
           const pc: RTCPeerConnection | undefined = this.plugin?.webrtcStuff?.pc;
 
           if (pc) {
+            this.connectionEngine.registerPublisherPc(pc);
+            this.tuneVideoSenderBitrate(pc, videoCfg.bitrate_bps, videoCfg.max_framerate);
             const emit = () => {
               const payload = {
                 ice: pc.iceConnectionState,
@@ -372,12 +472,19 @@ class CallController {
 
         // ✅ normal Janus publish configure
         this.plugin.send({
-          message: { request: "configure", audio: true, video: true },
+          message: {
+            request: "configure",
+            audio: true,
+            video: true,
+            bitrate: videoCfg.bitrate_bps,
+            bitrate_cap: videoCfg.bitrate_cap
+          },
           jsep,
         });
       },
 
       error: (e: any) => {
+        this.connectionEngine.onReconnect();
         Logger.setStatus("Offer error: " + JSON.stringify(e));
         console.log("VCX_OFFER_ERROR=", e);
       },
@@ -389,6 +496,10 @@ class CallController {
     const m = this.plugin.isAudioMuted();
     m ? this.plugin.unmuteAudio() : this.plugin.muteAudio();
     this.bus.emit("mute-changed", !m);
+  }
+
+  markRetrying() {
+    this.connectionEngine.onReconnect();
   }
 
   stopVideo() {
@@ -471,6 +582,7 @@ class CallController {
 
       this.bus.emit("recording-changed", false);
       this.bus.emit("joined", false);
+      this.connectionEngine.onLeft();
 
       this.media.clearLocal(this.localVideo);
       this.media.clearRemote(this.remoteVideo);

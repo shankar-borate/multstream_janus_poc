@@ -10,9 +10,16 @@ class UrlConfig {
   }
   static getVcxServer():VcxServer {
     return {
-      server:"https://localhost.beta.videocx.io",
-      client_id:"101"
-    }
+      server: APP_CONFIG.vcx.imsBaseUrl,
+      client_id: APP_CONFIG.vcx.clientId
+    };
+  }
+  static getVcxVideoConfig():VcxVideoConfig {
+    return {
+      bitrate_bps: APP_CONFIG.media.bitrateBps,
+      bitrate_cap: APP_CONFIG.media.bitrateCap,
+      max_framerate: APP_CONFIG.media.maxFramerate
+    };
   }
   static buildJoinConfig():JoinConfig{
     const roomIdRaw = this.getString("roomId", "");
@@ -26,9 +33,9 @@ class UrlConfig {
       throw new Error("Invalid query param: roomId must be a number");
     }
     return {
-      server: this.getString("server","wss://localhost.beta.videocx.io/mstream_janus"),
+      server: this.getString("server", APP_CONFIG.vcx.defaultJanusServer),
       roomId,
-      display: this.getString("name","Guest")
+      display: this.getString("name", APP_CONFIG.vcx.defaultDisplayName)
     };
   }
 }

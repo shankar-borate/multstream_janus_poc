@@ -8,7 +8,8 @@ class RemoteFeedManager {
     private privateId:number,
     private opaqueId:string,
     private media:MediaManager,
-    private remoteVideo:HTMLVideoElement
+    private remoteVideo:HTMLVideoElement,
+    private observer?: RemoteFeedObserver
   ){}
 
   addFeed(feedId:number){
@@ -26,6 +27,11 @@ class RemoteFeedManager {
       error:(e:any)=>Logger.setStatus("Remote attach error: "+JSON.stringify(e)),
       onmessage:(msg:any,jsep:any)=>{
         if(jsep){
+          // TODO: If Janus internals change and webrtcStuff.pc is unavailable, pass the subscriber PC from a Janus plugin callback here.
+          const pc = remoteHandle?.webrtcStuff?.pc as RTCPeerConnection | undefined;
+          if(pc){
+            this.observer?.onSubscriberPcReady?.(feedId, pc);
+          }
           remoteHandle.createAnswer({
             jsep,
             tracks:[{type:"audio",capture:false,recv:true},{type:"video",capture:false,recv:true}],
@@ -36,6 +42,7 @@ class RemoteFeedManager {
       },
       onlocaltrack:()=>{},
       onremotetrack:(track:MediaStreamTrack,_mid:string,on:boolean)=>{
+        this.observer?.onRemoteTrackSignal?.(feedId, track, on);
         let byId = this.feedTracks.get(feedId);
         if(!byId){
           byId = new Map<string, MediaStreamTrack>();
@@ -62,28 +69,35 @@ class RemoteFeedManager {
         byId.set(track.id, track);
         this.media.setRemoteTrack(this.remoteVideo, track);
       },
-      oncleanup:()=>this.removeFeed(feedId, false)
+      oncleanup:()=>this.removeFeed(feedId, false, true)
     });
   }
 
-  removeFeed(id:number, detach:boolean = true){
+  removeFeed(id:number, detach:boolean = true, notify:boolean = true){
+    let removed = false;
     const h = this.feeds.get(id);
     if(h){
       if(detach){
         try{h.detach();}catch{}
       }
       this.feeds.delete(id);
+      removed = true;
     }
 
     const tracks = this.feedTracks.get(id);
     if(tracks){
       tracks.forEach(t => this.media.removeRemoteTrack(this.remoteVideo, t));
       this.feedTracks.delete(id);
+      removed = true;
+    }
+
+    if(removed && notify){
+      this.observer?.onRemoteFeedCleanup?.(id);
     }
   }
 
   cleanupAll(){
-    Array.from(this.feeds.keys()).forEach(id => this.removeFeed(id, true));
+    Array.from(this.feeds.keys()).forEach(id => this.removeFeed(id, true, true));
     this.media.clearRemote(this.remoteVideo);
   }
 }

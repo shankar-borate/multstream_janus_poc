@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <title>VideoCX Janus UI (TS) - Virtual BG + Screen Share</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="icon" href="data:," />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@3.4.1/dist/css/bootstrap.min.css"/>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
   <style>
@@ -22,8 +23,9 @@
     .ctrl-btn.purple{ background:#7c3aed; }
     .ctrl-btn:disabled{ opacity:.45; cursor:not-allowed; }
     .reconnect { position:absolute; left:18px; bottom:18px; padding:10px 14px; border-radius:6px; border:0; background:#f97316; color:white; font-weight:600; box-shadow:0 6px 18px rgba(0,0,0,.12); z-index:10; }
-    .status { position:absolute; top:18px; right:18px; background:rgba(255,255,255,.9); border-radius:8px; padding:10px 12px; max-width:46vw; box-shadow:0 6px 18px rgba(0,0,0,.08); z-index:10; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace;}
-    .status .small{ color:#6b7280; font-size:12px; margin-top:4px; }
+    .status{position:absolute;top:14px;left:50%;transform:translateX(-50%);width:min(84vw,860px);background:rgba(255,255,255,.94);color:#111827;border:1px solid rgba(148,163,184,.38);border-radius:12px;padding:12px 14px;box-shadow:0 12px 24px rgba(15,23,42,.14);backdrop-filter:blur(6px);z-index:20;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;text-align:center}
+    .status #statusLine{font-size:14px;font-weight:700;line-height:1.25}
+    .status .small{color:#4b5563;font-size:12px;margin-top:5px;line-height:1.3}
   
     .overlay-label{position:absolute;left:10px;top:10px;background:rgba(0,0,0,.55);color:#fff;padding:4px 8px;border-radius:999px;font-size:12px;z-index:6}
     .local-overlay{position:absolute;left:8px;top:8px}
@@ -32,6 +34,16 @@
     .quality-badge{position:absolute;right:8px;top:8px;background:rgba(0,0,0,.55);color:#fff;padding:4px 8px;border-radius:8px;font-size:12px;z-index:6;cursor:pointer}
     .quality-details{position:absolute;right:8px;top:34px;background:rgba(0,0,0,.7);color:#fff;padding:6px 8px;border-radius:8px;font-size:11px;display:none;z-index:6;max-width:260px}
     .quality-details.show{display:block}
+    #remoteQuality,#remoteQualityDetails{display:none !important}
+    .remote-fallback{position:absolute;inset:0;display:none;align-items:center;justify-content:center;z-index:3;pointer-events:none;background:linear-gradient(180deg, rgba(243,244,246,.68), rgba(229,231,235,.82))}
+    .remote-fallback-card{width:min(280px,58vw);height:min(180px,34vh);border-radius:16px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:rgba(255,255,255,.82);border:1px solid rgba(148,163,184,.32);box-shadow:0 16px 32px rgba(15,23,42,.12)}
+    .remote-fallback-icon{width:64px;height:64px;border-radius:999px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(156,163,175,.54);background:rgba(243,244,246,.95)}
+    .remote-fallback-icon i{font-size:28px;color:#6b7280}
+    .remote-fallback-dots{display:flex;gap:7px;margin-top:4px}
+    .remote-fallback-dots span{width:8px;height:8px;border-radius:999px;background:#9ca3af;animation:fallbackPulse 1.25s ease-in-out infinite}
+    .remote-fallback-dots span:nth-child(2){animation-delay:.15s}
+    .remote-fallback-dots span:nth-child(3){animation-delay:.3s}
+    @keyframes fallbackPulse{0%,100%{opacity:.28;transform:translateY(0)}50%{opacity:1;transform:translateY(-2px)}}
 
   </style>
 </head>
@@ -58,6 +70,12 @@
 
   <div class="remote-wrap">
     <video id="remoteVideo" autoplay playsinline></video>
+    <div id="remoteFallback" class="remote-fallback">
+      <div class="remote-fallback-card">
+        <div class="remote-fallback-icon"><i class="fa-solid fa-video-slash"></i></div>
+        <div class="remote-fallback-dots"><span></span><span></span><span></span></div>
+      </div>
+    </div>
     <div id="remoteOverlay" class="overlay-label remote-overlay">Remote</div>
     <div id="remoteQuality" class="quality-badge">Remote: -</div>
     <div id="remoteQualityDetails" class="quality-details">-</div>

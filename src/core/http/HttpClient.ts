@@ -15,7 +15,7 @@ class HttpClient {
   constructor(
     private readonly baseUrl: string,
     private readonly clientId: string,
-    private readonly defaultTimeoutMs = 15000
+    private readonly defaultTimeoutMs = APP_CONFIG.http.defaultTimeoutMs
   ) {}
 
   async request<T>(req: Omit<HttpRequest, "url"> & { path: string }): Promise<HttpResponse<T>> {

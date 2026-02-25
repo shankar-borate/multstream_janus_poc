@@ -7,15 +7,24 @@ class NetworkQualityManager {
     this.stop();
     this.timer = window.setInterval(()=>{
       // synthetic values (replace with getStats wiring)
-      const rtt = Math.round(30 + Math.random()*200);
-      const jitter = Math.round(3 + Math.random()*60);
-      const loss = Math.round(Math.random()*8);
-      const bitrate = Math.round(150 + Math.random()*1000);
+      const rtt = Math.round(
+        APP_CONFIG.networkQuality.simulated.rttBaseMs +
+        Math.random() * APP_CONFIG.networkQuality.simulated.rttSpreadMs
+      );
+      const jitter = Math.round(
+        APP_CONFIG.networkQuality.simulated.jitterBaseMs +
+        Math.random() * APP_CONFIG.networkQuality.simulated.jitterSpreadMs
+      );
+      const loss = Math.round(Math.random() * APP_CONFIG.networkQuality.simulated.lossMaxPct);
+      const bitrate = Math.round(
+        APP_CONFIG.networkQuality.simulated.bitrateBaseKbps +
+        Math.random() * APP_CONFIG.networkQuality.simulated.bitrateSpreadKbps
+      );
 
       const q = this.calc(rtt,jitter,loss,bitrate);
       const details = `rtt=${rtt}ms jitter=${jitter}ms loss=${loss}% bitrate=${bitrate}kbps`;
       cb(q,q,details);
-    }, 3000);
+    }, APP_CONFIG.networkQuality.sampleIntervalMs);
   }
 
   stop(){
@@ -24,10 +33,10 @@ class NetworkQualityManager {
 
   private calc(rtt:number,jitter:number,loss:number,bitrate:number):NetQuality{
     let score=0;
-    if(rtt<120) score++;
-    if(jitter<30) score++;
-    if(loss<2) score++;
-    if(bitrate>400) score++;
+    if(rtt<APP_CONFIG.networkQuality.thresholds.rttGoodMs) score++;
+    if(jitter<APP_CONFIG.networkQuality.thresholds.jitterGoodMs) score++;
+    if(loss<APP_CONFIG.networkQuality.thresholds.lossGoodPct) score++;
+    if(bitrate>APP_CONFIG.networkQuality.thresholds.bitrateGoodKbps) score++;
     if(score>=4) return "High";
     if(score>=2) return "Medium";
     return "Low";

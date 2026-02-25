@@ -1,4 +1,83 @@
 "use strict";
+const APP_CONFIG = {
+    logging: {
+        level: "warn"
+    },
+    janus: {
+        initDebug: "warn"
+    },
+    http: {
+        defaultTimeoutMs: 15000
+    },
+    vcx: {
+        imsBaseUrl: "https://localhost.beta.videocx.io",
+        clientId: "101",
+        defaultJanusServer: "wss://localhost.beta.videocx.io/mstream_janus",
+        defaultDisplayName: "Guest"
+    },
+    videoroom: {
+        maxPublishers: 10
+    },
+    media: {
+        bitrateBps: 250000,
+        bitrateCap: true,
+        maxFramerate: 15,
+        minBitrateBps: 32000,
+        maxBitrateBps: 1500000,
+        minFramerate: 5,
+        maxFramerateCap: 30
+    },
+    call: {
+        reconnectDelayMs: 800,
+        participantSyncIntervalMs: 8000,
+        participantSyncCooldownMs: 2500
+    },
+    ui: {
+        remoteFallbackRefreshMs: 2500
+    },
+    recording: {
+        folderPath: "/opt/efs-janus-app/dev/VideoRecDownloads",
+        autoStartParticipantThreshold: 2
+    },
+    networkQuality: {
+        sampleIntervalMs: 3000,
+        simulated: {
+            rttBaseMs: 30,
+            rttSpreadMs: 200,
+            jitterBaseMs: 3,
+            jitterSpreadMs: 60,
+            lossMaxPct: 8,
+            bitrateBaseKbps: 150,
+            bitrateSpreadKbps: 1000
+        },
+        thresholds: {
+            rttGoodMs: 120,
+            jitterGoodMs: 30,
+            lossGoodPct: 2,
+            bitrateGoodKbps: 400
+        }
+    },
+    connectionStatus: {
+        tickIntervalMs: 1000,
+        rotationMinMs: 6000,
+        rotationMaxMs: 8000,
+        statsIntervalConnectingMs: 3000,
+        statsIntervalConnectedMs: 7000,
+        highRttMs: 1200,
+        highPacketLossThreshold: 0.08,
+        packetLossMinPackets: 100,
+        bytesGrowthThreshold: 1024,
+        mediaFlowRecentMs: 9000,
+        relayRecentMs: 12000,
+        candidateSwitchRecentMs: 12000,
+        localSlowCheckingMs: 12000,
+        localSlowStatsMs: 6000,
+        relayEarlyJoinWindowMs: 25000,
+        relayEarlyThresholdMs: 8000,
+        remoteSlowWaitMs: 10000,
+        disconnectedRetryMs: 4000
+    }
+};
 class Logger {
     constructor(statusEl, infoEl) {
         this.statusEl = statusEl;
@@ -13,6 +92,12 @@ class Logger {
         Logger.remoteName = (name && name.trim()) ? name.trim() : "Remote";
         Logger.remote(`Remote name set`);
     }
+    static setLevel(level) {
+        Logger.level = level;
+    }
+    static canLog(level) {
+        return Logger.LEVEL_PRIORITY[level] >= Logger.LEVEL_PRIORITY[Logger.level];
+    }
     // Instance UI updates
     setStatus(msg) {
         if (this.statusEl)
@@ -26,32 +111,66 @@ class Logger {
             Logger.flow(msg);
     }
     // Static UI updates (backward compatible)
-    static setStatus(msg) { Logger.instance?.setStatus(msg); Logger.user(msg); }
-    static setInfo(msg) { Logger.instance?.setInfo(msg); Logger.flow(msg); }
+    static setStatus(msg) {
+        if (Logger.instance) {
+            Logger.instance.setStatus(msg);
+            return;
+        }
+        Logger.user(msg);
+    }
+    static setInfo(msg) {
+        if (Logger.instance) {
+            Logger.instance.setInfo(msg);
+            return;
+        }
+        Logger.flow(msg);
+    }
     static info(msg) { Logger.setInfo(msg); }
-    static warn(msg) { console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#f59e0b;font-weight:bold"); }
+    static warn(msg) {
+        if (!Logger.canLog("warn"))
+            return;
+        console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#f59e0b;font-weight:bold");
+    }
     static error(msg, err) {
+        if (!Logger.canLog("error"))
+            return;
         console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#fb7185;font-weight:bold");
         if (err)
             console.error(err);
     }
     // Friendly narration logs
     static user(msg, data) {
+        if (!Logger.canLog("info"))
+            return;
         console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#22c55e;font-weight:bold", data ?? "");
     }
     static remote(msg, data) {
+        if (!Logger.canLog("info"))
+            return;
         console.log(`%cRemote(${Logger.remoteName}): ${msg}`, "color:#60a5fa;font-weight:bold", data ?? "");
     }
     static net(msg, data) {
+        if (!Logger.canLog("debug"))
+            return;
         console.log(`%cNet: ${msg}`, "color:#f59e0b;font-weight:bold", data ?? "");
     }
     static flow(msg, data) {
+        if (!Logger.canLog("debug"))
+            return;
         console.log(`%cFlow: ${msg}`, "color:#a78bfa;font-weight:bold", data ?? "");
     }
 }
 Logger.instance = null;
 Logger.userName = "User";
 Logger.remoteName = "Remote";
+Logger.level = APP_CONFIG.logging.level;
+Logger.LEVEL_PRIORITY = {
+    debug: 10,
+    info: 20,
+    warn: 30,
+    error: 40,
+    silent: 50
+};
 class EventBus {
     constructor() {
         this.handlers = new Map();
@@ -85,8 +204,15 @@ class UrlConfig {
     }
     static getVcxServer() {
         return {
-            server: "https://localhost.beta.videocx.io",
-            client_id: "101"
+            server: APP_CONFIG.vcx.imsBaseUrl,
+            client_id: APP_CONFIG.vcx.clientId
+        };
+    }
+    static getVcxVideoConfig() {
+        return {
+            bitrate_bps: APP_CONFIG.media.bitrateBps,
+            bitrate_cap: APP_CONFIG.media.bitrateCap,
+            max_framerate: APP_CONFIG.media.maxFramerate
         };
     }
     static buildJoinConfig() {
@@ -101,12 +227,172 @@ class UrlConfig {
             throw new Error("Invalid query param: roomId must be a number");
         }
         return {
-            server: this.getString("server", "wss://localhost.beta.videocx.io/mstream_janus"),
+            server: this.getString("server", APP_CONFIG.vcx.defaultJanusServer),
             roomId,
-            display: this.getString("name", "Guest")
+            display: this.getString("name", APP_CONFIG.vcx.defaultDisplayName)
         };
     }
 }
+const CONNECTION_ROTATION_MIN_MS = APP_CONFIG.connectionStatus.rotationMinMs;
+const CONNECTION_ROTATION_MAX_MS = APP_CONFIG.connectionStatus.rotationMaxMs;
+const CONNECTION_MESSAGES = {
+    INIT: {
+        owner: "SYSTEM",
+        severity: "info",
+        rotate: false,
+        primary: ["Getting ready..."],
+        secondary: ["Preparing secure call setup."]
+    },
+    MEDIA_PREP: {
+        owner: "SYSTEM",
+        severity: "info",
+        rotate: true,
+        primary: [
+            "Preparing camera and microphone...",
+            "Setting up your media devices...",
+            "Finalizing media permissions..."
+        ],
+        secondary: [
+            "This usually takes a few seconds.",
+            "Checking browser access to media devices.",
+            "Almost done."
+        ]
+    },
+    NEGOTIATING: {
+        owner: "SYSTEM",
+        severity: "info",
+        rotate: true,
+        primary: [
+            "Connecting your call...",
+            "Negotiating secure media channels...",
+            "Establishing video path..."
+        ],
+        secondary: [
+            "Please stay on this screen.",
+            "Optimizing signaling and media routing.",
+            "Finalizing connection details."
+        ]
+    },
+    WAITING_REMOTE: {
+        owner: "SYSTEM",
+        severity: "info",
+        rotate: true,
+        primary: [
+            "Waiting for the other participant...",
+            "Call is ready. Waiting for participant...",
+            "Standing by for remote join..."
+        ],
+        secondary: [
+            "You are connected and ready.",
+            "Share the link if they have not joined yet.",
+            "This screen will update automatically."
+        ]
+    },
+    NETWORK_CHECK: {
+        owner: "SYSTEM",
+        severity: "info",
+        rotate: true,
+        primary: [
+            "Checking network quality...",
+            "Validating connection stability...",
+            "Testing the best connection route..."
+        ],
+        secondary: [
+            "This helps us keep video stable.",
+            "Trying to improve call reliability.",
+            "Connection is still being tuned."
+        ]
+    },
+    LOCAL_SLOW: {
+        owner: "LOCAL",
+        severity: "warn",
+        rotate: true,
+        primary: [
+            "Your network seems slow...",
+            "Your connection is unstable right now...",
+            "Your upload speed is lower than required..."
+        ],
+        secondary: [
+            "Try a stronger network or pause heavy downloads.",
+            "The other participant may see delayed video.",
+            "We are still trying to stabilize your connection."
+        ]
+    },
+    REMOTE_SLOW: {
+        owner: "REMOTE",
+        severity: "warn",
+        rotate: true,
+        primary: [
+            "Other participant's network is slow...",
+            "Waiting for the other participant's browser to send video...",
+            "Still waiting for the participant's network..."
+        ],
+        secondary: [
+            "Your connection looks active. Waiting on remote media.",
+            "The other side may need a few more seconds.",
+            "Their video should appear once their network stabilizes."
+        ]
+    },
+    OPTIMIZING: {
+        owner: "SYSTEM",
+        severity: "info",
+        rotate: true,
+        primary: [
+            "Switching to a more stable connection...",
+            "Optimizing route for better call quality...",
+            "Adjusting network path for stability..."
+        ],
+        secondary: [
+            "You may notice a brief quality change.",
+            "Using fallback routing to keep call alive.",
+            "Stability should improve shortly."
+        ]
+    },
+    CONNECTED: {
+        owner: "NEUTRAL",
+        severity: "info",
+        rotate: false,
+        primary: ["Connected"],
+        secondary: ["Video and audio are live."]
+    },
+    DEGRADED: {
+        owner: "SYSTEM",
+        severity: "warn",
+        rotate: true,
+        primary: [
+            "Connection is unstable...",
+            "Call quality is temporarily degraded...",
+            "Recovering from network instability..."
+        ],
+        secondary: [
+            "Trying to restore stable media.",
+            "You may see temporary freezes.",
+            "Automatic recovery is in progress."
+        ]
+    },
+    RETRYING: {
+        owner: "SYSTEM",
+        severity: "warn",
+        rotate: true,
+        primary: [
+            "Reconnecting call...",
+            "Trying to recover connection...",
+            "Attempting a new network route..."
+        ],
+        secondary: [
+            "Please stay on this screen.",
+            "This usually resolves in a few seconds.",
+            "Session recovery is in progress."
+        ]
+    },
+    FAILED: {
+        owner: "SYSTEM",
+        severity: "error",
+        rotate: false,
+        primary: ["Connection failed"],
+        secondary: ["Please reconnect to continue the call."]
+    }
+};
 class ParentBridge {
     emit(evt) {
         try {
@@ -137,7 +423,7 @@ class ParentBridge {
  * - Normalizes errors to HttpError
  */
 class HttpClient {
-    constructor(baseUrl, clientId, defaultTimeoutMs = 15000) {
+    constructor(baseUrl, clientId, defaultTimeoutMs = APP_CONFIG.http.defaultTimeoutMs) {
         this.baseUrl = baseUrl;
         this.clientId = clientId;
         this.defaultTimeoutMs = defaultTimeoutMs;
@@ -481,14 +767,17 @@ class NetworkQualityManager {
         this.stop();
         this.timer = window.setInterval(() => {
             // synthetic values (replace with getStats wiring)
-            const rtt = Math.round(30 + Math.random() * 200);
-            const jitter = Math.round(3 + Math.random() * 60);
-            const loss = Math.round(Math.random() * 8);
-            const bitrate = Math.round(150 + Math.random() * 1000);
+            const rtt = Math.round(APP_CONFIG.networkQuality.simulated.rttBaseMs +
+                Math.random() * APP_CONFIG.networkQuality.simulated.rttSpreadMs);
+            const jitter = Math.round(APP_CONFIG.networkQuality.simulated.jitterBaseMs +
+                Math.random() * APP_CONFIG.networkQuality.simulated.jitterSpreadMs);
+            const loss = Math.round(Math.random() * APP_CONFIG.networkQuality.simulated.lossMaxPct);
+            const bitrate = Math.round(APP_CONFIG.networkQuality.simulated.bitrateBaseKbps +
+                Math.random() * APP_CONFIG.networkQuality.simulated.bitrateSpreadKbps);
             const q = this.calc(rtt, jitter, loss, bitrate);
             const details = `rtt=${rtt}ms jitter=${jitter}ms loss=${loss}% bitrate=${bitrate}kbps`;
             cb(q, q, details);
-        }, 3000);
+        }, APP_CONFIG.networkQuality.sampleIntervalMs);
     }
     stop() {
         if (this.timer != null) {
@@ -498,19 +787,487 @@ class NetworkQualityManager {
     }
     calc(rtt, jitter, loss, bitrate) {
         let score = 0;
-        if (rtt < 120)
+        if (rtt < APP_CONFIG.networkQuality.thresholds.rttGoodMs)
             score++;
-        if (jitter < 30)
+        if (jitter < APP_CONFIG.networkQuality.thresholds.jitterGoodMs)
             score++;
-        if (loss < 2)
+        if (loss < APP_CONFIG.networkQuality.thresholds.lossGoodPct)
             score++;
-        if (bitrate > 400)
+        if (bitrate > APP_CONFIG.networkQuality.thresholds.bitrateGoodKbps)
             score++;
         if (score >= 4)
             return "High";
         if (score >= 2)
             return "Medium";
         return "Low";
+    }
+}
+class ConnectionStatusEngine {
+    constructor(onUpdate) {
+        this.onUpdate = onUpdate;
+        this.status = {
+            owner: "SYSTEM",
+            primaryText: "",
+            secondaryText: "",
+            severity: "info",
+            state: "INIT"
+        };
+        this.joinedAt = null;
+        this.joinStartedAt = null;
+        this.remoteParticipantCount = 0;
+        this.remoteParticipantSeenAt = null;
+        this.remoteTrackSeenAt = null;
+        this.remoteMediaFlowAt = null;
+        this.checkingSince = null;
+        this.localPoorSince = null;
+        this.relayDetectedAt = null;
+        this.candidateSwitchAt = null;
+        this.disconnectedSince = null;
+        this.remoteNegotiationReady = false;
+        this.selectedPairId = null;
+        this.remoteVideoTracksByFeed = new Map();
+        this.publisherPc = null;
+        this.subscriberPcs = new Map();
+        this.subscriberBytes = new Map();
+        this.subscriberIceStates = new Map();
+        this.subscriberConnStates = new Map();
+        this.localIceState = "new";
+        this.localConnState = "new";
+        this.localSignalingState = "stable";
+        this.rotationCursor = 0;
+        this.nextRotationAt = 0;
+        this.tickTimer = null;
+        this.statsBusy = false;
+        this.lastStatsSampleAt = 0;
+        this.lastPublishedKey = "";
+        this.boundPcs = new WeakSet();
+        this.transition("INIT", true);
+        this.tickTimer = window.setInterval(() => this.tick(), APP_CONFIG.connectionStatus.tickIntervalMs);
+    }
+    getStatus() {
+        return this.status;
+    }
+    destroy() {
+        if (this.tickTimer !== null) {
+            window.clearInterval(this.tickTimer);
+            this.tickTimer = null;
+        }
+    }
+    onJoinStarted() {
+        this.joinStartedAt = Date.now();
+        this.joinedAt = null;
+        this.remoteParticipantCount = 0;
+        this.remoteParticipantSeenAt = null;
+        this.remoteTrackSeenAt = null;
+        this.remoteMediaFlowAt = null;
+        this.checkingSince = null;
+        this.localPoorSince = null;
+        this.relayDetectedAt = null;
+        this.candidateSwitchAt = null;
+        this.disconnectedSince = null;
+        this.remoteNegotiationReady = false;
+        this.selectedPairId = null;
+        this.subscriberPcs.clear();
+        this.subscriberBytes.clear();
+        this.subscriberIceStates.clear();
+        this.subscriberConnStates.clear();
+        this.remoteVideoTracksByFeed.clear();
+        this.transition("MEDIA_PREP", true);
+    }
+    onSessionReady() {
+        this.transition("NEGOTIATING", true);
+    }
+    onPublisherAttached() {
+        this.transition("NEGOTIATING", true);
+    }
+    onJoinedRoom() {
+        this.joinedAt = Date.now();
+        this.transition("NEGOTIATING", true);
+    }
+    onReconnect() {
+        this.transition("RETRYING", true);
+    }
+    onFailed() {
+        this.transition("FAILED", true);
+    }
+    onLeft() {
+        this.transition("INIT", true);
+    }
+    setRemoteParticipantCount(count) {
+        const now = Date.now();
+        this.remoteParticipantCount = Math.max(0, count);
+        if (this.remoteParticipantCount > 0 && this.remoteParticipantSeenAt === null) {
+            this.remoteParticipantSeenAt = now;
+        }
+        if (this.remoteParticipantCount === 0) {
+            this.remoteParticipantSeenAt = null;
+            this.remoteTrackSeenAt = null;
+            this.remoteMediaFlowAt = null;
+            this.remoteNegotiationReady = false;
+            this.subscriberPcs.clear();
+            this.subscriberBytes.clear();
+            this.subscriberIceStates.clear();
+            this.subscriberConnStates.clear();
+            this.remoteVideoTracksByFeed.clear();
+        }
+        this.evaluate();
+    }
+    registerPublisherPc(pc) {
+        this.publisherPc = pc;
+        this.bindPcEvents(pc, "publisher");
+        this.evaluate();
+    }
+    registerSubscriberPc(feedId, pc) {
+        this.subscriberPcs.set(feedId, pc);
+        this.remoteNegotiationReady = true;
+        this.bindPcEvents(pc, "subscriber", feedId);
+        this.evaluate();
+    }
+    onSubscriberRequested() {
+        this.remoteNegotiationReady = true;
+        this.evaluate();
+    }
+    unregisterSubscriber(feedId) {
+        this.subscriberPcs.delete(feedId);
+        this.subscriberBytes.delete(feedId);
+        this.subscriberIceStates.delete(feedId);
+        this.subscriberConnStates.delete(feedId);
+        this.remoteVideoTracksByFeed.delete(feedId);
+        this.evaluate();
+    }
+    onRemoteTrackSignal(feedId, track, on) {
+        if (track.kind !== "video")
+            return;
+        let tracks = this.remoteVideoTracksByFeed.get(feedId);
+        if (!tracks) {
+            tracks = new Set();
+            this.remoteVideoTracksByFeed.set(feedId, tracks);
+        }
+        if (on) {
+            const now = Date.now();
+            this.remoteTrackSeenAt = now;
+            this.remoteMediaFlowAt = now;
+            this.remoteNegotiationReady = true;
+            tracks.add(track.id);
+            if (!this.subscriberBytes.has(feedId)) {
+                this.subscriberBytes.set(feedId, { bytes: 0, growthAt: now });
+            }
+        }
+        else {
+            tracks.delete(track.id);
+            if (tracks.size === 0) {
+                this.remoteVideoTracksByFeed.delete(feedId);
+            }
+        }
+        this.evaluate();
+    }
+    hasLiveRemoteVideoTrack() {
+        for (const tracks of this.remoteVideoTracksByFeed.values()) {
+            if (tracks.size > 0)
+                return true;
+        }
+        return false;
+    }
+    onSessionDestroyed() {
+        this.transition("RETRYING", true);
+    }
+    bindPcEvents(pc, role, feedId) {
+        if (this.boundPcs.has(pc))
+            return;
+        this.boundPcs.add(pc);
+        pc.addEventListener("iceconnectionstatechange", () => {
+            if (role === "publisher" && this.publisherPc === pc) {
+                this.localIceState = pc.iceConnectionState;
+                if (pc.iceConnectionState === "checking") {
+                    if (this.checkingSince === null)
+                        this.checkingSince = Date.now();
+                }
+                else {
+                    this.checkingSince = null;
+                }
+            }
+            if (role === "subscriber" && typeof feedId === "number") {
+                this.subscriberIceStates.set(feedId, pc.iceConnectionState);
+            }
+            this.evaluate();
+        });
+        pc.addEventListener("connectionstatechange", () => {
+            if (role === "publisher" && this.publisherPc === pc) {
+                this.localConnState = (pc.connectionState || "new");
+            }
+            if (role === "subscriber" && typeof feedId === "number") {
+                this.subscriberConnStates.set(feedId, (pc.connectionState || "new"));
+                this.remoteNegotiationReady = true;
+            }
+            this.evaluate();
+        });
+        pc.addEventListener("signalingstatechange", () => {
+            if (role === "publisher" && this.publisherPc === pc) {
+                this.localSignalingState = pc.signalingState;
+            }
+            this.evaluate();
+        });
+    }
+    tick() {
+        this.sampleStats();
+        this.evaluate();
+        this.maybeRotate();
+    }
+    async sampleStats() {
+        if (this.statsBusy)
+            return;
+        const now = Date.now();
+        const intervalMs = this.status.state === "CONNECTED"
+            ? APP_CONFIG.connectionStatus.statsIntervalConnectedMs
+            : APP_CONFIG.connectionStatus.statsIntervalConnectingMs;
+        if (now - this.lastStatsSampleAt < intervalMs)
+            return;
+        this.statsBusy = true;
+        this.lastStatsSampleAt = now;
+        try {
+            const jobs = [];
+            if (this.publisherPc) {
+                jobs.push(this.publisherPc.getStats()
+                    .then((report) => this.consumePublisherStats(report))
+                    .catch(() => { }));
+            }
+            for (const [feedId, pc] of this.subscriberPcs.entries()) {
+                jobs.push(pc.getStats()
+                    .then((report) => this.consumeSubscriberStats(feedId, report))
+                    .catch(() => { }));
+            }
+            await Promise.all(jobs);
+        }
+        catch { }
+        this.statsBusy = false;
+    }
+    consumePublisherStats(report) {
+        const now = Date.now();
+        const byId = new Map();
+        report.forEach((s) => byId.set(s.id, s));
+        let selectedPairId = null;
+        let rttMs = 0;
+        let highLoss = false;
+        let relayInUse = false;
+        report.forEach((s) => {
+            const anyS = s;
+            if (s.type === "transport" && typeof anyS.selectedCandidatePairId === "string") {
+                selectedPairId = anyS.selectedCandidatePairId;
+            }
+            if (s.type === "candidate-pair") {
+                const isSelected = !!anyS.selected || !!anyS.nominated;
+                if (!selectedPairId && isSelected)
+                    selectedPairId = s.id;
+                if (selectedPairId === s.id && typeof anyS.currentRoundTripTime === "number") {
+                    rttMs = Math.max(rttMs, anyS.currentRoundTripTime * 1000);
+                }
+            }
+            if (s.type === "remote-inbound-rtp" && (anyS.kind === "video" || anyS.mediaType === "video")) {
+                const fractionLost = typeof anyS.fractionLost === "number" ? anyS.fractionLost : 0;
+                if (fractionLost >= APP_CONFIG.connectionStatus.highPacketLossThreshold)
+                    highLoss = true;
+            }
+            if (s.type === "inbound-rtp" && (anyS.kind === "video" || anyS.mediaType === "video")) {
+                const packetsReceived = typeof anyS.packetsReceived === "number" ? anyS.packetsReceived : 0;
+                const packetsLost = typeof anyS.packetsLost === "number" ? anyS.packetsLost : 0;
+                const total = packetsReceived + packetsLost;
+                if (total > APP_CONFIG.connectionStatus.packetLossMinPackets &&
+                    packetsLost / total >= APP_CONFIG.connectionStatus.highPacketLossThreshold)
+                    highLoss = true;
+            }
+        });
+        if (selectedPairId) {
+            if (this.selectedPairId && this.selectedPairId !== selectedPairId) {
+                this.candidateSwitchAt = now;
+            }
+            this.selectedPairId = selectedPairId;
+            const pair = byId.get(selectedPairId);
+            if (pair) {
+                const local = byId.get(pair.localCandidateId);
+                const remote = byId.get(pair.remoteCandidateId);
+                relayInUse = local?.candidateType === "relay" || remote?.candidateType === "relay";
+            }
+        }
+        if (relayInUse) {
+            if (this.relayDetectedAt === null)
+                this.relayDetectedAt = now;
+        }
+        else {
+            this.relayDetectedAt = null;
+        }
+        const highRtt = rttMs >= APP_CONFIG.connectionStatus.highRttMs;
+        if (highRtt || highLoss) {
+            if (this.localPoorSince === null)
+                this.localPoorSince = now;
+        }
+        else {
+            this.localPoorSince = null;
+        }
+    }
+    consumeSubscriberStats(feedId, report) {
+        const now = Date.now();
+        let bytes = 0;
+        report.forEach((s) => {
+            const anyS = s;
+            if (s.type === "inbound-rtp" && (anyS.kind === "video" || anyS.mediaType === "video") && typeof anyS.bytesReceived === "number") {
+                bytes += anyS.bytesReceived;
+            }
+        });
+        const prev = this.subscriberBytes.get(feedId) || { bytes: 0, growthAt: null };
+        if (bytes > prev.bytes + APP_CONFIG.connectionStatus.bytesGrowthThreshold) {
+            prev.growthAt = now;
+            this.remoteMediaFlowAt = now;
+        }
+        prev.bytes = bytes;
+        this.subscriberBytes.set(feedId, prev);
+    }
+    evaluate() {
+        const now = Date.now();
+        const hasRemote = this.remoteParticipantCount > 0;
+        const localConnected = this.localIceState === "connected" || this.localIceState === "completed";
+        const remoteConnected = Array.from(this.subscriberIceStates.values()).some(s => s === "connected" || s === "completed");
+        const connectedIce = localConnected || remoteConnected;
+        const mediaFlowing = this.remoteMediaFlowAt !== null && now - this.remoteMediaFlowAt <= APP_CONFIG.connectionStatus.mediaFlowRecentMs;
+        const liveRemoteVideo = this.hasLiveRemoteVideoTrack();
+        const anyFailed = this.localIceState === "failed" ||
+            this.localConnState === "failed" ||
+            Array.from(this.subscriberIceStates.values()).some(s => s === "failed") ||
+            Array.from(this.subscriberConnStates.values()).some(s => s === "failed");
+        if (anyFailed) {
+            this.transition("FAILED");
+            return;
+        }
+        const anyDisconnected = this.localConnState === "disconnected" ||
+            Array.from(this.subscriberConnStates.values()).some(s => s === "disconnected");
+        if (anyDisconnected) {
+            if (this.disconnectedSince === null)
+                this.disconnectedSince = now;
+            if (now - this.disconnectedSince > APP_CONFIG.connectionStatus.disconnectedRetryMs) {
+                this.transition("RETRYING");
+            }
+            else {
+                this.transition("DEGRADED");
+            }
+            return;
+        }
+        this.disconnectedSince = null;
+        if ((connectedIce && (mediaFlowing || liveRemoteVideo)) || (hasRemote && liveRemoteVideo)) {
+            this.transition("CONNECTED");
+            return;
+        }
+        const relayRecent = this.relayDetectedAt !== null &&
+            now - this.relayDetectedAt <= APP_CONFIG.connectionStatus.relayRecentMs;
+        const candidateSwitchRecent = this.candidateSwitchAt !== null &&
+            now - this.candidateSwitchAt <= APP_CONFIG.connectionStatus.candidateSwitchRecentMs;
+        // LOCAL_SLOW rule set:
+        // 1) ICE checking for >12s
+        // 2) high RTT or packet loss from RTCPeerConnection stats
+        // 3) relay-only path detected early in call setup
+        const localSlowByChecking = this.checkingSince !== null &&
+            now - this.checkingSince > APP_CONFIG.connectionStatus.localSlowCheckingMs;
+        const localSlowByStats = this.localPoorSince !== null &&
+            now - this.localPoorSince > APP_CONFIG.connectionStatus.localSlowStatsMs;
+        const localSlowByRelayEarly = this.relayDetectedAt !== null &&
+            this.joinStartedAt !== null &&
+            now - this.joinStartedAt <= APP_CONFIG.connectionStatus.relayEarlyJoinWindowMs &&
+            now - this.relayDetectedAt > APP_CONFIG.connectionStatus.relayEarlyThresholdMs &&
+            !connectedIce;
+        if (localSlowByChecking || localSlowByStats || localSlowByRelayEarly) {
+            this.transition("LOCAL_SLOW");
+            return;
+        }
+        // REMOTE_SLOW rule set:
+        // remote participant exists and negotiation started, but no remote video track
+        // or bytesReceived stays near zero for >10s.
+        const remoteWaitAnchor = this.remoteParticipantSeenAt ?? this.joinedAt;
+        const remoteWaitingTooLong = remoteWaitAnchor !== null &&
+            now - remoteWaitAnchor > APP_CONFIG.connectionStatus.remoteSlowWaitMs;
+        const remoteFlowStalled = hasRemote && this.remoteNegotiationReady && !liveRemoteVideo && remoteWaitingTooLong;
+        if (remoteFlowStalled) {
+            this.transition("REMOTE_SLOW");
+            return;
+        }
+        // OPTIMIZING rule set:
+        // relay usage or candidate switches indicate active path optimization.
+        if (relayRecent || candidateSwitchRecent) {
+            this.transition("OPTIMIZING");
+            return;
+        }
+        if (!hasRemote) {
+            this.transition(this.joinedAt ? "WAITING_REMOTE" : "NEGOTIATING");
+            return;
+        }
+        if (!connectedIce) {
+            this.transition("NETWORK_CHECK");
+            return;
+        }
+        if (this.localSignalingState !== "stable") {
+            this.transition("NEGOTIATING");
+            return;
+        }
+        this.transition("NEGOTIATING");
+    }
+    maybeRotate() {
+        const cfg = CONNECTION_MESSAGES[this.status.state];
+        if (!cfg.rotate)
+            return;
+        const now = Date.now();
+        if (now < this.nextRotationAt)
+            return;
+        this.rotationCursor++;
+        this.publishCurrent(true);
+    }
+    transition(next, forcePublish = false) {
+        if (this.status.state !== next) {
+            this.status.state = next;
+            this.rotationCursor = 0;
+            this.publishCurrent(true);
+            return;
+        }
+        if (forcePublish) {
+            this.publishCurrent(true);
+        }
+    }
+    publishCurrent(force = false) {
+        const cfg = CONNECTION_MESSAGES[this.status.state];
+        const p = cfg.primary;
+        const s = cfg.secondary;
+        const primary = p[this.rotationCursor % p.length] || "";
+        const secondary = s[this.rotationCursor % s.length] || "";
+        const nextStatus = {
+            owner: cfg.owner,
+            severity: cfg.severity,
+            primaryText: primary,
+            secondaryText: secondary,
+            state: this.status.state
+        };
+        if (cfg.rotate) {
+            const span = CONNECTION_ROTATION_MAX_MS - CONNECTION_ROTATION_MIN_MS;
+            this.nextRotationAt = Date.now() + CONNECTION_ROTATION_MIN_MS + Math.floor(Math.random() * (span + 1));
+        }
+        else {
+            this.nextRotationAt = Number.MAX_SAFE_INTEGER;
+        }
+        const key = `${nextStatus.state}|${nextStatus.owner}|${nextStatus.primaryText}|${nextStatus.secondaryText}`;
+        if (!force && this.lastPublishedKey === key)
+            return;
+        this.status = nextStatus;
+        if (this.lastPublishedKey !== key) {
+            this.logOwnership(nextStatus);
+            this.lastPublishedKey = key;
+        }
+        this.onUpdate?.(nextStatus);
+    }
+    logOwnership(status) {
+        const prefix = status.owner === "LOCAL"
+            ? "User"
+            : status.owner === "REMOTE"
+                ? "Remote"
+                : "System";
+        const msg = status.secondaryText
+            ? `${status.primaryText} ${status.secondaryText}`
+            : status.primaryText;
+        console.log(`${prefix}: ${msg}`);
     }
 }
 class JanusGateway {
@@ -521,7 +1278,7 @@ class JanusGateway {
     }
     init() {
         Janus.init({
-            debug: "all",
+            debug: APP_CONFIG.janus.initDebug,
             callback: () => {
                 Logger.setStatus("Janus initialized");
                 Logger.user("Janus.init done");
@@ -603,13 +1360,14 @@ class JanusGateway {
     }
 }
 class RemoteFeedManager {
-    constructor(janus, roomId, privateId, opaqueId, media, remoteVideo) {
+    constructor(janus, roomId, privateId, opaqueId, media, remoteVideo, observer) {
         this.janus = janus;
         this.roomId = roomId;
         this.privateId = privateId;
         this.opaqueId = opaqueId;
         this.media = media;
         this.remoteVideo = remoteVideo;
+        this.observer = observer;
         this.feeds = new Map();
         this.feedTracks = new Map();
     }
@@ -628,6 +1386,11 @@ class RemoteFeedManager {
             error: (e) => Logger.setStatus("Remote attach error: " + JSON.stringify(e)),
             onmessage: (msg, jsep) => {
                 if (jsep) {
+                    // TODO: If Janus internals change and webrtcStuff.pc is unavailable, pass the subscriber PC from a Janus plugin callback here.
+                    const pc = remoteHandle?.webrtcStuff?.pc;
+                    if (pc) {
+                        this.observer?.onSubscriberPcReady?.(feedId, pc);
+                    }
                     remoteHandle.createAnswer({
                         jsep,
                         tracks: [{ type: "audio", capture: false, recv: true }, { type: "video", capture: false, recv: true }],
@@ -638,6 +1401,7 @@ class RemoteFeedManager {
             },
             onlocaltrack: () => { },
             onremotetrack: (track, _mid, on) => {
+                this.observer?.onRemoteTrackSignal?.(feedId, track, on);
                 let byId = this.feedTracks.get(feedId);
                 if (!byId) {
                     byId = new Map();
@@ -662,10 +1426,11 @@ class RemoteFeedManager {
                 byId.set(track.id, track);
                 this.media.setRemoteTrack(this.remoteVideo, track);
             },
-            oncleanup: () => this.removeFeed(feedId, false)
+            oncleanup: () => this.removeFeed(feedId, false, true)
         });
     }
-    removeFeed(id, detach = true) {
+    removeFeed(id, detach = true, notify = true) {
+        let removed = false;
         const h = this.feeds.get(id);
         if (h) {
             if (detach) {
@@ -675,15 +1440,20 @@ class RemoteFeedManager {
                 catch { }
             }
             this.feeds.delete(id);
+            removed = true;
         }
         const tracks = this.feedTracks.get(id);
         if (tracks) {
             tracks.forEach(t => this.media.removeRemoteTrack(this.remoteVideo, t));
             this.feedTracks.delete(id);
+            removed = true;
+        }
+        if (removed && notify) {
+            this.observer?.onRemoteFeedCleanup?.(id);
         }
     }
     cleanupAll() {
-        Array.from(this.feeds.keys()).forEach(id => this.removeFeed(id, true));
+        Array.from(this.feeds.keys()).forEach(id => this.removeFeed(id, true, true));
         this.media.clearRemote(this.remoteVideo);
     }
 }
@@ -710,18 +1480,37 @@ class CallController {
         this.currentRecordingId = null;
         this.currentRoomId = null;
         this.participantSyncTimer = null;
+        this.participantSyncInFlight = false;
+        this.lastParticipantSyncAt = 0;
         this.gateway = new JanusGateway();
         this.media = new MediaManager();
         this.vbManager = new VirtualBackgroundManager();
+        this.connectionEngine = new ConnectionStatusEngine((status) => {
+            this.bus.emit("connection-status", status);
+        });
+        this.bus.emit("connection-status", this.connectionEngine.getStatus());
         this.gateway.init();
     }
     async join(cfg) {
-        const server = UrlConfig.getVcxServer().server;
-        const clientId = UrlConfig.getVcxServer().client_id;
-        const http = new HttpClient(server, clientId);
-        const ims = new ImsClient(http);
-        const payload = await ims.getMediaConstraints();
-        this.gateway.createSession(cfg.server, payload.PC_CONFIG?.iceServers, () => this.attachAndEnsureRoomThenJoin(cfg), () => Logger.setStatus("Session destroyed"));
+        this.connectionEngine.onJoinStarted();
+        try {
+            const server = UrlConfig.getVcxServer().server;
+            const clientId = UrlConfig.getVcxServer().client_id;
+            const http = new HttpClient(server, clientId);
+            const ims = new ImsClient(http);
+            const payload = await ims.getMediaConstraints();
+            this.gateway.createSession(cfg.server, payload.PC_CONFIG?.iceServers, () => {
+                this.connectionEngine.onSessionReady();
+                this.attachAndEnsureRoomThenJoin(cfg);
+            }, () => {
+                this.connectionEngine.onSessionDestroyed();
+                Logger.setStatus("Session destroyed");
+            });
+        }
+        catch (e) {
+            this.connectionEngine.onFailed();
+            Logger.setStatus("Join error: " + (e?.message || e));
+        }
     }
     attachAndEnsureRoomThenJoin(cfg) {
         this.gateway.attachPublisher((h) => {
@@ -735,13 +1524,17 @@ class CallController {
             this.recording = false;
             this.currentRecordingId = null;
             this.bus.emit("recording-changed", false);
+            this.connectionEngine.onPublisherAttached();
             Logger.setStatus("Plugin attached. Checking room...");
             this.ensureRoomThenJoin(cfg);
         }, (msg, jsep) => this.onPublisherMessage(cfg, msg, jsep), (track, on) => {
             if (on && track.kind === "video") {
                 this.media.setLocalTrack(this.localVideo, track);
             }
-        }, () => Logger.setStatus("Publisher cleanup"));
+        }, () => {
+            this.connectionEngine.onReconnect();
+            Logger.setStatus("Publisher cleanup");
+        });
     }
     getVideoRoomData(msg) {
         return msg?.plugindata?.data ?? msg;
@@ -764,7 +1557,10 @@ class CallController {
                     this.sendCreateRoom(cfg);
                 }
             },
-            error: () => this.leave()
+            error: () => {
+                this.connectionEngine.onFailed();
+                this.leave();
+            }
         });
     }
     sendPublisherJoin(cfg) {
@@ -786,14 +1582,17 @@ class CallController {
             message: {
                 request: "create",
                 room: cfg.roomId,
-                publishers: 10,
+                publishers: APP_CONFIG.videoroom.maxPublishers,
                 description: `Room ${cfg.roomId}`
             },
             success: () => {
                 Logger.setStatus("Room created. Joining...");
                 this.sendPublisherJoin(cfg);
             },
-            error: () => this.leave()
+            error: () => {
+                this.connectionEngine.onFailed();
+                this.leave();
+            }
         });
     }
     onPublisherMessage(cfg, msg, jsep) {
@@ -806,6 +1605,7 @@ class CallController {
                 this.sendCreateRoom(cfg);
             }
             else {
+                this.connectionEngine.onFailed();
                 this.leave();
             }
             return;
@@ -813,12 +1613,23 @@ class CallController {
         if (event === "joined") {
             this.joinedRoom = true;
             this.currentRoomId = cfg.roomId;
+            this.connectionEngine.onJoinedRoom();
             const myId = data["id"];
             this.privateId = data["private_id"];
             this.selfId = myId;
             this.roster.setSelf(myId);
             Logger.setStatus("Joined. Publishing...");
-            this.remoteFeeds = new RemoteFeedManager(this.gateway.getJanus(), cfg.roomId, this.privateId, this.gateway.getOpaqueId(), this.media, this.remoteVideo);
+            this.remoteFeeds = new RemoteFeedManager(this.gateway.getJanus(), cfg.roomId, this.privateId, this.gateway.getOpaqueId(), this.media, this.remoteVideo, {
+                onSubscriberPcReady: (feedId, pc) => {
+                    this.connectionEngine.registerSubscriberPc(feedId, pc);
+                },
+                onRemoteTrackSignal: (feedId, track, on) => {
+                    this.connectionEngine.onRemoteTrackSignal(feedId, track, on);
+                },
+                onRemoteFeedCleanup: (feedId) => {
+                    this.connectionEngine.unregisterSubscriber(feedId);
+                }
+            });
             this.publish();
             this.reconcile(cfg, data["publishers"]);
             this.bus.emit("joined", true);
@@ -837,6 +1648,7 @@ class CallController {
             this.syncParticipantsFromServer(cfg);
         }
         if (event === "destroyed") {
+            this.connectionEngine.onFailed();
             this.leave();
             return;
         }
@@ -852,27 +1664,45 @@ class CallController {
                 return;
             this.roster.add(feedId);
             if (this.remoteFeeds && feedId !== this.selfId) {
+                this.connectionEngine.onSubscriberRequested();
                 this.remoteFeeds.addFeed(feedId);
             }
         });
-        this.bus.emit("participants", this.roster.snapshot(cfg.roomId));
+        this.publishParticipants(cfg);
+    }
+    publishParticipants(cfg) {
+        const snapshot = this.roster.snapshot(cfg.roomId);
+        this.bus.emit("participants", snapshot);
+        const remoteCount = snapshot.participantIds
+            .filter((id) => id !== this.selfId)
+            .length;
+        this.connectionEngine.setRemoteParticipantCount(remoteCount);
     }
     startParticipantSync(cfg) {
         this.stopParticipantSync();
         this.syncParticipantsFromServer(cfg);
         this.participantSyncTimer = window.setInterval(() => {
             this.syncParticipantsFromServer(cfg);
-        }, 4000);
+        }, APP_CONFIG.call.participantSyncIntervalMs);
     }
     stopParticipantSync() {
         if (this.participantSyncTimer !== null) {
             window.clearInterval(this.participantSyncTimer);
             this.participantSyncTimer = null;
         }
+        this.participantSyncInFlight = false;
+        this.lastParticipantSyncAt = 0;
     }
     syncParticipantsFromServer(cfg) {
         if (!this.plugin || !this.joinedRoom)
             return;
+        if (this.participantSyncInFlight)
+            return;
+        const now = Date.now();
+        if (now - this.lastParticipantSyncAt < APP_CONFIG.call.participantSyncCooldownMs)
+            return;
+        this.lastParticipantSyncAt = now;
+        this.participantSyncInFlight = true;
         this.plugin.send({
             message: { request: "listparticipants", room: cfg.roomId },
             success: (res) => {
@@ -898,7 +1728,11 @@ class CallController {
                         this.remoteFeeds?.removeFeed(id);
                     }
                 });
-                this.bus.emit("participants", this.roster.snapshot(cfg.roomId));
+                this.publishParticipants(cfg);
+                this.participantSyncInFlight = false;
+            },
+            error: () => {
+                this.participantSyncInFlight = false;
             }
         });
     }
@@ -907,11 +1741,39 @@ class CallController {
             return;
         this.roster.remove(feedId);
         this.remoteFeeds?.removeFeed(feedId);
-        this.bus.emit("participants", this.roster.snapshot(cfg.roomId));
+        this.publishParticipants(cfg);
     }
     // =====================================
     // MEDIA
     // =====================================
+    getVideoConfig() {
+        const cfg = UrlConfig.getVcxVideoConfig();
+        const bitrateBps = Number.isFinite(cfg.bitrate_bps) ? Math.floor(cfg.bitrate_bps) : APP_CONFIG.media.bitrateBps;
+        const maxFramerate = Number.isFinite(cfg.max_framerate) ? Math.floor(cfg.max_framerate) : APP_CONFIG.media.maxFramerate;
+        return {
+            bitrate_bps: Math.max(APP_CONFIG.media.minBitrateBps, Math.min(APP_CONFIG.media.maxBitrateBps, bitrateBps)),
+            bitrate_cap: cfg.bitrate_cap !== false,
+            max_framerate: Math.max(APP_CONFIG.media.minFramerate, Math.min(APP_CONFIG.media.maxFramerateCap, maxFramerate))
+        };
+    }
+    tuneVideoSenderBitrate(pc, bitrateBps, maxFramerate) {
+        try {
+            const sender = pc.getSenders().find(s => s.track?.kind === "video");
+            if (!sender || typeof sender.getParameters !== "function" || typeof sender.setParameters !== "function")
+                return;
+            const p = sender.getParameters();
+            const encodings = (p.encodings && p.encodings.length > 0) ? p.encodings : [{}];
+            encodings[0].maxBitrate = bitrateBps;
+            encodings[0].maxFramerate = maxFramerate;
+            p.encodings = encodings;
+            sender.setParameters(p).catch((e) => {
+                console.log("VCX_SET_PARAMETERS_ERROR=", e?.message || e);
+            });
+        }
+        catch (e) {
+            console.log("VCX_SET_PARAMETERS_HOOK_ERROR=", e?.message || e);
+        }
+    }
     // public publish() {
     //   this.plugin.createOffer({
     //     tracks: [
@@ -931,6 +1793,7 @@ class CallController {
             Logger.setStatus("Publish ignored: plugin not ready");
             return;
         }
+        const videoCfg = this.getVideoConfig();
         this.plugin.createOffer({
             tracks: [
                 { type: "audio", capture: true, recv: false },
@@ -939,8 +1802,11 @@ class CallController {
             success: (jsep) => {
                 // ✅ Point #4: capture and emit connectivity info from RTCPeerConnection
                 try {
+                    // TODO: If Janus internals change and webrtcStuff.pc is unavailable, bind the publisher PC from Janus plugin callbacks.
                     const pc = this.plugin?.webrtcStuff?.pc;
                     if (pc) {
+                        this.connectionEngine.registerPublisherPc(pc);
+                        this.tuneVideoSenderBitrate(pc, videoCfg.bitrate_bps, videoCfg.max_framerate);
                         const emit = () => {
                             const payload = {
                                 ice: pc.iceConnectionState,
@@ -988,11 +1854,18 @@ class CallController {
                 }
                 // ✅ normal Janus publish configure
                 this.plugin.send({
-                    message: { request: "configure", audio: true, video: true },
+                    message: {
+                        request: "configure",
+                        audio: true,
+                        video: true,
+                        bitrate: videoCfg.bitrate_bps,
+                        bitrate_cap: videoCfg.bitrate_cap
+                    },
                     jsep,
                 });
             },
             error: (e) => {
+                this.connectionEngine.onReconnect();
                 Logger.setStatus("Offer error: " + JSON.stringify(e));
                 console.log("VCX_OFFER_ERROR=", e);
             },
@@ -1004,6 +1877,9 @@ class CallController {
         const m = this.plugin.isAudioMuted();
         m ? this.plugin.unmuteAudio() : this.plugin.muteAudio();
         this.bus.emit("mute-changed", !m);
+    }
+    markRetrying() {
+        this.connectionEngine.onReconnect();
     }
     stopVideo() {
         this.plugin?.send({ message: { request: "unpublish" } });
@@ -1073,6 +1949,7 @@ class CallController {
             this.roster.reset();
             this.bus.emit("recording-changed", false);
             this.bus.emit("joined", false);
+            this.connectionEngine.onLeft();
             this.media.clearLocal(this.localVideo);
             this.media.clearRemote(this.remoteVideo);
             Logger.setStatus("Left");
@@ -1173,6 +2050,8 @@ class UIController {
         this.lastCfg = null;
         this.bridge = new ParentBridge();
         this.net = new NetworkQualityManager();
+        this.remoteVideoEl = document.getElementById("remoteVideo");
+        this.remoteFallback = document.getElementById("remoteFallback");
         this.localOverlay = document.getElementById("localOverlay");
         this.remoteOverlay = document.getElementById("remoteOverlay");
         this.endedOverlay = document.getElementById("endedOverlay");
@@ -1183,10 +2062,12 @@ class UIController {
         this.audioMuted = false;
         this.videoMuted = false;
         this.ended = false;
-        this.folderPath = "/opt/efs-janus-app/dev/VideoRecDownloads";
-        this.autoRecordParticipantThreshold = 2;
+        this.folderPath = APP_CONFIG.recording.folderPath;
+        this.autoRecordParticipantThreshold = APP_CONFIG.recording.autoStartParticipantThreshold;
         // ✅ recording state
         this.recording = false;
+        this.connectionStatus = null;
+        this.remoteVideoMonitorTimer = null;
         const qn = this.getQueryParam("name");
         if (qn)
             Logger.setUserName(qn);
@@ -1194,7 +2075,7 @@ class UIController {
         Logger.flow("DOMContentLoaded → UIController()");
         this.logger = new Logger(document.getElementById("statusLine"), document.getElementById("sessionInfo"));
         const localVideo = document.getElementById("localVideo");
-        const remoteVideo = document.getElementById("remoteVideo");
+        const remoteVideo = this.remoteVideoEl;
         this.controller = new CallController(this.bus, localVideo, remoteVideo);
         this.bus.on("joined", j => {
             this.setJoinedState(j);
@@ -1243,9 +2124,13 @@ class UIController {
                 connectionState: s.connection
             });
         });
+        this.bus.on("connection-status", (status) => {
+            this.renderConnectionStatus(status);
+        });
         this.wire();
         this.setupNetworkUI();
         this.setupParentBridge();
+        this.setupRemoteFallbackMonitor();
         this.autoJoin();
     }
     wire() {
@@ -1255,12 +2140,7 @@ class UIController {
             this.controller.toggleMute();
             this.audioMuted = !this.audioMuted;
             this.btnMute.classList.toggle("danger", this.audioMuted);
-            this.localOverlay.innerText =
-                this.audioMuted ? "audio muted" : "Local";
-            this.remoteOverlay.innerText =
-                this.audioMuted
-                    ? "audio muted on other participant"
-                    : "Remote";
+            this.applyConnectionOverlays();
             this.bridge.emit({ type: "AUDIO_MUTED", muted: this.audioMuted });
         };
         // VIDEO
@@ -1275,12 +2155,7 @@ class UIController {
                 // republish
                 this.controller.publish();
             }
-            this.localOverlay.innerText =
-                this.videoMuted ? "video muted" : "Local";
-            this.remoteOverlay.innerText =
-                this.videoMuted
-                    ? "video muted on other participant"
-                    : "Remote";
+            this.applyConnectionOverlays();
             this.bridge.emit({ type: "VIDEO_MUTED", muted: this.videoMuted });
         };
         // LEAVE / START
@@ -1290,6 +2165,7 @@ class UIController {
                 this.controller.leave();
                 this.ended = true;
                 this.endedOverlay.style.display = "flex";
+                this.renderRemoteFallback();
                 this.btnLeave.innerHTML =
                     '<i class="fa-solid fa-play"></i>';
                 this.btnLeave.title = "Start";
@@ -1372,6 +2248,7 @@ class UIController {
         Logger.setStatus(`Joining... roomId=${cfg.roomId}, name=${cfg.display}`);
         this.ended = false;
         this.endedOverlay.style.display = "none";
+        this.renderRemoteFallback();
         this.btnLeave.innerHTML =
             '<i class="fa-solid fa-phone-slash"></i>';
         this.btnLeave.title = "End";
@@ -1382,10 +2259,12 @@ class UIController {
         if (!this.lastCfg)
             return;
         this.controller.leave();
+        this.controller.markRetrying();
+        this.renderRemoteFallback();
         // safer Janus reconnect
         setTimeout(() => {
             this.controller.join(this.lastCfg);
-        }, 800);
+        }, APP_CONFIG.call.reconnectDelayMs);
     }
     setJoinedState(joined) {
         [
@@ -1397,6 +2276,81 @@ class UIController {
             this.btnVB,
             this.btnRecord
         ].forEach(b => b && (b.disabled = !joined));
+    }
+    getLocalBaseOverlayText() {
+        if (this.videoMuted)
+            return "video muted";
+        if (this.audioMuted)
+            return "audio muted";
+        return "Local";
+    }
+    getRemoteBaseOverlayText() {
+        if (this.videoMuted)
+            return "video muted on other participant";
+        if (this.audioMuted)
+            return "audio muted on other participant";
+        return "Remote";
+    }
+    applyConnectionOverlays() {
+        const localBase = this.getLocalBaseOverlayText();
+        const remoteBase = this.getRemoteBaseOverlayText();
+        const status = this.connectionStatus;
+        if (!status) {
+            this.localOverlay.innerText = localBase;
+            this.remoteOverlay.innerText = remoteBase;
+            return;
+        }
+        if (status.owner === "LOCAL") {
+            this.localOverlay.innerText = status.primaryText;
+            this.remoteOverlay.innerText = remoteBase;
+            return;
+        }
+        if (status.owner === "REMOTE") {
+            this.remoteOverlay.innerText = status.primaryText;
+            this.localOverlay.innerText = localBase;
+            return;
+        }
+        this.localOverlay.innerText = localBase;
+        this.remoteOverlay.innerText = remoteBase;
+    }
+    renderConnectionStatus(status) {
+        this.connectionStatus = status;
+        this.logger.setStatus(status.primaryText);
+        this.logger.setInfo(status.secondaryText);
+        this.applyConnectionOverlays();
+        this.renderRemoteFallback();
+        this.updateDebugState({
+            connectionOwner: status.owner,
+            connectionSeverity: status.severity,
+            connectionState: status.state
+        });
+    }
+    setupRemoteFallbackMonitor() {
+        const refresh = () => this.renderRemoteFallback();
+        this.remoteVideoEl.onloadeddata = refresh;
+        this.remoteVideoEl.onplaying = refresh;
+        this.remoteVideoEl.onemptied = refresh;
+        this.remoteVideoEl.onpause = refresh;
+        if (this.remoteVideoMonitorTimer !== null) {
+            window.clearInterval(this.remoteVideoMonitorTimer);
+        }
+        this.remoteVideoMonitorTimer = window.setInterval(refresh, APP_CONFIG.ui.remoteFallbackRefreshMs);
+        refresh();
+    }
+    hasRemoteVideoTrack() {
+        const ms = this.remoteVideoEl.srcObject;
+        if (!ms)
+            return false;
+        const tracks = ms.getVideoTracks();
+        if (!tracks || tracks.length === 0)
+            return false;
+        return tracks.some(t => t.readyState === "live" && t.enabled !== false);
+    }
+    renderRemoteFallback() {
+        if (!this.remoteFallback)
+            return;
+        const showFallback = !this.ended && !this.hasRemoteVideoTrack();
+        this.remoteFallback.style.display = showFallback ? "flex" : "none";
     }
     setupNetworkUI() {
         const toggle = (el) => el.classList.toggle("show");

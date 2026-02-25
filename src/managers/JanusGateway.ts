@@ -7,7 +7,7 @@ class JanusGateway {
 
   init() {
     Janus.init({
-      debug: "all",
+      debug: APP_CONFIG.janus.initDebug,
       callback: () => {
         Logger.setStatus("Janus initialized");
         Logger.user("Janus.init done");

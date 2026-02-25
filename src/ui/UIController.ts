@@ -29,6 +29,8 @@ class UIController {
 
   private bridge = new ParentBridge();
   private net = new NetworkQualityManager();
+  private remoteVideoEl = document.getElementById("remoteVideo") as HTMLVideoElement;
+  private remoteFallback = document.getElementById("remoteFallback") as HTMLDivElement;
 
   private localOverlay = document.getElementById("localOverlay") as HTMLDivElement;
   private remoteOverlay = document.getElementById("remoteOverlay") as HTMLDivElement;
@@ -42,11 +44,13 @@ class UIController {
   private audioMuted = false;
   private videoMuted = false;
   private ended = false;
-  private folderPath:string = "/opt/efs-janus-app/dev/VideoRecDownloads";
-  private autoRecordParticipantThreshold = 2;
+  private folderPath:string = APP_CONFIG.recording.folderPath;
+  private autoRecordParticipantThreshold = APP_CONFIG.recording.autoStartParticipantThreshold;
 
   // ✅ recording state
   private recording = false;
+  private connectionStatus: ConnectionStatusView | null = null;
+  private remoteVideoMonitorTimer: number | null = null;
 
   constructor() {
     const qn = this.getQueryParam("name");
@@ -61,7 +65,7 @@ class UIController {
     );
 
     const localVideo = document.getElementById("localVideo") as HTMLVideoElement;
-    const remoteVideo = document.getElementById("remoteVideo") as HTMLVideoElement;
+    const remoteVideo = this.remoteVideoEl;
 
     this.controller = new CallController(this.bus, localVideo, remoteVideo);
 
@@ -115,11 +119,15 @@ class UIController {
           signalingState: s.signaling,
           connectionState: s.connection
         });
-    });  
+    });
+    this.bus.on<ConnectionStatusView>("connection-status", (status) => {
+      this.renderConnectionStatus(status);
+    });
 
     this.wire();
     this.setupNetworkUI();
     this.setupParentBridge();
+    this.setupRemoteFallbackMonitor();
     this.autoJoin();
   }
 
@@ -132,14 +140,7 @@ class UIController {
 
       this.audioMuted = !this.audioMuted;
       this.btnMute.classList.toggle("danger", this.audioMuted);
-
-      this.localOverlay.innerText =
-        this.audioMuted ? "audio muted" : "Local";
-
-      this.remoteOverlay.innerText =
-        this.audioMuted
-          ? "audio muted on other participant"
-          : "Remote";
+      this.applyConnectionOverlays();
 
       this.bridge.emit({ type: "AUDIO_MUTED", muted: this.audioMuted });
     };
@@ -157,14 +158,7 @@ class UIController {
         // republish
         this.controller.publish();
       }
-
-      this.localOverlay.innerText =
-        this.videoMuted ? "video muted" : "Local";
-
-      this.remoteOverlay.innerText =
-        this.videoMuted
-          ? "video muted on other participant"
-          : "Remote";
+      this.applyConnectionOverlays();
 
       this.bridge.emit({ type: "VIDEO_MUTED", muted: this.videoMuted });
     };
@@ -178,6 +172,7 @@ class UIController {
 
         this.ended = true;
         this.endedOverlay.style.display = "flex";
+        this.renderRemoteFallback();
 
         this.btnLeave.innerHTML =
           '<i class="fa-solid fa-play"></i>';
@@ -275,6 +270,7 @@ class UIController {
 
     this.ended = false;
     this.endedOverlay.style.display = "none";
+    this.renderRemoteFallback();
 
     this.btnLeave.innerHTML =
       '<i class="fa-solid fa-phone-slash"></i>';
@@ -288,11 +284,13 @@ class UIController {
     if (!this.lastCfg) return;
 
     this.controller.leave();
+    this.controller.markRetrying();
+    this.renderRemoteFallback();
 
     // safer Janus reconnect
     setTimeout(() => {
       this.controller.join(this.lastCfg!);
-    }, 800);
+    }, APP_CONFIG.call.reconnectDelayMs);
   }
 
   private setJoinedState(joined: boolean) {
@@ -305,6 +303,89 @@ class UIController {
       this.btnVB,
       this.btnRecord
     ].forEach(b => b && (b.disabled = !joined));
+  }
+
+  private getLocalBaseOverlayText(): string {
+    if (this.videoMuted) return "video muted";
+    if (this.audioMuted) return "audio muted";
+    return "Local";
+  }
+
+  private getRemoteBaseOverlayText(): string {
+    if (this.videoMuted) return "video muted on other participant";
+    if (this.audioMuted) return "audio muted on other participant";
+    return "Remote";
+  }
+
+  private applyConnectionOverlays() {
+    const localBase = this.getLocalBaseOverlayText();
+    const remoteBase = this.getRemoteBaseOverlayText();
+    const status = this.connectionStatus;
+
+    if (!status) {
+      this.localOverlay.innerText = localBase;
+      this.remoteOverlay.innerText = remoteBase;
+      return;
+    }
+
+    if (status.owner === "LOCAL") {
+      this.localOverlay.innerText = status.primaryText;
+      this.remoteOverlay.innerText = remoteBase;
+      return;
+    }
+
+    if (status.owner === "REMOTE") {
+      this.remoteOverlay.innerText = status.primaryText;
+      this.localOverlay.innerText = localBase;
+      return;
+    }
+
+    this.localOverlay.innerText = localBase;
+    this.remoteOverlay.innerText = remoteBase;
+  }
+
+  private renderConnectionStatus(status: ConnectionStatusView) {
+    this.connectionStatus = status;
+    this.logger.setStatus(status.primaryText);
+    this.logger.setInfo(status.secondaryText);
+    this.applyConnectionOverlays();
+    this.renderRemoteFallback();
+
+    this.updateDebugState({
+      connectionOwner: status.owner,
+      connectionSeverity: status.severity,
+      connectionState: status.state
+    });
+  }
+
+  private setupRemoteFallbackMonitor() {
+    const refresh = () => this.renderRemoteFallback();
+
+    this.remoteVideoEl.onloadeddata = refresh;
+    this.remoteVideoEl.onplaying = refresh;
+    this.remoteVideoEl.onemptied = refresh;
+    this.remoteVideoEl.onpause = refresh;
+
+    if (this.remoteVideoMonitorTimer !== null) {
+      window.clearInterval(this.remoteVideoMonitorTimer);
+    }
+    this.remoteVideoMonitorTimer = window.setInterval(refresh, APP_CONFIG.ui.remoteFallbackRefreshMs);
+    refresh();
+  }
+
+  private hasRemoteVideoTrack(): boolean {
+    const ms = this.remoteVideoEl.srcObject as MediaStream | null;
+    if (!ms) return false;
+    const tracks = ms.getVideoTracks();
+    if (!tracks || tracks.length === 0) return false;
+    return tracks.some(t => t.readyState === "live" && t.enabled !== false);
+  }
+
+  private renderRemoteFallback() {
+    if (!this.remoteFallback) return;
+
+    const showFallback = !this.ended && !this.hasRemoteVideoTrack();
+    this.remoteFallback.style.display = showFallback ? "flex" : "none";
   }
 
   private setupNetworkUI() {
