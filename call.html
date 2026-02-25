@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>VideoCX Login</title>
+
+<style>
+    body {
+        margin: 0;
+        height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        background: #f4f6f8;
+        font-family: Arial, sans-serif;
+    }
+
+    .login-box {
+        width: 320px;
+        background: white;
+        padding: 25px;
+        border-radius: 10px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+    }
+
+    h2 {
+        text-align: center;
+        margin-bottom: 20px;
+    }
+
+    input {
+        width: 100%;
+        padding: 10px;
+        margin: 8px 0;
+        border-radius: 6px;
+        border: 1px solid #ccc;
+        box-sizing: border-box;
+    }
+
+    button {
+        width: 100%;
+        padding: 10px;
+        margin-top: 12px;
+        border: none;
+        border-radius: 6px;
+        background: #007bff;
+        color: white;
+        font-size: 16px;
+        cursor: pointer;
+    }
+
+    button:hover {
+        background: #0056b3;
+    }
+
+    .msg {
+        margin-top: 10px;
+        font-size: 13px;
+        text-align: center;
+        color: red;
+    }
+</style>
+</head>
+
+<body>
+
+<div class="login-box">
+    <h2>VideoCX Login</h2>
+
+    <input id="username" placeholder="Username">
+    <input id="password" type="password" placeholder="Password">
+    <input id="roomId" placeholder="Room ID" value="4000">
+    <input id="displayName" placeholder="Display Name">
+
+    <button onclick="signin()">Sign In</button>
+
+    <div class="msg" id="msg"></div>
+</div>
+
+<script>
+async function signin() {
+
+    const username = document.getElementById("username").value;
+    const password = document.getElementById("password").value;
+    const roomId = document.getElementById("roomId").value;
+    const displayName = document.getElementById("displayName").value;
+
+    const msg = document.getElementById("msg");
+    msg.innerText = "Signing in...";
+
+    try {
+
+        const payload = {
+            username: username,
+            password: password,
+            rememberMe: true
+        };
+
+        const response = await fetch("https://localhost.beta.videocx.io/ims/users/signin", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "client-id": "101",
+                "X-Requested-With": "XMLHttpRequest"
+            },
+            credentials: "include",
+            body: JSON.stringify(payload)
+        });
+
+        if (response.ok) {
+
+            // Save display name if needed later
+            localStorage.setItem("displayName", displayName);
+
+            window.location.href =
+                "https://localhost.beta.videocx.io/multstream_janus_poc/index.html?roomId="
+                + encodeURIComponent(roomId);
+
+        } else {
+            msg.innerText = "Login failed";
+        }
+
+    } catch (e) {
+        msg.innerText = "Network error";
+        console.error(e);
+    }
+}
+</script>
+
+</body>
+</html>

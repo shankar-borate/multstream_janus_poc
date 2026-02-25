@@ -1,5 +1,99 @@
 type LogLevel = "debug" | "info" | "warn" | "error" | "silent";
 
+const IMS_MEDIA_CONSTRAINTS_MOCK_PAYLOAD = {
+  MEDIA_CONSTRAINTS: {
+    WEB_MEDIA_CONSTRAINTS: [
+      {
+        audio: true,
+        video: {
+          width: { min: 310, ideal: 320, max: 320 },
+          frameRate: { max: 20 },
+          aspectRatio: 1.777777778
+        }
+      },
+      {
+        audio: true,
+        video: {
+          width: { min: 310, ideal: 320 },
+          frameRate: { max: 20 },
+          aspectRatio: 1.777777778
+        }
+      },
+      { audio: true, video: true }
+    ],
+    WEB_MEDIA_CONSTRAINTS_GU: [
+      {
+        audio: true,
+        video: {
+          width: { min: 620, ideal: 640, max: 640 },
+          frameRate: { max: 20 },
+          aspectRatio: 1.777777778
+        }
+      },
+      {
+        audio: true,
+        video: {
+          width: { min: 620, ideal: 640 },
+          frameRate: { max: 20 },
+          aspectRatio: 1.777777778
+        }
+      },
+      { audio: true, video: true }
+    ],
+    MOBILE_MEDIA_CONSTRAINTS: [
+      {
+        audio: true,
+        video: {
+          width: { max: 640 },
+          frameRate: { max: 30 },
+          facingMode: { exact: "user" }
+        }
+      }
+    ]
+  },
+  PC_CONFIG: {
+    iceServers: [
+      {
+        urls: [
+          "turn:coturn.videocx.io:443?transport=udp",
+          "turns:coturn.videocx.io:443?transport=tcp"
+        ],
+        username: "1772097225:ecd359ac-2237-42ff-8ddc-764d79d4ea0b_!",
+        credential: "odIkTMlYtpKWHHVZtAxw3a+VxJE="
+      },
+      {
+        urls: ["stun:coturn.videocx.io:443"]
+      }
+    ]
+  },
+  PC_CONFIG_FF: {
+    iceServers: [
+      {
+        url: "turn:coturn.videocx.io:443?transport=udp",
+        username: "1772097225:ecd359ac-2237-42ff-8ddc-764d79d4ea0b",
+        credential: "odIkTMlYtpKWHHVZtAxw3a+VxJE="
+      },
+      {
+        url: "stun:coturn.videocx.io:443"
+      }
+    ]
+  },
+  videochat: {
+    videoBandwidth: 128000
+  },
+  chimeMediaConstraints: {
+    maxBandwidthKbps: 256,
+    employee: {
+      desktop: { width: 640, height: 480, frameRate: 20 },
+      mobile: { width: 640, height: 480, frameRate: 20 }
+    },
+    customer: {
+      desktop: { width: 640, height: 480, frameRate: 20 },
+      mobile: { width: 640, height: 480, frameRate: 20 }
+    }
+  }
+};
+
 const APP_CONFIG = {
   logging: {
     level: "warn" as LogLevel
@@ -9,6 +103,14 @@ const APP_CONFIG = {
   },
   http: {
     defaultTimeoutMs: 15000
+  },
+  ims: {
+    mediaConstraintsPath: "/ims/users/media-constraints",
+    useMockMediaConstraints: true,
+    mockMediaConstraintsResponse: {
+      name: "VideoConstraint",
+      value: JSON.stringify(IMS_MEDIA_CONSTRAINTS_MOCK_PAYLOAD)
+    }
   },
   vcx: {
     imsBaseUrl: "https://localhost.beta.videocx.io",

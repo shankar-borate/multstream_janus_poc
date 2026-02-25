@@ -9,7 +9,12 @@ class ImsClient {
    * Returns row with a JSON string in `value`. We parse it and return the payload.
    */
   async getMediaConstraints(): Promise<MediaConstraintsPayload> {
-    const res = await this.http.getJson<ImsSettingRow>("/ims/users/media-constraints");
+    if (APP_CONFIG.ims.useMockMediaConstraints) {
+      const row = APP_CONFIG.ims.mockMediaConstraintsResponse;
+      return JSON.parse(row.value);
+    }
+
+    const res = await this.http.getJson<ImsSettingRow>(APP_CONFIG.ims.mediaConstraintsPath);
     const row = res.data;
 
     // value is a JSON string (escaped)
