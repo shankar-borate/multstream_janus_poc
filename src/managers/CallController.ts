@@ -30,6 +30,12 @@ class CallController {
   private participantSyncInFlight = false;
   private lastParticipantSyncAt = 0;
   private connectionEngine: ConnectionStatusEngine;
+  private activeJoinCfg: JoinConfig | null = null;
+  private retryTimer: number | null = null;
+  private serverRetryAttempt = 0;
+  private peerRetryAttempt = 0;
+  private isLeaving = false;
+  private suppressPublisherCleanupRetry = false;
 
   constructor(
     private bus: EventBus,
@@ -46,7 +52,15 @@ class CallController {
     this.gateway.init();
   }
 
-  async join(cfg: JoinConfig) {
+  async join(cfg: JoinConfig, opts?: { internalRetry?: boolean }) {
+    this.activeJoinCfg = cfg;
+    this.isLeaving = false;
+    this.suppressPublisherCleanupRetry = false;
+    if (!opts?.internalRetry) {
+      this.serverRetryAttempt = 0;
+      this.peerRetryAttempt = 0;
+      this.clearRetryTimer();
+    }
     this.connectionEngine.onJoinStarted();
     try {
       const server = UrlConfig.getVcxServer().server;
@@ -65,13 +79,96 @@ class CallController {
         },
         () => {
           this.connectionEngine.onSessionDestroyed();
-          Logger.setStatus("Session destroyed");
+          this.scheduleServerRetry("Janus session destroyed");
+        },
+        (e: any) => {
+          this.scheduleServerRetry(`Janus session create failed: ${JSON.stringify(e)}`);
         }
       );
     } catch (e: any) {
-      this.connectionEngine.onFailed();
-      Logger.setStatus("Join error: " + (e?.message || e));
+      this.scheduleServerRetry("Join error: " + (e?.message || e));
     }
+  }
+
+  private clearRetryTimer() {
+    if (this.retryTimer !== null) {
+      window.clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+  }
+
+  private cleanupForRetry() {
+    this.remoteFeeds?.cleanupAll();
+    this.remoteFeeds = null;
+    this.plugin = null;
+    this.stopParticipantSync();
+    this.joinedRoom = false;
+    this.roomCreateAttempted = false;
+    this.privateId = null;
+    this.selfId = null;
+    this.roster.reset();
+    this.bus.emit("joined", false);
+
+    this.suppressPublisherCleanupRetry = true;
+    this.gateway.destroy();
+  }
+
+  private scheduleServerRetry(reason: string) {
+    this.scheduleRetry("server", reason);
+  }
+
+  private schedulePeerRetry(reason: string) {
+    this.scheduleRetry("peer", reason);
+  }
+
+  private scheduleRetry(kind: "server" | "peer", reason: string) {
+    if (this.isLeaving) return;
+    const cfg = this.activeJoinCfg;
+    if (!cfg) return;
+    if (this.retryTimer !== null) return;
+
+    const maxAttempts = kind === "server"
+      ? APP_CONFIG.call.retry.serverMaxAttempts
+      : APP_CONFIG.call.retry.peerMaxAttempts;
+    const delayMs = kind === "server"
+      ? APP_CONFIG.call.retry.serverDelayMs
+      : APP_CONFIG.call.retry.peerDelayMs;
+
+    const attempt = kind === "server"
+      ? ++this.serverRetryAttempt
+      : ++this.peerRetryAttempt;
+
+    if (kind === "server") {
+      this.peerRetryAttempt = 0;
+    } else {
+      this.serverRetryAttempt = 0;
+    }
+
+    if (attempt > maxAttempts) {
+      this.connectionEngine.onFailed();
+      if (kind === "server") {
+        Logger.setStatus("Video server call failed. Retry limit reached.");
+      } else {
+        Logger.setStatus("TURN/peer connection failed. Retry limit reached.");
+      }
+      Logger.user(`[retry] ${kind} retries exhausted. reason=${reason}`);
+      return;
+    }
+
+    if (kind === "server") {
+      this.connectionEngine.onServerRetrying(attempt, maxAttempts);
+      Logger.setStatus(`Video server call failed. Retrying (${attempt}/${maxAttempts})...`);
+    } else {
+      this.connectionEngine.onPeerRetrying(attempt, maxAttempts);
+      Logger.setStatus(`TURN/peer connection failed. Retrying (${attempt}/${maxAttempts})...`);
+    }
+    Logger.user(`[retry] ${kind} scheduled (${attempt}/${maxAttempts}). reason=${reason}`);
+
+    this.cleanupForRetry();
+    this.retryTimer = window.setTimeout(() => {
+      this.retryTimer = null;
+      this.join(cfg, { internalRetry: true });
+    }, delayMs);
   }
 
   private attachAndEnsureRoomThenJoin(cfg: JoinConfig) {
@@ -102,8 +199,13 @@ class CallController {
         }
       },
       () => {
-        this.connectionEngine.onReconnect();
-        Logger.setStatus("Publisher cleanup");
+        if (this.isLeaving || this.suppressPublisherCleanupRetry) return;
+        this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts);
+        Logger.setStatus("Publisher cleanup. Recovering media connection...");
+        this.schedulePeerRetry("Publisher cleanup");
+      },
+      (e: any) => {
+        this.scheduleServerRetry(`Attach publisher failed: ${JSON.stringify(e)}`);
       }
     );
   }
@@ -133,8 +235,7 @@ class CallController {
         }
       },
       error: () => {
-        this.connectionEngine.onFailed();
-        this.leave();
+        this.scheduleServerRetry("Room exists check failed");
       }
     });
   }
@@ -167,13 +268,19 @@ class CallController {
         this.sendPublisherJoin(cfg);
       },
       error: () => {
-        this.connectionEngine.onFailed();
-        this.leave();
+        this.scheduleServerRetry("Create room failed");
       }
     });
   }
 
   private onPublisherMessage(cfg: JoinConfig, msg: any, jsep: any) {
+    if (msg?.janus === "hangup") {
+      const reason = String(msg?.reason || "Peer hangup");
+      if (reason.toLowerCase().includes("ice")) {
+        this.schedulePeerRetry(`Publisher hangup: ${reason}`);
+      }
+      return;
+    }
 
     const data = this.getVideoRoomData(msg);
     const event = data["videoroom"];
@@ -194,6 +301,9 @@ class CallController {
 
       this.joinedRoom = true;
       this.currentRoomId = cfg.roomId;
+      this.serverRetryAttempt = 0;
+      this.peerRetryAttempt = 0;
+      this.clearRetryTimer();
       this.connectionEngine.onJoinedRoom();
 
       const myId = data["id"];
@@ -219,6 +329,11 @@ class CallController {
           },
           onRemoteFeedCleanup: (feedId: number) => {
             this.connectionEngine.unregisterSubscriber(feedId);
+            if (this.remoteFeeds && this.roster.has(feedId) && feedId !== this.selfId) {
+              window.setTimeout(() => {
+                this.remoteFeeds?.addFeed(feedId);
+              }, APP_CONFIG.call.remoteFeedRetryDelayMs);
+            }
           }
         }
       );
@@ -246,8 +361,7 @@ class CallController {
     }
 
     if (event === "destroyed") {
-      this.connectionEngine.onFailed();
-      this.leave();
+      this.scheduleServerRetry("Video room destroyed event");
       return;
     }
 
@@ -439,6 +553,9 @@ class CallController {
             pc.oniceconnectionstatechange = () => {
               console.log("VCX_ICE=" + pc.iceConnectionState);
               emit();
+              if (pc.iceConnectionState === "failed") {
+                this.schedulePeerRetry("Publisher ICE state failed");
+              }
             };
 
             pc.onsignalingstatechange = () => {
@@ -450,6 +567,9 @@ class CallController {
             (pc as any).onconnectionstatechange = () => {
               console.log("VCX_CONNECTION=" + ((pc as any).connectionState ?? "n/a"));
               emit();
+              if ((pc as any).connectionState === "failed") {
+                this.schedulePeerRetry("Publisher connection state failed");
+              }
             };
 
             pc.onicegatheringstatechange = () => {
@@ -484,9 +604,10 @@ class CallController {
       },
 
       error: (e: any) => {
-        this.connectionEngine.onReconnect();
-        Logger.setStatus("Offer error: " + JSON.stringify(e));
+        this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts);
+        Logger.setStatus("Offer error. Recovering media path...");
         console.log("VCX_OFFER_ERROR=", e);
+        this.schedulePeerRetry("Offer error: " + JSON.stringify(e));
       },
     });
   }
@@ -557,6 +678,10 @@ class CallController {
   leave() {
 
     try {
+      this.isLeaving = true;
+      this.clearRetryTimer();
+      this.serverRetryAttempt = 0;
+      this.peerRetryAttempt = 0;
 
       if (this.recording) this.stopRecording();
 
@@ -570,13 +695,16 @@ class CallController {
       this.remoteFeeds = null;
 
       this.plugin = null;
+      this.suppressPublisherCleanupRetry = true;
       this.gateway.destroy();
+      this.suppressPublisherCleanupRetry = false;
       this.stopParticipantSync();
 
       this.joinedRoom = false;
       this.recording = false;
       this.currentRecordingId = null;
       this.currentRoomId = null;
+      this.activeJoinCfg = null;
       this.selfId = null;
       this.roster.reset();
 

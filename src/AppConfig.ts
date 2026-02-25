@@ -58,7 +58,7 @@ const IMS_MEDIA_CONSTRAINTS_MOCK_PAYLOAD = {
           "turn:coturn.videocx.io:443?transport=udp",
           "turns:coturn.videocx.io:443?transport=tcp"
         ],
-        username: "1772097225:ecd359ac-2237-42ff-8ddc-764d79d4ea0b_!",
+        username: "1772097225:ecd359ac-2237-42ff-8ddc-764d79d4ea0b",
         credential: "odIkTMlYtpKWHHVZtAxw3a+VxJE="
       },
       {
@@ -133,7 +133,14 @@ const APP_CONFIG = {
   call: {
     reconnectDelayMs: 800,
     participantSyncIntervalMs: 8000,
-    participantSyncCooldownMs: 2500
+    participantSyncCooldownMs: 2500,
+    remoteFeedRetryDelayMs: 1200,
+    retry: {
+      serverMaxAttempts: 3,
+      serverDelayMs: 3000,
+      peerMaxAttempts: 3,
+      peerDelayMs: 3000
+    }
   },
   ui: {
     remoteFallbackRefreshMs: 2500

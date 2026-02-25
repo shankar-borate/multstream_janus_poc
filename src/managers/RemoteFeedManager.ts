@@ -1,6 +1,7 @@
 class RemoteFeedManager {
   private feeds = new Map<number, any>();
   private feedTracks = new Map<number, Map<string, MediaStreamTrack>>();
+  private pendingFeedAttach = new Set<number>();
 
   constructor(
     private janus:any,
@@ -13,7 +14,8 @@ class RemoteFeedManager {
   ){}
 
   addFeed(feedId:number){
-    if(this.feeds.has(feedId)) return;
+    if(this.feeds.has(feedId) || this.pendingFeedAttach.has(feedId)) return;
+    this.pendingFeedAttach.add(feedId);
     let remoteHandle:any = null;
 
     this.janus.attach({
@@ -21,10 +23,14 @@ class RemoteFeedManager {
       opaqueId:this.opaqueId,
       success:(h:any)=>{
         remoteHandle=h;
+        this.pendingFeedAttach.delete(feedId);
         this.feeds.set(feedId,h);
         h.send({ message:{ request:"join", room:this.roomId, ptype:"subscriber", feed:feedId, private_id:this.privateId }});
       },
-      error:(e:any)=>Logger.setStatus("Remote attach error: "+JSON.stringify(e)),
+      error:(e:any)=>{
+        this.pendingFeedAttach.delete(feedId);
+        Logger.setStatus("Remote attach error: "+JSON.stringify(e));
+      },
       onmessage:(msg:any,jsep:any)=>{
         if(jsep){
           // TODO: If Janus internals change and webrtcStuff.pc is unavailable, pass the subscriber PC from a Janus plugin callback here.
@@ -74,6 +80,7 @@ class RemoteFeedManager {
   }
 
   removeFeed(id:number, detach:boolean = true, notify:boolean = true){
+    this.pendingFeedAttach.delete(id);
     let removed = false;
     const h = this.feeds.get(id);
     if(h){

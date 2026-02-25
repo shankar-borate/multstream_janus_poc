@@ -15,6 +15,8 @@ type ConnectionProductState =
   | "OPTIMIZING"
   | "CONNECTED"
   | "DEGRADED"
+  | "SERVER_RETRYING"
+  | "PEER_RETRYING"
   | "RETRYING"
   | "FAILED";
 type ConnectionStatusView = {

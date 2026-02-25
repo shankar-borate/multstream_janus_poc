@@ -23,7 +23,8 @@ class JanusGateway {
     server: string,
     iceServers: RTCIceServer[] | undefined,
     ok: () => void,
-    destroyed: () => void
+    destroyed: () => void,
+    onError?: (e: any) => void
   ) {
     Logger.setStatus("Creating Janus session...");
     Logger.user(`Creating Janus session: ${server}`);
@@ -39,6 +40,7 @@ class JanusGateway {
       error: (e: any) => {
         Logger.setStatus("Janus error: " + JSON.stringify(e));
         Logger.user("Janus session create error: " + JSON.stringify(e));
+        onError?.(e);
       },
       destroyed: () => {
         Logger.user("Janus session destroyed");
@@ -51,7 +53,8 @@ class JanusGateway {
     onAttached: (h: any) => void,
     onMessage: (msg: any, jsep: any) => void,
     onLocalTrack: (track: MediaStreamTrack, on: boolean) => void,
-    onCleanup: () => void
+    onCleanup: () => void,
+    onError?: (e: any) => void
   ) {
     if (!this.janus) {
       Logger.setStatus("Janus not ready");
@@ -72,6 +75,7 @@ class JanusGateway {
       error: (e: any) => {
         Logger.setStatus("Attach error: " + JSON.stringify(e));
         Logger.user("Attach error: " + JSON.stringify(e));
+        onError?.(e);
       },
       onmessage: (msg: any, jsep: any) => {
         onMessage(msg, jsep);

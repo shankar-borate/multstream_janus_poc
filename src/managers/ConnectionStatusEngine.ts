@@ -39,6 +39,10 @@ class ConnectionStatusEngine {
   private lastStatsSampleAt = 0;
   private lastPublishedKey = "";
   private boundPcs = new WeakSet<RTCPeerConnection>();
+  private serverRetryAttempt = 0;
+  private serverRetryMax = 0;
+  private peerRetryAttempt = 0;
+  private peerRetryMax = 0;
 
   constructor(private onUpdate?: (status: ConnectionStatusView) => void) {
     this.transition("INIT", true);
@@ -75,6 +79,10 @@ class ConnectionStatusEngine {
     this.subscriberIceStates.clear();
     this.subscriberConnStates.clear();
     this.remoteVideoTracksByFeed.clear();
+    this.serverRetryAttempt = 0;
+    this.serverRetryMax = 0;
+    this.peerRetryAttempt = 0;
+    this.peerRetryMax = 0;
     this.transition("MEDIA_PREP", true);
   }
 
@@ -93,6 +101,18 @@ class ConnectionStatusEngine {
 
   onReconnect() {
     this.transition("RETRYING", true);
+  }
+
+  onServerRetrying(attempt: number, maxAttempts: number) {
+    this.serverRetryAttempt = Math.max(0, attempt);
+    this.serverRetryMax = Math.max(0, maxAttempts);
+    this.transition("SERVER_RETRYING", true);
+  }
+
+  onPeerRetrying(attempt: number, maxAttempts: number) {
+    this.peerRetryAttempt = Math.max(0, attempt);
+    this.peerRetryMax = Math.max(0, maxAttempts);
+    this.transition("PEER_RETRYING", true);
   }
 
   onFailed() {
@@ -348,6 +368,10 @@ class ConnectionStatusEngine {
   }
 
   private evaluate() {
+    if (this.status.state === "SERVER_RETRYING" || this.status.state === "PEER_RETRYING") {
+      return;
+    }
+
     const now = Date.now();
     const hasRemote = this.remoteParticipantCount > 0;
     const localConnected = this.localIceState === "connected" || this.localIceState === "completed";
@@ -489,6 +513,13 @@ class ConnectionStatusEngine {
       secondaryText: secondary,
       state: this.status.state
     };
+
+    if (nextStatus.state === "SERVER_RETRYING" && this.serverRetryMax > 0) {
+      nextStatus.secondaryText = `Retry ${this.serverRetryAttempt}/${this.serverRetryMax}. Reconnecting to video server.`;
+    }
+    if (nextStatus.state === "PEER_RETRYING" && this.peerRetryMax > 0) {
+      nextStatus.secondaryText = `Retry ${this.peerRetryAttempt}/${this.peerRetryMax}. Recovering TURN/peer connection.`;
+    }
 
     if (cfg.rotate) {
       const span = CONNECTION_ROTATION_MAX_MS - CONNECTION_ROTATION_MIN_MS;

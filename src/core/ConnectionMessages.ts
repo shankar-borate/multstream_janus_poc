@@ -144,6 +144,36 @@ const CONNECTION_MESSAGES: Record<ConnectionProductState, ConnectionMessageGroup
       "Automatic recovery is in progress."
     ]
   },
+  SERVER_RETRYING: {
+    owner: "SYSTEM",
+    severity: "warn",
+    rotate: true,
+    primary: [
+      "Video server call failed. Retrying...",
+      "Unable to reach video server. Retrying...",
+      "Reconnecting to video server..."
+    ],
+    secondary: [
+      "Please stay on this screen.",
+      "Trying a fresh server session now.",
+      "Session recovery is in progress."
+    ]
+  },
+  PEER_RETRYING: {
+    owner: "SYSTEM",
+    severity: "warn",
+    rotate: true,
+    primary: [
+      "Peer connection failed. Retrying...",
+      "TURN/ICE connection failed. Retrying...",
+      "Rebuilding media connection..."
+    ],
+    secondary: [
+      "Trying a new media path now.",
+      "Refreshing peer connectivity.",
+      "Call media recovery is in progress."
+    ]
+  },
   RETRYING: {
     owner: "SYSTEM",
     severity: "warn",
