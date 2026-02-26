@@ -1,5 +1,6 @@
 class MediaManager {
   private localPreviewStream: MediaStream | null = null;
+  private remotePlayPromise: Promise<void> | null = null;
 
   setLocalTrack(video: HTMLVideoElement, track: MediaStreamTrack){
     if(!this.localPreviewStream) this.localPreviewStream = new MediaStream();
@@ -20,10 +21,22 @@ class MediaManager {
       }
     });
     ms.addTrack(track);
-    video.srcObject = ms;
-    video.play().catch((e:any)=>{
-      Logger.error("Remote video play failed", e);
-    });
+    if (video.srcObject !== ms) {
+      video.srcObject = ms;
+    }
+
+    if (!video.paused) return;
+    if (this.remotePlayPromise) return;
+
+    this.remotePlayPromise = video.play()
+      .catch((e:any)=>{
+        // Normal when track/srcObject is reloaded during renegotiation.
+        if (e?.name === "AbortError") return;
+        Logger.error("Remote video play failed", e);
+      })
+      .finally(() => {
+        this.remotePlayPromise = null;
+      });
   }
 
   removeRemoteTrack(video: HTMLVideoElement, track: MediaStreamTrack){
@@ -49,6 +62,7 @@ class MediaManager {
   }
 
   clearRemote(video: HTMLVideoElement){
+    this.remotePlayPromise = null;
     const ms = video.srcObject as MediaStream | null;
     if(ms) ms.getTracks().forEach(t=>t.stop());
     video.srcObject = null;

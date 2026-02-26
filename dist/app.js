@@ -717,6 +717,7 @@ class ParticipantRoster {
 class MediaManager {
     constructor() {
         this.localPreviewStream = null;
+        this.remotePlayPromise = null;
     }
     setLocalTrack(video, track) {
         if (!this.localPreviewStream)
@@ -740,9 +741,22 @@ class MediaManager {
             }
         });
         ms.addTrack(track);
-        video.srcObject = ms;
-        video.play().catch((e) => {
+        if (video.srcObject !== ms) {
+            video.srcObject = ms;
+        }
+        if (!video.paused)
+            return;
+        if (this.remotePlayPromise)
+            return;
+        this.remotePlayPromise = video.play()
+            .catch((e) => {
+            // Normal when track/srcObject is reloaded during renegotiation.
+            if (e?.name === "AbortError")
+                return;
             Logger.error("Remote video play failed", e);
+        })
+            .finally(() => {
+            this.remotePlayPromise = null;
         });
     }
     removeRemoteTrack(video, track) {
@@ -766,6 +780,7 @@ class MediaManager {
         this.localPreviewStream = null;
     }
     clearRemote(video) {
+        this.remotePlayPromise = null;
         const ms = video.srcObject;
         if (ms)
             ms.getTracks().forEach(t => t.stop());
@@ -1319,9 +1334,12 @@ class ConnectionStatusEngine {
             return;
         }
         this.disconnectedSince = null;
-        // Consider call connected only when remote media bytes are actually flowing.
-        // Track signals alone can be false positives on weak/reloading networks.
-        if ((connectedIce && mediaFlowing) || (hasRemote && mediaFlowing)) {
+        // Prefer real user-visible media signals first.
+        // Stats-based bytes can intermittently miss samples, which causes false
+        // "connecting/slow" messages even while the call is clearly live.
+        const remoteMediaLive = mediaFlowing || liveRemoteVideo;
+        const transportReady = connectedIce || this.remoteNegotiationReady;
+        if (hasRemote && remoteMediaLive && transportReady) {
             this.transition("CONNECTED");
             return;
         }
@@ -2492,6 +2510,8 @@ class UIController {
         this.audioMuted = false;
         this.videoMuted = false;
         this.ended = false;
+        this.userType = this.resolveUserType();
+        this.canRecord = this.userType === "agent";
         this.folderPath = APP_CONFIG.recording.folderPath;
         this.autoRecordParticipantThreshold = APP_CONFIG.recording.autoStartParticipantThreshold;
         // ✅ recording state
@@ -2507,6 +2527,7 @@ class UIController {
         const localVideo = document.getElementById("localVideo");
         const remoteVideo = this.remoteVideoEl;
         this.controller = new CallController(this.bus, localVideo, remoteVideo);
+        this.applyRecordingAccess();
         this.bus.on("joined", j => {
             this.setJoinedState(j);
             console.log("VCX_JOINED=" + j);
@@ -2623,6 +2644,21 @@ class UIController {
             };
         }
     }
+    resolveUserType() {
+        const raw = this.getQueryParam("user_type") ??
+            this.getQueryParam("usertpye") ??
+            this.getQueryParam("usertype") ??
+            "";
+        return raw.trim().toLowerCase() === "agent" ? "agent" : "customer";
+    }
+    applyRecordingAccess() {
+        if (!this.btnRecord)
+            return;
+        if (this.canRecord)
+            return;
+        this.btnRecord.style.display = "none";
+        this.btnRecord.disabled = true;
+    }
     syncAutoRecordingByParticipants(participantCount) {
         const shouldRecord = participantCount >= this.autoRecordParticipantThreshold;
         if (shouldRecord && !this.recording) {
@@ -2634,6 +2670,10 @@ class UIController {
         }
     }
     startRecording(source) {
+        if (!this.canRecord) {
+            Logger.user(`Recording blocked for user_type=${this.userType}`);
+            return;
+        }
         if (this.recording)
             return;
         const rid = this.createRecordingId();
@@ -2709,9 +2749,11 @@ class UIController {
             this.btnLeave,
             this.btnReconnect,
             this.btnScreen,
-            this.btnVB,
-            this.btnRecord
+            this.btnVB
         ].forEach(b => b && (b.disabled = !joined));
+        if (this.btnRecord) {
+            this.btnRecord.disabled = !joined || !this.canRecord;
+        }
     }
     getLocalBaseOverlayText() {
         if (this.videoMuted)

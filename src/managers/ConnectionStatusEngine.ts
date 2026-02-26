@@ -405,9 +405,12 @@ class ConnectionStatusEngine {
     }
     this.disconnectedSince = null;
 
-    // Consider call connected only when remote media bytes are actually flowing.
-    // Track signals alone can be false positives on weak/reloading networks.
-    if ((connectedIce && mediaFlowing) || (hasRemote && mediaFlowing)) {
+    // Prefer real user-visible media signals first.
+    // Stats-based bytes can intermittently miss samples, which causes false
+    // "connecting/slow" messages even while the call is clearly live.
+    const remoteMediaLive = mediaFlowing || liveRemoteVideo;
+    const transportReady = connectedIce || this.remoteNegotiationReady;
+    if (hasRemote && remoteMediaLive && transportReady) {
       this.transition("CONNECTED");
       return;
     }

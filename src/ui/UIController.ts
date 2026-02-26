@@ -45,6 +45,8 @@ class UIController {
   private audioMuted = false;
   private videoMuted = false;
   private ended = false;
+  private readonly userType = this.resolveUserType();
+  private readonly canRecord = this.userType === "agent";
   private folderPath:string = APP_CONFIG.recording.folderPath;
   private autoRecordParticipantThreshold = APP_CONFIG.recording.autoStartParticipantThreshold;
 
@@ -69,6 +71,7 @@ class UIController {
     const remoteVideo = this.remoteVideoEl;
 
     this.controller = new CallController(this.bus, localVideo, remoteVideo);
+    this.applyRecordingAccess();
 
     this.bus.on<boolean>("joined", j=>{
         this.setJoinedState(j);
@@ -206,6 +209,22 @@ class UIController {
     }
   }
 
+  private resolveUserType(): "agent" | "customer" {
+    const raw =
+      this.getQueryParam("user_type") ??
+      this.getQueryParam("usertpye") ??
+      this.getQueryParam("usertype") ??
+      "";
+    return raw.trim().toLowerCase() === "agent" ? "agent" : "customer";
+  }
+
+  private applyRecordingAccess() {
+    if (!this.btnRecord) return;
+    if (this.canRecord) return;
+    this.btnRecord.style.display = "none";
+    this.btnRecord.disabled = true;
+  }
+
   private syncAutoRecordingByParticipants(participantCount: number) {
     const shouldRecord = participantCount >= this.autoRecordParticipantThreshold;
 
@@ -220,6 +239,10 @@ class UIController {
   }
 
   private startRecording(source: "manual" | "auto") {
+    if (!this.canRecord) {
+      Logger.user(`Recording blocked for user_type=${this.userType}`);
+      return;
+    }
     if (this.recording) return;
 
     const rid = this.createRecordingId();
@@ -307,9 +330,12 @@ class UIController {
       this.btnLeave,
       this.btnReconnect,
       this.btnScreen,
-      this.btnVB,
-      this.btnRecord
+      this.btnVB
     ].forEach(b => b && (b.disabled = !joined));
+
+    if (this.btnRecord) {
+      this.btnRecord.disabled = !joined || !this.canRecord;
+    }
   }
 
   private getLocalBaseOverlayText(): string {
