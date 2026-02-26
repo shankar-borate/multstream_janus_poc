@@ -40,6 +40,7 @@ class CallController {
   private participantSyncRequestTimer: number | null = null;
   private participantSyncRequestSeq = 0;
   private readonly recordingRetryDelayMs = 700;
+  private cameraStreamOrientation: "portrait" | "landscape" | null = null;
 
   constructor(
     private bus: EventBus,
@@ -261,13 +262,17 @@ class CallController {
 
   private sendPublisherJoin(cfg: JoinConfig) {
     if (!this.plugin) return;
+    const message: any = {
+      request: "join",
+      room: cfg.roomId,
+      ptype: "publisher",
+      display: cfg.display
+    };
+    if (typeof cfg.participantId === "number" && Number.isFinite(cfg.participantId)) {
+      message.id = cfg.participantId;
+    }
     this.plugin.send({
-      message: {
-        request: "join",
-        room: cfg.roomId,
-        ptype: "publisher",
-        display: cfg.display
-      }
+      message
     });
   }
 
@@ -624,6 +629,56 @@ class CallController {
     };
   }
 
+  private isIOSDevice(): boolean {
+    const ua = navigator.userAgent || "";
+    const isiPhoneFamily = /iPad|iPhone|iPod/i.test(ua);
+    const iPadOSDesktopUA = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+    return isiPhoneFamily || iPadOSDesktopUA;
+  }
+
+  private getViewportOrientation(): "portrait" | "landscape" {
+    return window.innerHeight >= window.innerWidth ? "portrait" : "landscape";
+  }
+
+  private buildIOSVideoConstraints(orientation: "portrait" | "landscape"): MediaTrackConstraints {
+    if (orientation === "portrait") {
+      return {
+        facingMode: "user",
+        width: { ideal: 480 },
+        height: { ideal: 640 },
+        frameRate: { ideal: 15, max: 20 }
+      };
+    }
+    return {
+      facingMode: "user",
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+      frameRate: { ideal: 15, max: 20 }
+    };
+  }
+
+  private async getPublishTracks(): Promise<any[]> {
+    if (!this.isIOSDevice()) {
+      return [
+        { type: "audio", capture: true, recv: false },
+        { type: "video", capture: true, recv: false }
+      ];
+    }
+
+    const stream = await this.ensureCameraStream();
+    const audioTrack = stream.getAudioTracks()[0];
+    const videoTrack = stream.getVideoTracks()[0];
+
+    if (!audioTrack || !videoTrack) {
+      throw new Error("Camera or microphone track unavailable");
+    }
+
+    return [
+      { type: "audio", capture: audioTrack, recv: false },
+      { type: "video", capture: videoTrack, recv: false }
+    ];
+  }
+
   // public publish() {
   //   this.plugin.createOffer({
   //     tracks: [
@@ -639,18 +694,29 @@ class CallController {
   //   });
   // }
 
-  public publish() {
+  public async publish() {
     if (!this.plugin) {
       Logger.setStatus("Publish ignored: plugin not ready");
       return;
     }
     const videoCfg = this.getVideoConfig();
+    let tracks: any[];
+
+    try {
+      tracks = await this.getPublishTracks();
+    } catch (e: any) {
+      const classified = this.classifyPublishError(e);
+      Logger.setStatus(classified.userMessage);
+      Logger.error(classified.userMessage, e);
+      this.connectionEngine.setFatalError(
+        classified.userMessage,
+        "Fix camera/mic issue and reconnect the call."
+      );
+      return;
+    }
 
     this.plugin.createOffer({
-      tracks: [
-        { type: "audio", capture: true, recv: false },
-        { type: "video", capture: true, recv: false },
-      ],
+      tracks,
 
       success: (jsep: any) => {
         // ✅ Point #4: capture and emit connectivity info from RTCPeerConnection
@@ -786,14 +852,13 @@ class CallController {
 
     this.plugin.send({
       message: {
-        request: "configure",
+        request: "enable_recording",
         record: true,
-        room:this.currentRoomId,
-        filename: recordingId
+        room: this.currentRoomId
       },
       success: () => {
         this.recording = true;
-        Logger.setStatus(`Recording started: ${recordingId}`);
+        Logger.setStatus(`Recording started (room): ${recordingId}`);
         this.bus.emit("recording-changed", true);
       },
       error: (e: any) => {
@@ -815,7 +880,7 @@ class CallController {
     if (!this.plugin || !this.recording) return;
 
     this.plugin.send({
-      message: { request: "configure", record: false },
+      message: { request: "enable_recording", record: false, room: this.currentRoomId },
       success: () => {
         this.recording = false;
         this.currentRecordingId = null;
@@ -849,7 +914,7 @@ class CallController {
 
       if (this.recording && this.plugin) {
         try {
-          this.plugin.send({ message: { request: "configure", record: false } });
+          this.plugin.send({ message: { request: "enable_recording", record: false, room: this.currentRoomId } });
         } catch (e: any) {
           Logger.error("[recording] stop on leave failed", e);
         }
@@ -950,10 +1015,36 @@ class CallController {
       Logger.setStatus(this.getCameraMicErrorMessage(e));
     }
   }
-  private async ensureCameraStream(){
+  private async ensureCameraStream(): Promise<MediaStream>{
     try {
-      if(!this.cameraStream){
-        this.cameraStream = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
+      const desiredOrientation = this.getViewportOrientation();
+      const needsRecreate =
+        !this.cameraStream ||
+        (this.isIOSDevice() && this.cameraStreamOrientation !== desiredOrientation);
+
+      if (needsRecreate) {
+        if (this.cameraStream) {
+          this.cameraStream.getTracks().forEach(t => {
+            try {
+              t.stop();
+            } catch (stopErr: any) {
+              Logger.error("Stopping stale camera track failed", stopErr);
+            }
+          });
+        }
+
+        const videoConstraints = this.isIOSDevice()
+          ? this.buildIOSVideoConstraints(desiredOrientation)
+          : true;
+
+        this.cameraStream = await navigator.mediaDevices.getUserMedia({
+          video: videoConstraints,
+          audio: true
+        });
+        this.cameraStreamOrientation = desiredOrientation;
+      }
+      if (!this.cameraStream) {
+        throw new Error("Camera stream unavailable after initialization");
       }
       return this.cameraStream;
     } catch (e: any) {

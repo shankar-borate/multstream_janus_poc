@@ -345,18 +345,28 @@ class UrlConfig {
     static buildJoinConfig() {
         const roomIdRaw = this.getString("roomId", "");
         if (!roomIdRaw) {
-            alert("This call link is missing a room ID, so we can’t join yet.Please open the full link again or add ?roomId=1234 to the URL.");
+            alert("This call link is missing a room ID, so we can't join yet. Please open the full link again or add ?roomId=1234 to the URL.");
             throw new Error("Missing required query param: roomId");
         }
         const roomId = parseInt(roomIdRaw, 10);
         if (!Number.isFinite(roomId)) {
-            alert("This call link is missing a room ID, so we can’t join yet.Please open the full link again or add ?roomId=1234 to the URL.");
+            alert("This call link is missing a room ID, so we can't join yet. Please open the full link again or add ?roomId=1234 to the URL.");
             throw new Error("Invalid query param: roomId must be a number");
+        }
+        const participantIdRaw = this.getString("participantId", "");
+        let participantId = undefined;
+        if (participantIdRaw) {
+            const parsedParticipantId = parseInt(participantIdRaw, 10);
+            if (!Number.isFinite(parsedParticipantId) || parsedParticipantId <= 0) {
+                throw new Error("Invalid query param: participantId must be a positive number");
+            }
+            participantId = parsedParticipantId;
         }
         return {
             server: this.getString("server", APP_CONFIG.vcx.defaultJanusServer),
             roomId,
-            display: this.getString("name", APP_CONFIG.vcx.defaultDisplayName)
+            display: this.getString("name", APP_CONFIG.vcx.defaultDisplayName),
+            participantId
         };
     }
 }
@@ -1110,6 +1120,33 @@ class ConnectionStatusEngine {
     }
     onLeft() {
         this.fatalError = null;
+        this.joinStartedAt = null;
+        this.joinedAt = null;
+        this.remoteParticipantCount = 0;
+        this.remoteParticipantSeenAt = null;
+        this.remoteTrackSeenAt = null;
+        this.remoteMediaFlowAt = null;
+        this.checkingSince = null;
+        this.localPoorSince = null;
+        this.relayDetectedAt = null;
+        this.candidateSwitchAt = null;
+        this.disconnectedSince = null;
+        this.remoteNegotiationReady = false;
+        this.selectedPairId = null;
+        this.publisherPc = null;
+        this.subscriberPcs.clear();
+        this.subscriberBytes.clear();
+        this.subscriberIceStates.clear();
+        this.subscriberConnStates.clear();
+        this.remoteVideoTracksByFeed.clear();
+        this.localVideoTrackIds.clear();
+        this.localIceState = "new";
+        this.localConnState = "new";
+        this.localSignalingState = "stable";
+        this.serverRetryAttempt = 0;
+        this.serverRetryMax = 0;
+        this.peerRetryAttempt = 0;
+        this.peerRetryMax = 0;
         this.transition("INIT", true);
     }
     setFatalError(primary, secondary = "") {
@@ -1156,6 +1193,9 @@ class ConnectionStatusEngine {
         this.subscriberIceStates.delete(feedId);
         this.subscriberConnStates.delete(feedId);
         this.remoteVideoTracksByFeed.delete(feedId);
+        if (!this.hasLiveRemoteVideoTrack()) {
+            this.remoteMediaFlowAt = null;
+        }
         this.evaluate();
     }
     onRemoteTrackSignal(feedId, track, on) {
@@ -1179,6 +1219,9 @@ class ConnectionStatusEngine {
             tracks.delete(track.id);
             if (tracks.size === 0) {
                 this.remoteVideoTracksByFeed.delete(feedId);
+            }
+            if (!this.hasLiveRemoteVideoTrack()) {
+                this.remoteMediaFlowAt = null;
             }
         }
         this.evaluate();
@@ -1393,10 +1436,11 @@ class ConnectionStatusEngine {
             this.transition("NEGOTIATING");
             return;
         }
-        // Prefer real user-visible media signals first.
-        // Stats-based bytes can intermittently miss samples, which causes false
-        // "connecting/slow" messages even while the call is clearly live.
-        const remoteMediaLive = mediaFlowing || liveRemoteVideo;
+        // Connected means both sides are truly exchanging media:
+        // local video ready + remote track signaled + inbound media flow.
+        // Requiring both remote signals avoids false positives where a track is
+        // signaled but no real remote video is visible yet.
+        const remoteMediaLive = mediaFlowing && liveRemoteVideo;
         const transportReady = connectedIce || this.remoteNegotiationReady;
         if (hasRemote && hasLocalVideo && remoteMediaLive && transportReady) {
             this.transition("CONNECTED");
@@ -1875,6 +1919,7 @@ class CallController {
         this.participantSyncRequestTimer = null;
         this.participantSyncRequestSeq = 0;
         this.recordingRetryDelayMs = 700;
+        this.cameraStreamOrientation = null;
         this.gateway = new JanusGateway();
         this.media = new MediaManager();
         this.vbManager = new VirtualBackgroundManager();
@@ -2061,13 +2106,17 @@ class CallController {
     sendPublisherJoin(cfg) {
         if (!this.plugin)
             return;
+        const message = {
+            request: "join",
+            room: cfg.roomId,
+            ptype: "publisher",
+            display: cfg.display
+        };
+        if (typeof cfg.participantId === "number" && Number.isFinite(cfg.participantId)) {
+            message.id = cfg.participantId;
+        }
         this.plugin.send({
-            message: {
-                request: "join",
-                room: cfg.roomId,
-                ptype: "publisher",
-                display: cfg.display
-            }
+            message
         });
     }
     sendCreateRoom(cfg) {
@@ -2383,6 +2432,49 @@ class CallController {
             retryable: true
         };
     }
+    isIOSDevice() {
+        const ua = navigator.userAgent || "";
+        const isiPhoneFamily = /iPad|iPhone|iPod/i.test(ua);
+        const iPadOSDesktopUA = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+        return isiPhoneFamily || iPadOSDesktopUA;
+    }
+    getViewportOrientation() {
+        return window.innerHeight >= window.innerWidth ? "portrait" : "landscape";
+    }
+    buildIOSVideoConstraints(orientation) {
+        if (orientation === "portrait") {
+            return {
+                facingMode: "user",
+                width: { ideal: 480 },
+                height: { ideal: 640 },
+                frameRate: { ideal: 15, max: 20 }
+            };
+        }
+        return {
+            facingMode: "user",
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+            frameRate: { ideal: 15, max: 20 }
+        };
+    }
+    async getPublishTracks() {
+        if (!this.isIOSDevice()) {
+            return [
+                { type: "audio", capture: true, recv: false },
+                { type: "video", capture: true, recv: false }
+            ];
+        }
+        const stream = await this.ensureCameraStream();
+        const audioTrack = stream.getAudioTracks()[0];
+        const videoTrack = stream.getVideoTracks()[0];
+        if (!audioTrack || !videoTrack) {
+            throw new Error("Camera or microphone track unavailable");
+        }
+        return [
+            { type: "audio", capture: audioTrack, recv: false },
+            { type: "video", capture: videoTrack, recv: false }
+        ];
+    }
     // public publish() {
     //   this.plugin.createOffer({
     //     tracks: [
@@ -2397,17 +2489,25 @@ class CallController {
     //     }
     //   });
     // }
-    publish() {
+    async publish() {
         if (!this.plugin) {
             Logger.setStatus("Publish ignored: plugin not ready");
             return;
         }
         const videoCfg = this.getVideoConfig();
+        let tracks;
+        try {
+            tracks = await this.getPublishTracks();
+        }
+        catch (e) {
+            const classified = this.classifyPublishError(e);
+            Logger.setStatus(classified.userMessage);
+            Logger.error(classified.userMessage, e);
+            this.connectionEngine.setFatalError(classified.userMessage, "Fix camera/mic issue and reconnect the call.");
+            return;
+        }
         this.plugin.createOffer({
-            tracks: [
-                { type: "audio", capture: true, recv: false },
-                { type: "video", capture: true, recv: false },
-            ],
+            tracks,
             success: (jsep) => {
                 // ✅ Point #4: capture and emit connectivity info from RTCPeerConnection
                 try {
@@ -2527,14 +2627,13 @@ class CallController {
         this.currentRecordingId = recordingId;
         this.plugin.send({
             message: {
-                request: "configure",
+                request: "enable_recording",
                 record: true,
-                room: this.currentRoomId,
-                filename: recordingId
+                room: this.currentRoomId
             },
             success: () => {
                 this.recording = true;
-                Logger.setStatus(`Recording started: ${recordingId}`);
+                Logger.setStatus(`Recording started (room): ${recordingId}`);
                 this.bus.emit("recording-changed", true);
             },
             error: (e) => {
@@ -2554,7 +2653,7 @@ class CallController {
         if (!this.plugin || !this.recording)
             return;
         this.plugin.send({
-            message: { request: "configure", record: false },
+            message: { request: "enable_recording", record: false, room: this.currentRoomId },
             success: () => {
                 this.recording = false;
                 this.currentRecordingId = null;
@@ -2584,7 +2683,7 @@ class CallController {
             this.peerRetryAttempt = 0;
             if (this.recording && this.plugin) {
                 try {
-                    this.plugin.send({ message: { request: "configure", record: false } });
+                    this.plugin.send({ message: { request: "enable_recording", record: false, room: this.currentRoomId } });
                 }
                 catch (e) {
                     Logger.error("[recording] stop on leave failed", e);
@@ -2691,8 +2790,31 @@ class CallController {
     }
     async ensureCameraStream() {
         try {
+            const desiredOrientation = this.getViewportOrientation();
+            const needsRecreate = !this.cameraStream ||
+                (this.isIOSDevice() && this.cameraStreamOrientation !== desiredOrientation);
+            if (needsRecreate) {
+                if (this.cameraStream) {
+                    this.cameraStream.getTracks().forEach(t => {
+                        try {
+                            t.stop();
+                        }
+                        catch (stopErr) {
+                            Logger.error("Stopping stale camera track failed", stopErr);
+                        }
+                    });
+                }
+                const videoConstraints = this.isIOSDevice()
+                    ? this.buildIOSVideoConstraints(desiredOrientation)
+                    : true;
+                this.cameraStream = await navigator.mediaDevices.getUserMedia({
+                    video: videoConstraints,
+                    audio: true
+                });
+                this.cameraStreamOrientation = desiredOrientation;
+            }
             if (!this.cameraStream) {
-                this.cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                throw new Error("Camera stream unavailable after initialization");
             }
             return this.cameraStream;
         }
@@ -2741,6 +2863,7 @@ class UIController {
         this.lastCfg = null;
         this.bridge = new ParentBridge();
         this.net = new NetworkQualityManager();
+        this.localVideoEl = document.getElementById("localVideo");
         this.remoteVideoEl = document.getElementById("remoteVideo");
         this.remoteFallback = document.getElementById("remoteFallback");
         this.localOverlay = document.getElementById("localOverlay");
@@ -2757,9 +2880,9 @@ class UIController {
         this.userType = this.resolveUserType();
         this.canRecord = this.userType === "agent";
         this.folderPath = APP_CONFIG.recording.folderPath;
-        this.autoRecordParticipantThreshold = APP_CONFIG.recording.autoStartParticipantThreshold;
         // ✅ recording state
         this.recording = false;
+        this.renderedParticipantCount = 0;
         this.connectionStatus = null;
         this.remoteVideoMonitorTimer = null;
         const qn = this.getQueryParam("name");
@@ -2768,7 +2891,7 @@ class UIController {
         Logger.user("UI loaded. Initializing controllers...");
         Logger.flow("DOMContentLoaded → UIController()");
         this.logger = new Logger(document.getElementById("statusLine"), document.getElementById("sessionInfo"));
-        const localVideo = document.getElementById("localVideo");
+        const localVideo = this.localVideoEl;
         const remoteVideo = this.remoteVideoEl;
         this.controller = new CallController(this.bus, localVideo, remoteVideo);
         this.applyRecordingAccess();
@@ -2804,13 +2927,12 @@ class UIController {
         });
         this.bus.on("participants", (snapshot) => {
             const count = snapshot.participantIds.length;
-            Logger.user(`Participants count: ${count}`);
+            Logger.user(`Roster participants count: ${count}`);
             // SIMPLE LOG (automation-friendly)
-            console.log("VCX_PARTICIPANTS=" + count);
+            console.log("VCX_ROSTER_PARTICIPANTS=" + count);
             this.updateDebugState({
-                participants: count
+                rosterParticipants: count
             });
-            this.syncAutoRecordingByParticipants(count);
         });
         this.bus.on("connectivity", (s) => {
             this.updateDebugState({
@@ -2904,7 +3026,7 @@ class UIController {
         this.btnRecord.disabled = true;
     }
     syncAutoRecordingByParticipants(participantCount) {
-        const shouldRecord = participantCount >= this.autoRecordParticipantThreshold;
+        const shouldRecord = participantCount === 2;
         if (shouldRecord && !this.recording) {
             this.startRecording("auto");
             return;
@@ -2916,6 +3038,11 @@ class UIController {
     startRecording(source) {
         if (!this.canRecord) {
             Logger.user(`Recording blocked for user_type=${this.userType}`);
+            return;
+        }
+        if (this.renderedParticipantCount !== 2) {
+            Logger.setStatus("Recording requires both participants on live video.");
+            Logger.user(`Recording blocked: rendered participants=${this.renderedParticipantCount}, required=2`);
             return;
         }
         if (this.recording)
@@ -2931,11 +3058,13 @@ class UIController {
         this.controller.stopRecording();
     }
     createRecordingId() {
-        // Generate 6 digit integer (100000 – 999999)
-        const recordingId = Math.floor(100000 + Math.random() * 900000);
+        const participantId = this.lastCfg?.participantId;
+        const recordingId = Number.isFinite(participantId)
+            ? Number(participantId)
+            : Math.floor(100000 + Math.random() * 900000);
         // Build Janus recording basename
         const rid = `${this.folderPath}/${recordingId}/rec_${Date.now()}`;
-        Logger.user(`Recording generated → id=${recordingId}, rid=${rid}`);
+        Logger.user(`Recording generated -> id=${recordingId}, rid=${rid}`);
         return rid;
     }
     updateRecordUI() {
@@ -2958,9 +3087,10 @@ class UIController {
         const cfg = UrlConfig.buildJoinConfig();
         this.lastCfg = cfg;
         this.recording = false;
+        this.renderedParticipantCount = 0;
         this.updateRecordUI();
         this.renderCallMeta(cfg);
-        Logger.setStatus(`Joining... roomId=${cfg.roomId}, name=${cfg.display}`);
+        Logger.setStatus(`Joining... roomId=${cfg.roomId}, name=${cfg.display}${cfg.participantId ? `, participantId=${cfg.participantId}` : ""}`);
         this.ended = false;
         this.endedOverlay.style.display = "none";
         this.renderRemoteFallback();
@@ -2973,7 +3103,7 @@ class UIController {
     renderCallMeta(cfg) {
         if (!this.callMeta)
             return;
-        this.callMeta.textContent = `RoomId: ${cfg.roomId} | Name: ${cfg.display}`;
+        this.callMeta.textContent = `RoomId: ${cfg.roomId} | Name: ${cfg.display}${cfg.participantId ? ` | ParticipantId: ${cfg.participantId}` : ""}`;
     }
     reconnect() {
         if (!this.lastCfg)
@@ -3048,7 +3178,14 @@ class UIController {
         });
     }
     setupRemoteFallbackMonitor() {
-        const refresh = () => this.renderRemoteFallback();
+        const refresh = () => {
+            this.refreshRenderedParticipantCount();
+            this.renderRemoteFallback();
+        };
+        this.localVideoEl.onloadeddata = refresh;
+        this.localVideoEl.onplaying = refresh;
+        this.localVideoEl.onemptied = refresh;
+        this.localVideoEl.onpause = refresh;
         this.remoteVideoEl.onloadeddata = refresh;
         this.remoteVideoEl.onplaying = refresh;
         this.remoteVideoEl.onemptied = refresh;
@@ -3059,8 +3196,8 @@ class UIController {
         this.remoteVideoMonitorTimer = window.setInterval(refresh, APP_CONFIG.ui.remoteFallbackRefreshMs);
         refresh();
     }
-    hasRemoteVideoTrack() {
-        const ms = this.remoteVideoEl.srcObject;
+    hasRenderableVideoTrack(videoEl) {
+        const ms = videoEl.srcObject;
         if (!ms)
             return false;
         const tracks = ms.getVideoTracks();
@@ -3069,11 +3206,31 @@ class UIController {
         const hasLiveTrack = tracks.some(t => t.readyState === "live" && t.enabled !== false);
         if (!hasLiveTrack)
             return false;
-        const hasDecodedFrame = this.remoteVideoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
-            this.remoteVideoEl.videoWidth > 0 &&
-            this.remoteVideoEl.videoHeight > 0;
-        const hasStartedPlayback = this.remoteVideoEl.currentTime > 0.05;
+        const hasDecodedFrame = videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            videoEl.videoWidth > 0 &&
+            videoEl.videoHeight > 0;
+        const hasStartedPlayback = videoEl.currentTime > 0.05;
         return hasDecodedFrame && hasStartedPlayback;
+    }
+    hasLocalVideoTrack() {
+        return this.hasRenderableVideoTrack(this.localVideoEl);
+    }
+    hasRemoteVideoTrack() {
+        return this.hasRenderableVideoTrack(this.remoteVideoEl);
+    }
+    refreshRenderedParticipantCount() {
+        const count = (this.hasLocalVideoTrack() ? 1 : 0) +
+            (this.hasRemoteVideoTrack() ? 1 : 0);
+        if (count === this.renderedParticipantCount)
+            return;
+        this.renderedParticipantCount = count;
+        Logger.user(`Rendered participants count: ${count}`);
+        console.log("VCX_PARTICIPANTS=" + count);
+        this.updateDebugState({
+            participants: count,
+            participantsRendered: count
+        });
+        this.syncAutoRecordingByParticipants(count);
     }
     renderRemoteFallback() {
         if (!this.remoteFallback)

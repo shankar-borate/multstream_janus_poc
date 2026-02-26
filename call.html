@@ -159,6 +159,11 @@ button:hover {
         </div>
 
         <div class="form-group">
+            <label>Participant ID</label>
+            <input id="participantId" placeholder="Enter Participant ID" type="number" min="1">
+        </div>
+
+        <div class="form-group">
             <label>User Type</label>
             <select id="userType">
                 <option value="agent">Agent</option>
@@ -191,13 +196,20 @@ function joinCall() {
 
     const roomId = document.getElementById("roomId").value.trim();
     const name = document.getElementById("name").value.trim();
+    const participantId = document.getElementById("participantId").value.trim();
     const userType = document.getElementById("userType").value.trim().toLowerCase();
     const error = document.getElementById("error");
 
     error.innerText = "";
 
-    if (!roomId || !name || !userType) {
-        error.innerText = "Room ID, Name and User Type are required.";
+    if (!roomId || !name || !participantId || !userType) {
+        error.innerText = "Room ID, Name, Participant ID and User Type are required.";
+        return;
+    }
+
+    const participantIdNum = Number(participantId);
+    if (!Number.isInteger(participantIdNum) || participantIdNum <= 0) {
+        error.innerText = "Participant ID must be a positive number.";
         return;
     }
 
@@ -210,6 +222,7 @@ function joinCall() {
       "https://beta.videocx.io/poc/mstream/index.html" +
       "?roomId=" + encodeURIComponent(roomId) +
       "&name=" + encodeURIComponent(name) +
+      "&participantId=" + encodeURIComponent(participantId) +
       "&user_type=" + encodeURIComponent(userType);
 
     console.log("Loading:", url);

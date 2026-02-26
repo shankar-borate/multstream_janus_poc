@@ -1,0 +1,51 @@
+Findings (Before Any Fixes)
+
+HIGH Connection status state can leak across reconnects/new joins.
+onJoinStarted() resets many fields but does not reset publisherPc, localIceState, localConnState, or localSignalingState, so a previous failed/disconnected PC can influence the next call’s status.
+Refs: ConnectionStatusEngine.ts:63, ConnectionStatusEngine.ts:31, ConnectionStatusEngine.ts:146
+
+HIGH “RETRYING” status does not always trigger an actual retry action.
+Engine transitions to RETRYING on prolonged disconnected state, but this path only updates status text; actual retry is only triggered elsewhere on failed events, so calls can remain degraded/stuck without rejoin.
+Refs: ConnectionStatusEngine.ts:397, ConnectionStatusEngine.ts:400, CallController.ts:592, CallController.ts:606
+
+HIGH Recording failure paths are under-logged and partially unhandled.
+startRecording error callback logs nothing; stopRecording has no error callback at all. This can leave silent failures and ambiguous recording state.
+Refs: CallController.ts:676, CallController.ts:688, CallController.ts:699
+
+HIGH Screen-share / camera / VB flows can throw unhandled async exceptions.
+No try/catch around getDisplayMedia, getUserMedia, or VB enable paths. Permission denial/cancel/device errors become unhandled promise rejections without structured status/error logs.
+Refs: CallController.ts:761, CallController.ts:765, CallController.ts:792, CallController.ts:810, ScreenShareManager.ts:5
+
+MEDIUM Retry cleanup does not reset recording flags/state.
+During retry cleanup, recording state is not explicitly reset and no recording-changed=false event is emitted there, so UI/controller recording state can become stale during retry cycles.
+Refs: CallController.ts:110, CallController.ts:178, CallController.ts:26
+
+MEDIUM Many Janus plugin errors are logged but not recovered.
+For publisher plugin errors other than explicit room-426 handling, flow usually just logs and continues; this can leave connection half-broken without retry escalation.
+Refs: CallController.ts:300, CallController.ts:304
+
+MEDIUM attachPublisher can fail silently from caller perspective when Janus session is null.
+Gateway returns early with status text but does not invoke onError, so controller retry logic is not triggered on that path.
+Refs: JanusGateway.ts:59
+
+MEDIUM Multiple exceptions are swallowed with empty catches.
+This violates your “don’t miss exception logging” requirement and makes root-cause analysis difficult.
+Refs: ConnectionStatusEngine.ts:269, ConnectionStatusEngine.ts:280, CallController.ts:724, JanusGateway.ts:104, ParentBridge.ts:3, RemoteFeedManager.ts:168
+
+MEDIUM IMS retry path is currently bypassed by config default.
+useMockMediaConstraints is true, so IMS fetch/network/retry behavior is not exercised in normal runs unless manually toggled.
+Refs: AppConfig.ts:109, ImsClient.ts:12
+
+MEDIUM “Low network” badge is synthetic, not actual call stats.
+NetworkQualityManager currently emits randomized values; this can conflict with real connection status and confuse troubleshooting.
+Refs: NetworkQualityManager.ts:9, NetworkQualityManager.ts:24
+
+LOW Some important failures use raw console.log instead of centralized error logger.
+This reduces consistency and filterability under log-level control.
+Refs: CallController.ts:528, CallController.ts:644
+
+Open Questions / Assumptions
+
+Should ConnectionStatusEngine only present state, or should it also trigger retries directly on prolonged disconnect (not just failed)?
+Should IMS mock mode stay enabled in this environment, or should we enforce real IMS fetch + retry for integration testing?
+For recording failures, do you want hard failure UX (status + toast + parent event), or silent fallback with logs only?

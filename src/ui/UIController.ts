@@ -29,6 +29,7 @@ class UIController {
 
   private bridge = new ParentBridge();
   private net = new NetworkQualityManager();
+  private localVideoEl = document.getElementById("localVideo") as HTMLVideoElement;
   private remoteVideoEl = document.getElementById("remoteVideo") as HTMLVideoElement;
   private remoteFallback = document.getElementById("remoteFallback") as HTMLDivElement;
 
@@ -48,10 +49,10 @@ class UIController {
   private readonly userType = this.resolveUserType();
   private readonly canRecord = this.userType === "agent";
   private folderPath:string = APP_CONFIG.recording.folderPath;
-  private autoRecordParticipantThreshold = APP_CONFIG.recording.autoStartParticipantThreshold;
 
   // ✅ recording state
   private recording = false;
+  private renderedParticipantCount = 0;
   private connectionStatus: ConnectionStatusView | null = null;
   private remoteVideoMonitorTimer: number | null = null;
 
@@ -67,7 +68,7 @@ class UIController {
       document.getElementById("sessionInfo") as HTMLElement
     );
 
-    const localVideo = document.getElementById("localVideo") as HTMLVideoElement;
+    const localVideo = this.localVideoEl;
     const remoteVideo = this.remoteVideoEl;
 
     this.controller = new CallController(this.bus, localVideo, remoteVideo);
@@ -109,13 +110,12 @@ class UIController {
 
     this.bus.on<any>("participants", (snapshot) => {
         const count = snapshot.participantIds.length;
-        Logger.user(`Participants count: ${count}`);
+        Logger.user(`Roster participants count: ${count}`);
         // SIMPLE LOG (automation-friendly)
-        console.log("VCX_PARTICIPANTS=" + count);
+        console.log("VCX_ROSTER_PARTICIPANTS=" + count);
         this.updateDebugState({
-          participants: count
+          rosterParticipants: count
         });
-        this.syncAutoRecordingByParticipants(count);
     });
     this.bus.on<any>("connectivity", (s) => {
         this.updateDebugState({
@@ -226,7 +226,7 @@ class UIController {
   }
 
   private syncAutoRecordingByParticipants(participantCount: number) {
-    const shouldRecord = participantCount >= this.autoRecordParticipantThreshold;
+    const shouldRecord = participantCount === 2;
 
     if (shouldRecord && !this.recording) {
       this.startRecording("auto");
@@ -243,6 +243,11 @@ class UIController {
       Logger.user(`Recording blocked for user_type=${this.userType}`);
       return;
     }
+    if (this.renderedParticipantCount !== 2) {
+      Logger.setStatus("Recording requires both participants on live video.");
+      Logger.user(`Recording blocked: rendered participants=${this.renderedParticipantCount}, required=2`);
+      return;
+    }
     if (this.recording) return;
 
     const rid = this.createRecordingId();
@@ -256,13 +261,14 @@ class UIController {
     Logger.user(`${source} stop recording`);
     this.controller.stopRecording();
   }
-
   private createRecordingId(): string{
-    // Generate 6 digit integer (100000 – 999999)
-    const recordingId = Math.floor(100000 + Math.random() * 900000);
+    const participantId = this.lastCfg?.participantId;
+    const recordingId = Number.isFinite(participantId as number)
+      ? Number(participantId)
+      : Math.floor(100000 + Math.random() * 900000);
     // Build Janus recording basename
     const rid = `${this.folderPath}/${recordingId}/rec_${Date.now()}`;
-    Logger.user(`Recording generated → id=${recordingId}, rid=${rid}`);
+    Logger.user(`Recording generated -> id=${recordingId}, rid=${rid}`);
     return rid;
   }
 
@@ -286,12 +292,11 @@ class UIController {
     const cfg = UrlConfig.buildJoinConfig();
     this.lastCfg = cfg;
     this.recording = false;
+    this.renderedParticipantCount = 0;
     this.updateRecordUI();
     this.renderCallMeta(cfg);
 
-    Logger.setStatus(
-      `Joining... roomId=${cfg.roomId}, name=${cfg.display}`
-    );
+    Logger.setStatus(`Joining... roomId=${cfg.roomId}, name=${cfg.display}${cfg.participantId ? `, participantId=${cfg.participantId}` : ""}`);
 
     this.ended = false;
     this.endedOverlay.style.display = "none";
@@ -307,7 +312,7 @@ class UIController {
 
   private renderCallMeta(cfg: JoinConfig) {
     if (!this.callMeta) return;
-    this.callMeta.textContent = `RoomId: ${cfg.roomId} | Name: ${cfg.display}`;
+    this.callMeta.textContent = `RoomId: ${cfg.roomId} | Name: ${cfg.display}${cfg.participantId ? ` | ParticipantId: ${cfg.participantId}` : ""}`;
   }
 
   private reconnect() {
@@ -392,8 +397,15 @@ class UIController {
   }
 
   private setupRemoteFallbackMonitor() {
-    const refresh = () => this.renderRemoteFallback();
+    const refresh = () => {
+      this.refreshRenderedParticipantCount();
+      this.renderRemoteFallback();
+    };
 
+    this.localVideoEl.onloadeddata = refresh;
+    this.localVideoEl.onplaying = refresh;
+    this.localVideoEl.onemptied = refresh;
+    this.localVideoEl.onpause = refresh;
     this.remoteVideoEl.onloadeddata = refresh;
     this.remoteVideoEl.onplaying = refresh;
     this.remoteVideoEl.onemptied = refresh;
@@ -406,8 +418,8 @@ class UIController {
     refresh();
   }
 
-  private hasRemoteVideoTrack(): boolean {
-    const ms = this.remoteVideoEl.srcObject as MediaStream | null;
+  private hasRenderableVideoTrack(videoEl: HTMLVideoElement): boolean {
+    const ms = videoEl.srcObject as MediaStream | null;
     if (!ms) return false;
     const tracks = ms.getVideoTracks();
     if (!tracks || tracks.length === 0) return false;
@@ -415,11 +427,35 @@ class UIController {
     if (!hasLiveTrack) return false;
 
     const hasDecodedFrame =
-      this.remoteVideoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
-      this.remoteVideoEl.videoWidth > 0 &&
-      this.remoteVideoEl.videoHeight > 0;
-    const hasStartedPlayback = this.remoteVideoEl.currentTime > 0.05;
+      videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+      videoEl.videoWidth > 0 &&
+      videoEl.videoHeight > 0;
+    const hasStartedPlayback = videoEl.currentTime > 0.05;
     return hasDecodedFrame && hasStartedPlayback;
+  }
+
+  private hasLocalVideoTrack(): boolean {
+    return this.hasRenderableVideoTrack(this.localVideoEl);
+  }
+
+  private hasRemoteVideoTrack(): boolean {
+    return this.hasRenderableVideoTrack(this.remoteVideoEl);
+  }
+
+  private refreshRenderedParticipantCount() {
+    const count =
+      (this.hasLocalVideoTrack() ? 1 : 0) +
+      (this.hasRemoteVideoTrack() ? 1 : 0);
+
+    if (count === this.renderedParticipantCount) return;
+    this.renderedParticipantCount = count;
+    Logger.user(`Rendered participants count: ${count}`);
+    console.log("VCX_PARTICIPANTS=" + count);
+    this.updateDebugState({
+      participants: count,
+      participantsRendered: count
+    });
+    this.syncAutoRecordingByParticipants(count);
   }
 
   private renderRemoteFallback() {
@@ -501,3 +537,4 @@ class UIController {
     console.log("VCX_DEBUG", (window as any).__vcxDebug);
   }
 }
+

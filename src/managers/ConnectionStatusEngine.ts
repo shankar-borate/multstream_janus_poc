@@ -130,6 +130,33 @@ class ConnectionStatusEngine {
 
   onLeft() {
     this.fatalError = null;
+    this.joinStartedAt = null;
+    this.joinedAt = null;
+    this.remoteParticipantCount = 0;
+    this.remoteParticipantSeenAt = null;
+    this.remoteTrackSeenAt = null;
+    this.remoteMediaFlowAt = null;
+    this.checkingSince = null;
+    this.localPoorSince = null;
+    this.relayDetectedAt = null;
+    this.candidateSwitchAt = null;
+    this.disconnectedSince = null;
+    this.remoteNegotiationReady = false;
+    this.selectedPairId = null;
+    this.publisherPc = null;
+    this.subscriberPcs.clear();
+    this.subscriberBytes.clear();
+    this.subscriberIceStates.clear();
+    this.subscriberConnStates.clear();
+    this.remoteVideoTracksByFeed.clear();
+    this.localVideoTrackIds.clear();
+    this.localIceState = "new";
+    this.localConnState = "new";
+    this.localSignalingState = "stable";
+    this.serverRetryAttempt = 0;
+    this.serverRetryMax = 0;
+    this.peerRetryAttempt = 0;
+    this.peerRetryMax = 0;
     this.transition("INIT", true);
   }
 
@@ -182,6 +209,9 @@ class ConnectionStatusEngine {
     this.subscriberIceStates.delete(feedId);
     this.subscriberConnStates.delete(feedId);
     this.remoteVideoTracksByFeed.delete(feedId);
+    if (!this.hasLiveRemoteVideoTrack()) {
+      this.remoteMediaFlowAt = null;
+    }
     this.evaluate();
   }
 
@@ -205,6 +235,9 @@ class ConnectionStatusEngine {
       tracks.delete(track.id);
       if (tracks.size === 0) {
         this.remoteVideoTracksByFeed.delete(feedId);
+      }
+      if (!this.hasLiveRemoteVideoTrack()) {
+        this.remoteMediaFlowAt = null;
       }
     }
     this.evaluate();
@@ -439,10 +472,11 @@ class ConnectionStatusEngine {
       return;
     }
 
-    // Prefer real user-visible media signals first.
-    // Stats-based bytes can intermittently miss samples, which causes false
-    // "connecting/slow" messages even while the call is clearly live.
-    const remoteMediaLive = mediaFlowing || liveRemoteVideo;
+    // Connected means both sides are truly exchanging media:
+    // local video ready + remote track signaled + inbound media flow.
+    // Requiring both remote signals avoids false positives where a track is
+    // signaled but no real remote video is visible yet.
+    const remoteMediaLive = mediaFlowing && liveRemoteVideo;
     const transportReady = connectedIce || this.remoteNegotiationReady;
     if (hasRemote && hasLocalVideo && remoteMediaLive && transportReady) {
       this.transition("CONNECTED");
