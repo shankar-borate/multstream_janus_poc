@@ -8,7 +8,10 @@ class MediaManager {
     this.localPreviewStream.addTrack(track);
     video.srcObject = this.localPreviewStream;
     video.muted = true;
-    video.play().catch(()=>{});
+    video.play().catch((e: any) => {
+      if (e?.name === "AbortError") return;
+      Logger.error("Local video play failed", e);
+    });
   }
 
   setRemoteTrack(video: HTMLVideoElement, track: MediaStreamTrack){
@@ -17,7 +20,11 @@ class MediaManager {
     ms.getTracks().forEach(t=>{
       if(t.kind === track.kind && t.id !== track.id){
         ms.removeTrack(t);
-        try{ t.stop(); }catch{}
+        try{
+          t.stop();
+        }catch(e:any){
+          Logger.error("Stopping replaced remote track failed", e);
+        }
       }
     });
     ms.addTrack(track);

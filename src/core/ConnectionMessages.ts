@@ -53,11 +53,11 @@ const CONNECTION_MESSAGES: Record<ConnectionProductState, ConnectionMessageGroup
     rotate: true,
     primary: [
       "Waiting for the other participant...",
-      "Call is ready. Waiting for participant...",
+      "Waiting for participant to join...",
       "Standing by for remote join..."
     ],
     secondary: [
-      "You are connected and ready.",
+      "Keep this screen open while they join.",
       "Share the link if they have not joined yet.",
       "This screen will update automatically."
     ]

@@ -39,6 +39,7 @@ class CallController {
   private suppressRemoteFeedRetry = false;
   private participantSyncRequestTimer: number | null = null;
   private participantSyncRequestSeq = 0;
+  private readonly recordingRetryDelayMs = 700;
 
   constructor(
     private bus: EventBus,
@@ -117,7 +118,11 @@ class CallController {
     this.roomCreateAttempted = false;
     this.privateId = null;
     this.selfId = null;
+    this.recording = false;
+    this.currentRecordingId = null;
+    this.currentRoomId = null;
     this.roster.reset();
+    this.bus.emit("recording-changed", false);
     this.bus.emit("joined", false);
 
     this.suppressPublisherCleanupRetry = true;
@@ -205,6 +210,9 @@ class CallController {
       },
       (msg: any, jsep: any) => this.onPublisherMessage(cfg, msg, jsep),
       (track: any, on: any) => {
+        if (track && typeof track.kind === "string") {
+          this.connectionEngine.onLocalTrackSignal(track, !!on);
+        }
         if (on && track.kind === "video") {
           this.media.setLocalTrack(this.localVideo, track);
         }
@@ -525,11 +533,95 @@ class CallController {
       p.encodings = encodings;
 
       sender.setParameters(p).catch((e: any) => {
-        console.log("VCX_SET_PARAMETERS_ERROR=", e?.message || e);
+        Logger.error("VCX_SET_PARAMETERS_ERROR", e);
       });
     } catch (e: any) {
-      console.log("VCX_SET_PARAMETERS_HOOK_ERROR=", e?.message || e);
+      Logger.error("VCX_SET_PARAMETERS_HOOK_ERROR", e);
     }
+  }
+
+  private getErrorName(err: any): string {
+    return String(err?.name || err?.error?.name || "").trim();
+  }
+
+  private getErrorMessage(err: any): string {
+    return String(err?.message || err?.error?.message || "").trim();
+  }
+
+  private isMediaPermissionError(err: any): boolean {
+    const name = this.getErrorName(err).toLowerCase();
+    const msg = this.getErrorMessage(err).toLowerCase();
+    return name === "notallowederror" ||
+      name === "permissiondeniederror" ||
+      name === "securityerror" ||
+      /permission|denied|not allowed/.test(msg);
+  }
+
+  private isMediaDeviceMissingError(err: any): boolean {
+    const name = this.getErrorName(err).toLowerCase();
+    const msg = this.getErrorMessage(err).toLowerCase();
+    return name === "notfounderror" ||
+      name === "devicesnotfounderror" ||
+      /requested device not found|notfound/.test(msg);
+  }
+
+  private isMediaBusyError(err: any): boolean {
+    const name = this.getErrorName(err).toLowerCase();
+    const msg = this.getErrorMessage(err).toLowerCase();
+    return name === "notreadableerror" ||
+      name === "trackstarterror" ||
+      /device in use|device is busy|could not start video source/.test(msg);
+  }
+
+  private isMediaConstraintError(err: any): boolean {
+    const name = this.getErrorName(err).toLowerCase();
+    const msg = this.getErrorMessage(err).toLowerCase();
+    return name === "overconstrainederror" ||
+      name === "constraintnotsatisfiederror" ||
+      /overconstrained|constraint/.test(msg);
+  }
+
+  private getCameraMicErrorMessage(err: any): string {
+    if (this.isMediaPermissionError(err)) {
+      return "Camera/Mic access blocked. Allow permissions in browser settings, then retry.";
+    }
+    if (this.isMediaDeviceMissingError(err)) {
+      return "Camera or microphone not found. Connect your devices, then retry.";
+    }
+    if (this.isMediaBusyError(err)) {
+      return "Camera/Mic is busy in another app. Close other apps using them, then retry.";
+    }
+    if (this.isMediaConstraintError(err)) {
+      return "Camera/Mic settings are unsupported. Reconnect device or reset browser media settings.";
+    }
+    return "Unable to start camera/microphone. Check devices and browser permissions, then retry.";
+  }
+
+  private getScreenShareErrorMessage(err: any): string {
+    if (this.isMediaPermissionError(err)) {
+      return "Screen share was blocked or canceled. Select a window/screen and allow access.";
+    }
+    if (this.getErrorName(err).toLowerCase() === "aborterror") {
+      return "Screen share was canceled. Please try sharing again.";
+    }
+    if (this.isMediaBusyError(err)) {
+      return "Screen share is unavailable right now. Close blocking apps and retry.";
+    }
+    return "Screen share failed. Please try again.";
+  }
+
+  private classifyPublishError(err: any): { userMessage: string; retryable: boolean } {
+    if (this.isMediaPermissionError(err) || this.isMediaDeviceMissingError(err) || this.isMediaBusyError(err) || this.isMediaConstraintError(err)) {
+      return {
+        userMessage: this.getCameraMicErrorMessage(err),
+        retryable: false
+      };
+    }
+
+    return {
+      userMessage: "Offer error. Recovering media path...",
+      retryable: true
+    };
   }
 
   // public publish() {
@@ -622,7 +714,7 @@ class CallController {
             });
           }
         } catch (e: any) {
-          console.log("VCX_CONNECTIVITY=hook_error", e?.message || e);
+          Logger.error("VCX_CONNECTIVITY hook error", e);
         }
 
         // ✅ normal Janus publish configure
@@ -639,9 +731,19 @@ class CallController {
       },
 
       error: (e: any) => {
+        const classified = this.classifyPublishError(e);
+        console.error("VCX_OFFER_ERROR", e);
+        Logger.setStatus(classified.userMessage);
+        Logger.error(classified.userMessage, e);
+        if (!classified.retryable) {
+          this.connectionEngine.setFatalError(
+            classified.userMessage,
+            "Fix camera/mic issue and reconnect the call."
+          );
+          return;
+        }
         this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts);
         Logger.setStatus("Offer error. Recovering media path...");
-        console.log("VCX_OFFER_ERROR=", e);
         this.schedulePeerRetry("Offer error: " + JSON.stringify(e));
       },
     });
@@ -666,7 +768,16 @@ class CallController {
   // RECORDING
   // =====================================
 
-  public startRecording(recordingId: string) {
+  private endCallOnRecordingFailure(message: string, err?: unknown) {
+    Logger.error(`[recording] ${message}`, err);
+    Logger.setStatus("Recording failed twice. Ending call.");
+    this.recording = false;
+    this.currentRecordingId = null;
+    this.bus.emit("recording-changed", false);
+    if (!this.isLeaving) this.leave();
+  }
+
+  public startRecording(recordingId: string, attempt: number = 1) {
 
     if (!this.plugin || !this.joinedRoom) return;
     if (this.recording) return;
@@ -685,14 +796,21 @@ class CallController {
         Logger.setStatus(`Recording started: ${recordingId}`);
         this.bus.emit("recording-changed", true);
       },
-      error: () => {
+      error: (e: any) => {
+        Logger.error(`[recording] start failed (attempt ${attempt})`, e);
         this.recording = false;
         this.bus.emit("recording-changed", false);
+        if (attempt < 2) {
+          Logger.setStatus("Recording start failed. Retrying...");
+          window.setTimeout(() => this.startRecording(recordingId, attempt + 1), this.recordingRetryDelayMs);
+          return;
+        }
+        this.endCallOnRecordingFailure("start failed after retry", e);
       }
     });
   }
 
-  public stopRecording() {
+  public stopRecording(attempt: number = 1) {
 
     if (!this.plugin || !this.recording) return;
 
@@ -700,8 +818,18 @@ class CallController {
       message: { request: "configure", record: false },
       success: () => {
         this.recording = false;
+        this.currentRecordingId = null;
         Logger.setStatus("Recording stopped");
         this.bus.emit("recording-changed", false);
+      },
+      error: (e: any) => {
+        Logger.error(`[recording] stop failed (attempt ${attempt})`, e);
+        if (attempt < 2) {
+          Logger.setStatus("Recording stop failed. Retrying...");
+          window.setTimeout(() => this.stopRecording(attempt + 1), this.recordingRetryDelayMs);
+          return;
+        }
+        this.endCallOnRecordingFailure("stop failed after retry", e);
       }
     });
   }
@@ -719,13 +847,21 @@ class CallController {
       this.serverRetryAttempt = 0;
       this.peerRetryAttempt = 0;
 
-      if (this.recording) this.stopRecording();
+      if (this.recording && this.plugin) {
+        try {
+          this.plugin.send({ message: { request: "configure", record: false } });
+        } catch (e: any) {
+          Logger.error("[recording] stop on leave failed", e);
+        }
+      }
 
       try {
         if (this.joinedRoom) {
           this.plugin?.send({ message: { request: "leave" } });
         }
-      } catch {}
+      } catch (e: any) {
+        Logger.error("Leave signaling failed", e);
+      }
 
       this.remoteFeeds?.cleanupAll();
       this.remoteFeeds = null;
@@ -755,29 +891,34 @@ class CallController {
 
     } catch (e: any) {
       Logger.setStatus("Leave error: " + e.message);
+      Logger.error("Leave error", e);
     }
   }
 
     async toggleScreenShare(){
     if(!this.plugin) return;
-
-    if(!this.screenEnabled){
-      const ss = await this.screenManager.start();
-      const track = ss.getVideoTracks()[0];
-      if(!track) return;
-      this.screenEnabled = true;
-      this.replaceVideoTrack(track);
-      Logger.setStatus("Screen share started");
-      this.bus.emit("screen-changed", true);
-      track.onended = ()=>{ if(this.screenEnabled) this.toggleScreenShare(); };
-    } else {
-      this.screenManager.stop();
-      this.screenEnabled = false;
-      const cam = await this.ensureCameraStream();
-      const track = cam.getVideoTracks()[0];
-      if(track) this.replaceVideoTrack(track);
-      Logger.setStatus("Screen share stopped");
-      this.bus.emit("screen-changed", false);
+    try {
+      if(!this.screenEnabled){
+        const ss = await this.screenManager.start();
+        const track = ss.getVideoTracks()[0];
+        if(!track) return;
+        this.screenEnabled = true;
+        this.replaceVideoTrack(track);
+        Logger.setStatus("Screen share started");
+        this.bus.emit("screen-changed", true);
+        track.onended = ()=>{ if(this.screenEnabled) void this.toggleScreenShare(); };
+      } else {
+        this.screenManager.stop();
+        this.screenEnabled = false;
+        const cam = await this.ensureCameraStream();
+        const track = cam.getVideoTracks()[0];
+        if(track) this.replaceVideoTrack(track);
+        Logger.setStatus("Screen share stopped");
+        this.bus.emit("screen-changed", false);
+      }
+    } catch (e: any) {
+      Logger.error("Screen share toggle failed", e);
+      Logger.setStatus(this.getScreenShareErrorMessage(e));
     }
   }
 
@@ -787,35 +928,50 @@ class CallController {
       Logger.setStatus("Disable screen share before virtual background");
       return;
     }
-
-    if(!this.vbEnabled){
-      const cam = await this.ensureCameraStream();
-      const processed = await this.vbManager.enable(cam);
-      const track = processed.getVideoTracks()[0];
-      if(!track) return;
-      this.vbEnabled = true;
-      this.replaceVideoTrack(track);
-      this.bus.emit("vb-changed", true);
-    } else {
-      this.vbManager.disable();
-      this.vbEnabled = false;
-      const cam = await this.ensureCameraStream();
-      const track = cam.getVideoTracks()[0];
-      if(track) this.replaceVideoTrack(track);
-      this.bus.emit("vb-changed", false);
+    try {
+      if(!this.vbEnabled){
+        const cam = await this.ensureCameraStream();
+        const processed = await this.vbManager.enable(cam);
+        const track = processed.getVideoTracks()[0];
+        if(!track) return;
+        this.vbEnabled = true;
+        this.replaceVideoTrack(track);
+        this.bus.emit("vb-changed", true);
+      } else {
+        this.vbManager.disable();
+        this.vbEnabled = false;
+        const cam = await this.ensureCameraStream();
+        const track = cam.getVideoTracks()[0];
+        if(track) this.replaceVideoTrack(track);
+        this.bus.emit("vb-changed", false);
+      }
+    } catch (e: any) {
+      Logger.error("Virtual background toggle failed", e);
+      Logger.setStatus(this.getCameraMicErrorMessage(e));
     }
   }
   private async ensureCameraStream(){
-    if(!this.cameraStream){
-      this.cameraStream = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
+    try {
+      if(!this.cameraStream){
+        this.cameraStream = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
+      }
+      return this.cameraStream;
+    } catch (e: any) {
+      Logger.error("Camera access failed", e);
+      Logger.setStatus(this.getCameraMicErrorMessage(e));
+      throw e;
     }
-    return this.cameraStream;
   }
    private replaceVideoTrack(track: MediaStreamTrack){
     if(!this.plugin) return;
-    this.plugin.replaceTracks({
-      tracks:[{ type:"video", capture:track, recv:false }]
-    });
-    this.media.setLocalTrack(this.localVideo, track);
+    try {
+      this.plugin.replaceTracks({
+        tracks:[{ type:"video", capture:track, recv:false }]
+      });
+      this.media.setLocalTrack(this.localVideo, track);
+    } catch (e: any) {
+      Logger.error("replaceVideoTrack failed", e);
+      Logger.setStatus("Video track switch failed.");
+    }
   }
 }

@@ -1,5 +1,7 @@
 class Logger {
   static instance: Logger | null = null;
+  private static readonly STATUS_COLOR_DEFAULT = "#111827";
+  private static readonly STATUS_COLOR_ERROR = "#dc2626";
 
   private static userName = "User";
   private static remoteName = "Remote";
@@ -39,13 +41,24 @@ class Logger {
 
   // Instance UI updates
   setStatus(msg: string): void {
-    if (this.statusEl) this.statusEl.textContent = msg;
+    if (this.statusEl) {
+      this.statusEl.textContent = msg;
+      this.statusEl.style.color = Logger.STATUS_COLOR_DEFAULT;
+    }
     Logger.user(msg);
   }
 
   setInfo(msg: string): void {
     if (this.infoEl) this.infoEl.textContent = msg;
     if (msg) Logger.flow(msg);
+  }
+
+  private setErrorStatus(msg: string): void {
+    if (this.statusEl) {
+      this.statusEl.textContent = msg;
+      this.statusEl.style.color = Logger.STATUS_COLOR_ERROR;
+    }
+    Logger.user(msg);
   }
 
   // Static UI updates (backward compatible)
@@ -72,6 +85,11 @@ class Logger {
     if (!Logger.canLog("error")) return;
     console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#fb7185;font-weight:bold");
     if (err) console.error(err);
+    if (Logger.instance) {
+      Logger.instance.setErrorStatus(msg);
+      return;
+    }
+    Logger.user(msg);
   }
 
   // Friendly narration logs

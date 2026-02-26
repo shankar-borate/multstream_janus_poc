@@ -52,6 +52,10 @@ class RemoteFeedManager {
 
   addFeed(feedId:number){
     if(this.feeds.has(feedId) || this.pendingFeedAttach.has(feedId)) return;
+    if(!this.janus){
+      Logger.error(`Remote feed ${feedId} attach skipped: Janus session not ready`);
+      return;
+    }
     this.clearRetryTimer(feedId);
     this.pendingFeedAttach.add(feedId);
     this.clearAttachTimer(feedId);
@@ -165,7 +169,9 @@ class RemoteFeedManager {
     const h = this.feeds.get(id);
     if(h){
       if(detach){
-        try{h.detach();}catch{}
+        try{h.detach();}catch(e:any){
+          Logger.error(`Remote feed ${id} detach failed`, e);
+        }
       }
       this.feeds.delete(id);
       removed = true;

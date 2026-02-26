@@ -211,8 +211,10 @@ class Logger {
     }
     // Instance UI updates
     setStatus(msg) {
-        if (this.statusEl)
+        if (this.statusEl) {
             this.statusEl.textContent = msg;
+            this.statusEl.style.color = Logger.STATUS_COLOR_DEFAULT;
+        }
         Logger.user(msg);
     }
     setInfo(msg) {
@@ -220,6 +222,13 @@ class Logger {
             this.infoEl.textContent = msg;
         if (msg)
             Logger.flow(msg);
+    }
+    setErrorStatus(msg) {
+        if (this.statusEl) {
+            this.statusEl.textContent = msg;
+            this.statusEl.style.color = Logger.STATUS_COLOR_ERROR;
+        }
+        Logger.user(msg);
     }
     // Static UI updates (backward compatible)
     static setStatus(msg) {
@@ -248,6 +257,11 @@ class Logger {
         console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#fb7185;font-weight:bold");
         if (err)
             console.error(err);
+        if (Logger.instance) {
+            Logger.instance.setErrorStatus(msg);
+            return;
+        }
+        Logger.user(msg);
     }
     // Friendly narration logs
     static user(msg, data) {
@@ -272,6 +286,8 @@ class Logger {
     }
 }
 Logger.instance = null;
+Logger.STATUS_COLOR_DEFAULT = "#111827";
+Logger.STATUS_COLOR_ERROR = "#dc2626";
 Logger.userName = "User";
 Logger.remoteName = "Remote";
 Logger.level = APP_CONFIG.logging.level;
@@ -299,7 +315,7 @@ class EventBus {
             h(payload);
         }
         catch (e) {
-            console.error(e);
+            Logger.error(`EventBus handler failed for event=${event}`, e);
         } });
     }
 }
@@ -390,11 +406,11 @@ const CONNECTION_MESSAGES = {
         rotate: true,
         primary: [
             "Waiting for the other participant...",
-            "Call is ready. Waiting for participant...",
+            "Waiting for participant to join...",
             "Standing by for remote join..."
         ],
         secondary: [
-            "You are connected and ready.",
+            "Keep this screen open while they join.",
             "Share the link if they have not joined yet.",
             "This screen will update automatically."
         ]
@@ -541,7 +557,9 @@ class ParentBridge {
                 window.parent.postMessage(evt, "*");
             }
         }
-        catch { }
+        catch (e) {
+            Logger.error("ParentBridge postMessage failed", e);
+        }
     }
     onCommand(cb) {
         window.addEventListener("message", (ev) => {
@@ -726,7 +744,11 @@ class MediaManager {
         this.localPreviewStream.addTrack(track);
         video.srcObject = this.localPreviewStream;
         video.muted = true;
-        video.play().catch(() => { });
+        video.play().catch((e) => {
+            if (e?.name === "AbortError")
+                return;
+            Logger.error("Local video play failed", e);
+        });
     }
     setRemoteTrack(video, track) {
         const ms = video.srcObject || new MediaStream();
@@ -737,7 +759,9 @@ class MediaManager {
                 try {
                     t.stop();
                 }
-                catch { }
+                catch (e) {
+                    Logger.error("Stopping replaced remote track failed", e);
+                }
             }
         });
         ms.addTrack(track);
@@ -844,7 +868,11 @@ class VirtualBackgroundManager {
     async enable(stream) {
         this.srcStream = stream;
         this.inVideo.srcObject = stream;
-        await this.inVideo.play().catch(() => { });
+        await this.inVideo.play().catch((e) => {
+            if (e?.name === "AbortError")
+                return;
+            Logger.error("Virtual background input video play failed", e);
+        });
         await this.ensureBgLoaded();
         if (!this.seg) {
             this.seg = new SelfieSegmentation({
@@ -989,6 +1017,7 @@ class ConnectionStatusEngine {
         this.remoteNegotiationReady = false;
         this.selectedPairId = null;
         this.remoteVideoTracksByFeed = new Map();
+        this.localVideoTrackIds = new Set();
         this.publisherPc = null;
         this.subscriberPcs = new Map();
         this.subscriberBytes = new Map();
@@ -1008,6 +1037,8 @@ class ConnectionStatusEngine {
         this.serverRetryMax = 0;
         this.peerRetryAttempt = 0;
         this.peerRetryMax = 0;
+        this.lastStatsErrorLogAt = 0;
+        this.fatalError = null;
         this.transition("INIT", true);
         this.tickTimer = window.setInterval(() => this.tick(), APP_CONFIG.connectionStatus.tickIntervalMs);
     }
@@ -1039,10 +1070,16 @@ class ConnectionStatusEngine {
         this.subscriberIceStates.clear();
         this.subscriberConnStates.clear();
         this.remoteVideoTracksByFeed.clear();
+        this.localVideoTrackIds.clear();
         this.serverRetryAttempt = 0;
         this.serverRetryMax = 0;
         this.peerRetryAttempt = 0;
         this.peerRetryMax = 0;
+        this.publisherPc = null;
+        this.localIceState = "new";
+        this.localConnState = "new";
+        this.localSignalingState = "stable";
+        this.fatalError = null;
         this.transition("MEDIA_PREP", true);
     }
     onSessionReady() {
@@ -1072,7 +1109,12 @@ class ConnectionStatusEngine {
         this.transition("FAILED", true);
     }
     onLeft() {
+        this.fatalError = null;
         this.transition("INIT", true);
+    }
+    setFatalError(primary, secondary = "") {
+        this.fatalError = { primary, secondary };
+        this.publishFatalError();
     }
     setRemoteParticipantCount(count) {
         const now = Date.now();
@@ -1138,6 +1180,17 @@ class ConnectionStatusEngine {
             if (tracks.size === 0) {
                 this.remoteVideoTracksByFeed.delete(feedId);
             }
+        }
+        this.evaluate();
+    }
+    onLocalTrackSignal(track, on) {
+        if (track.kind !== "video")
+            return;
+        if (on) {
+            this.localVideoTrackIds.add(track.id);
+        }
+        else {
+            this.localVideoTrackIds.delete(track.id);
         }
         this.evaluate();
     }
@@ -1209,16 +1262,18 @@ class ConnectionStatusEngine {
             if (this.publisherPc) {
                 jobs.push(this.publisherPc.getStats()
                     .then((report) => this.consumePublisherStats(report))
-                    .catch(() => { }));
+                    .catch((e) => this.logStatsError("publisher getStats failed", e)));
             }
             for (const [feedId, pc] of this.subscriberPcs.entries()) {
                 jobs.push(pc.getStats()
                     .then((report) => this.consumeSubscriberStats(feedId, report))
-                    .catch(() => { }));
+                    .catch((e) => this.logStatsError(`subscriber getStats failed (feedId=${feedId})`, e)));
             }
             await Promise.all(jobs);
         }
-        catch { }
+        catch (e) {
+            this.logStatsError("sampleStats failed", e);
+        }
         this.statsBusy = false;
     }
     consumePublisherStats(report) {
@@ -1302,6 +1357,10 @@ class ConnectionStatusEngine {
         this.subscriberBytes.set(feedId, prev);
     }
     evaluate() {
+        if (this.fatalError) {
+            this.publishFatalError();
+            return;
+        }
         if (this.status.state === "SERVER_RETRYING" || this.status.state === "PEER_RETRYING") {
             return;
         }
@@ -1312,6 +1371,7 @@ class ConnectionStatusEngine {
         const connectedIce = localConnected || remoteConnected;
         const mediaFlowing = this.remoteMediaFlowAt !== null && now - this.remoteMediaFlowAt <= APP_CONFIG.connectionStatus.mediaFlowRecentMs;
         const liveRemoteVideo = this.hasLiveRemoteVideoTrack();
+        const hasLocalVideo = this.localVideoTrackIds.size > 0;
         const anyFailed = this.localIceState === "failed" ||
             this.localConnState === "failed" ||
             Array.from(this.subscriberIceStates.values()).some(s => s === "failed") ||
@@ -1325,21 +1385,20 @@ class ConnectionStatusEngine {
         if (anyDisconnected) {
             if (this.disconnectedSince === null)
                 this.disconnectedSince = now;
-            if (now - this.disconnectedSince > APP_CONFIG.connectionStatus.disconnectedRetryMs) {
-                this.transition("RETRYING");
-            }
-            else {
-                this.transition("DEGRADED");
-            }
+            this.transition("DEGRADED");
             return;
         }
         this.disconnectedSince = null;
+        if (hasRemote && !hasLocalVideo) {
+            this.transition("NEGOTIATING");
+            return;
+        }
         // Prefer real user-visible media signals first.
         // Stats-based bytes can intermittently miss samples, which causes false
         // "connecting/slow" messages even while the call is clearly live.
         const remoteMediaLive = mediaFlowing || liveRemoteVideo;
         const transportReady = connectedIce || this.remoteNegotiationReady;
-        if (hasRemote && remoteMediaLive && transportReady) {
+        if (hasRemote && hasLocalVideo && remoteMediaLive && transportReady) {
             this.transition("CONNECTED");
             return;
         }
@@ -1382,7 +1441,7 @@ class ConnectionStatusEngine {
             return;
         }
         if (!hasRemote) {
-            this.transition(this.joinedAt ? "WAITING_REMOTE" : "NEGOTIATING");
+            this.transition(this.joinedAt && hasLocalVideo ? "WAITING_REMOTE" : "NEGOTIATING");
             return;
         }
         if (!connectedIce) {
@@ -1463,6 +1522,31 @@ class ConnectionStatusEngine {
             : status.primaryText;
         console.log(`${prefix}: ${msg}`);
     }
+    publishFatalError() {
+        if (!this.fatalError)
+            return;
+        const nextStatus = {
+            owner: "SYSTEM",
+            severity: "error",
+            primaryText: this.fatalError.primary,
+            secondaryText: this.fatalError.secondary,
+            state: "FAILED"
+        };
+        const key = `${nextStatus.state}|${nextStatus.owner}|${nextStatus.primaryText}|${nextStatus.secondaryText}`;
+        this.status = nextStatus;
+        if (this.lastPublishedKey !== key) {
+            this.logOwnership(nextStatus);
+            this.lastPublishedKey = key;
+        }
+        this.onUpdate?.(nextStatus);
+    }
+    logStatsError(message, err) {
+        const now = Date.now();
+        if (now - this.lastStatsErrorLogAt < 5000)
+            return;
+        this.lastStatsErrorLogAt = now;
+        Logger.error(`[connection-status] ${message}`, err);
+    }
 }
 class JanusGateway {
     constructor() {
@@ -1507,6 +1591,7 @@ class JanusGateway {
         if (!this.janus) {
             Logger.setStatus("Janus not ready");
             Logger.user("attachPublisher called but Janus session is null");
+            onError?.(new Error("Janus not ready"));
             return;
         }
         Logger.user("Attaching videoroom publisher plugin...");
@@ -1546,12 +1631,16 @@ class JanusGateway {
         try {
             this.publisher?.detach?.();
         }
-        catch { }
+        catch (e) {
+            Logger.error("Publisher detach failed during destroy", e);
+        }
         this.publisher = null;
         try {
             this.janus?.destroy?.();
         }
-        catch { }
+        catch (e) {
+            Logger.error("Janus destroy failed", e);
+        }
         this.janus = null;
     }
 }
@@ -1605,6 +1694,10 @@ class RemoteFeedManager {
     addFeed(feedId) {
         if (this.feeds.has(feedId) || this.pendingFeedAttach.has(feedId))
             return;
+        if (!this.janus) {
+            Logger.error(`Remote feed ${feedId} attach skipped: Janus session not ready`);
+            return;
+        }
         this.clearRetryTimer(feedId);
         this.pendingFeedAttach.add(feedId);
         this.clearAttachTimer(feedId);
@@ -1718,7 +1811,9 @@ class RemoteFeedManager {
                 try {
                     h.detach();
                 }
-                catch { }
+                catch (e) {
+                    Logger.error(`Remote feed ${id} detach failed`, e);
+                }
             }
             this.feeds.delete(id);
             removed = true;
@@ -1779,6 +1874,7 @@ class CallController {
         this.suppressRemoteFeedRetry = false;
         this.participantSyncRequestTimer = null;
         this.participantSyncRequestSeq = 0;
+        this.recordingRetryDelayMs = 700;
         this.gateway = new JanusGateway();
         this.media = new MediaManager();
         this.vbManager = new VirtualBackgroundManager();
@@ -1840,7 +1936,11 @@ class CallController {
         this.roomCreateAttempted = false;
         this.privateId = null;
         this.selfId = null;
+        this.recording = false;
+        this.currentRecordingId = null;
+        this.currentRoomId = null;
         this.roster.reset();
+        this.bus.emit("recording-changed", false);
         this.bus.emit("joined", false);
         this.suppressPublisherCleanupRetry = true;
         this.gateway.destroy();
@@ -1916,6 +2016,9 @@ class CallController {
             Logger.setStatus("Plugin attached. Checking room...");
             this.ensureRoomThenJoin(cfg);
         }, (msg, jsep) => this.onPublisherMessage(cfg, msg, jsep), (track, on) => {
+            if (track && typeof track.kind === "string") {
+                this.connectionEngine.onLocalTrackSignal(track, !!on);
+            }
             if (on && track.kind === "video") {
                 this.media.setLocalTrack(this.localVideo, track);
             }
@@ -2199,12 +2302,86 @@ class CallController {
             encodings[0].maxFramerate = maxFramerate;
             p.encodings = encodings;
             sender.setParameters(p).catch((e) => {
-                console.log("VCX_SET_PARAMETERS_ERROR=", e?.message || e);
+                Logger.error("VCX_SET_PARAMETERS_ERROR", e);
             });
         }
         catch (e) {
-            console.log("VCX_SET_PARAMETERS_HOOK_ERROR=", e?.message || e);
+            Logger.error("VCX_SET_PARAMETERS_HOOK_ERROR", e);
         }
+    }
+    getErrorName(err) {
+        return String(err?.name || err?.error?.name || "").trim();
+    }
+    getErrorMessage(err) {
+        return String(err?.message || err?.error?.message || "").trim();
+    }
+    isMediaPermissionError(err) {
+        const name = this.getErrorName(err).toLowerCase();
+        const msg = this.getErrorMessage(err).toLowerCase();
+        return name === "notallowederror" ||
+            name === "permissiondeniederror" ||
+            name === "securityerror" ||
+            /permission|denied|not allowed/.test(msg);
+    }
+    isMediaDeviceMissingError(err) {
+        const name = this.getErrorName(err).toLowerCase();
+        const msg = this.getErrorMessage(err).toLowerCase();
+        return name === "notfounderror" ||
+            name === "devicesnotfounderror" ||
+            /requested device not found|notfound/.test(msg);
+    }
+    isMediaBusyError(err) {
+        const name = this.getErrorName(err).toLowerCase();
+        const msg = this.getErrorMessage(err).toLowerCase();
+        return name === "notreadableerror" ||
+            name === "trackstarterror" ||
+            /device in use|device is busy|could not start video source/.test(msg);
+    }
+    isMediaConstraintError(err) {
+        const name = this.getErrorName(err).toLowerCase();
+        const msg = this.getErrorMessage(err).toLowerCase();
+        return name === "overconstrainederror" ||
+            name === "constraintnotsatisfiederror" ||
+            /overconstrained|constraint/.test(msg);
+    }
+    getCameraMicErrorMessage(err) {
+        if (this.isMediaPermissionError(err)) {
+            return "Camera/Mic access blocked. Allow permissions in browser settings, then retry.";
+        }
+        if (this.isMediaDeviceMissingError(err)) {
+            return "Camera or microphone not found. Connect your devices, then retry.";
+        }
+        if (this.isMediaBusyError(err)) {
+            return "Camera/Mic is busy in another app. Close other apps using them, then retry.";
+        }
+        if (this.isMediaConstraintError(err)) {
+            return "Camera/Mic settings are unsupported. Reconnect device or reset browser media settings.";
+        }
+        return "Unable to start camera/microphone. Check devices and browser permissions, then retry.";
+    }
+    getScreenShareErrorMessage(err) {
+        if (this.isMediaPermissionError(err)) {
+            return "Screen share was blocked or canceled. Select a window/screen and allow access.";
+        }
+        if (this.getErrorName(err).toLowerCase() === "aborterror") {
+            return "Screen share was canceled. Please try sharing again.";
+        }
+        if (this.isMediaBusyError(err)) {
+            return "Screen share is unavailable right now. Close blocking apps and retry.";
+        }
+        return "Screen share failed. Please try again.";
+    }
+    classifyPublishError(err) {
+        if (this.isMediaPermissionError(err) || this.isMediaDeviceMissingError(err) || this.isMediaBusyError(err) || this.isMediaConstraintError(err)) {
+            return {
+                userMessage: this.getCameraMicErrorMessage(err),
+                retryable: false
+            };
+        }
+        return {
+            userMessage: "Offer error. Recovering media path...",
+            retryable: true
+        };
     }
     // public publish() {
     //   this.plugin.createOffer({
@@ -2288,7 +2465,7 @@ class CallController {
                     }
                 }
                 catch (e) {
-                    console.log("VCX_CONNECTIVITY=hook_error", e?.message || e);
+                    Logger.error("VCX_CONNECTIVITY hook error", e);
                 }
                 // ✅ normal Janus publish configure
                 this.plugin.send({
@@ -2303,9 +2480,16 @@ class CallController {
                 });
             },
             error: (e) => {
+                const classified = this.classifyPublishError(e);
+                console.error("VCX_OFFER_ERROR", e);
+                Logger.setStatus(classified.userMessage);
+                Logger.error(classified.userMessage, e);
+                if (!classified.retryable) {
+                    this.connectionEngine.setFatalError(classified.userMessage, "Fix camera/mic issue and reconnect the call.");
+                    return;
+                }
                 this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts);
                 Logger.setStatus("Offer error. Recovering media path...");
-                console.log("VCX_OFFER_ERROR=", e);
                 this.schedulePeerRetry("Offer error: " + JSON.stringify(e));
             },
         });
@@ -2326,7 +2510,16 @@ class CallController {
     // =====================================
     // RECORDING
     // =====================================
-    startRecording(recordingId) {
+    endCallOnRecordingFailure(message, err) {
+        Logger.error(`[recording] ${message}`, err);
+        Logger.setStatus("Recording failed twice. Ending call.");
+        this.recording = false;
+        this.currentRecordingId = null;
+        this.bus.emit("recording-changed", false);
+        if (!this.isLeaving)
+            this.leave();
+    }
+    startRecording(recordingId, attempt = 1) {
         if (!this.plugin || !this.joinedRoom)
             return;
         if (this.recording)
@@ -2344,21 +2537,38 @@ class CallController {
                 Logger.setStatus(`Recording started: ${recordingId}`);
                 this.bus.emit("recording-changed", true);
             },
-            error: () => {
+            error: (e) => {
+                Logger.error(`[recording] start failed (attempt ${attempt})`, e);
                 this.recording = false;
                 this.bus.emit("recording-changed", false);
+                if (attempt < 2) {
+                    Logger.setStatus("Recording start failed. Retrying...");
+                    window.setTimeout(() => this.startRecording(recordingId, attempt + 1), this.recordingRetryDelayMs);
+                    return;
+                }
+                this.endCallOnRecordingFailure("start failed after retry", e);
             }
         });
     }
-    stopRecording() {
+    stopRecording(attempt = 1) {
         if (!this.plugin || !this.recording)
             return;
         this.plugin.send({
             message: { request: "configure", record: false },
             success: () => {
                 this.recording = false;
+                this.currentRecordingId = null;
                 Logger.setStatus("Recording stopped");
                 this.bus.emit("recording-changed", false);
+            },
+            error: (e) => {
+                Logger.error(`[recording] stop failed (attempt ${attempt})`, e);
+                if (attempt < 2) {
+                    Logger.setStatus("Recording stop failed. Retrying...");
+                    window.setTimeout(() => this.stopRecording(attempt + 1), this.recordingRetryDelayMs);
+                    return;
+                }
+                this.endCallOnRecordingFailure("stop failed after retry", e);
             }
         });
     }
@@ -2372,14 +2582,22 @@ class CallController {
             this.clearRetryTimer();
             this.serverRetryAttempt = 0;
             this.peerRetryAttempt = 0;
-            if (this.recording)
-                this.stopRecording();
+            if (this.recording && this.plugin) {
+                try {
+                    this.plugin.send({ message: { request: "configure", record: false } });
+                }
+                catch (e) {
+                    Logger.error("[recording] stop on leave failed", e);
+                }
+            }
             try {
                 if (this.joinedRoom) {
                     this.plugin?.send({ message: { request: "leave" } });
                 }
             }
-            catch { }
+            catch (e) {
+                Logger.error("Leave signaling failed", e);
+            }
             this.remoteFeeds?.cleanupAll();
             this.remoteFeeds = null;
             this.plugin = null;
@@ -2403,32 +2621,39 @@ class CallController {
         }
         catch (e) {
             Logger.setStatus("Leave error: " + e.message);
+            Logger.error("Leave error", e);
         }
     }
     async toggleScreenShare() {
         if (!this.plugin)
             return;
-        if (!this.screenEnabled) {
-            const ss = await this.screenManager.start();
-            const track = ss.getVideoTracks()[0];
-            if (!track)
-                return;
-            this.screenEnabled = true;
-            this.replaceVideoTrack(track);
-            Logger.setStatus("Screen share started");
-            this.bus.emit("screen-changed", true);
-            track.onended = () => { if (this.screenEnabled)
-                this.toggleScreenShare(); };
-        }
-        else {
-            this.screenManager.stop();
-            this.screenEnabled = false;
-            const cam = await this.ensureCameraStream();
-            const track = cam.getVideoTracks()[0];
-            if (track)
+        try {
+            if (!this.screenEnabled) {
+                const ss = await this.screenManager.start();
+                const track = ss.getVideoTracks()[0];
+                if (!track)
+                    return;
+                this.screenEnabled = true;
                 this.replaceVideoTrack(track);
-            Logger.setStatus("Screen share stopped");
-            this.bus.emit("screen-changed", false);
+                Logger.setStatus("Screen share started");
+                this.bus.emit("screen-changed", true);
+                track.onended = () => { if (this.screenEnabled)
+                    void this.toggleScreenShare(); };
+            }
+            else {
+                this.screenManager.stop();
+                this.screenEnabled = false;
+                const cam = await this.ensureCameraStream();
+                const track = cam.getVideoTracks()[0];
+                if (track)
+                    this.replaceVideoTrack(track);
+                Logger.setStatus("Screen share stopped");
+                this.bus.emit("screen-changed", false);
+            }
+        }
+        catch (e) {
+            Logger.error("Screen share toggle failed", e);
+            Logger.setStatus(this.getScreenShareErrorMessage(e));
         }
     }
     async toggleVirtualBackground() {
@@ -2438,39 +2663,58 @@ class CallController {
             Logger.setStatus("Disable screen share before virtual background");
             return;
         }
-        if (!this.vbEnabled) {
-            const cam = await this.ensureCameraStream();
-            const processed = await this.vbManager.enable(cam);
-            const track = processed.getVideoTracks()[0];
-            if (!track)
-                return;
-            this.vbEnabled = true;
-            this.replaceVideoTrack(track);
-            this.bus.emit("vb-changed", true);
-        }
-        else {
-            this.vbManager.disable();
-            this.vbEnabled = false;
-            const cam = await this.ensureCameraStream();
-            const track = cam.getVideoTracks()[0];
-            if (track)
+        try {
+            if (!this.vbEnabled) {
+                const cam = await this.ensureCameraStream();
+                const processed = await this.vbManager.enable(cam);
+                const track = processed.getVideoTracks()[0];
+                if (!track)
+                    return;
+                this.vbEnabled = true;
                 this.replaceVideoTrack(track);
-            this.bus.emit("vb-changed", false);
+                this.bus.emit("vb-changed", true);
+            }
+            else {
+                this.vbManager.disable();
+                this.vbEnabled = false;
+                const cam = await this.ensureCameraStream();
+                const track = cam.getVideoTracks()[0];
+                if (track)
+                    this.replaceVideoTrack(track);
+                this.bus.emit("vb-changed", false);
+            }
+        }
+        catch (e) {
+            Logger.error("Virtual background toggle failed", e);
+            Logger.setStatus(this.getCameraMicErrorMessage(e));
         }
     }
     async ensureCameraStream() {
-        if (!this.cameraStream) {
-            this.cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        try {
+            if (!this.cameraStream) {
+                this.cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            }
+            return this.cameraStream;
         }
-        return this.cameraStream;
+        catch (e) {
+            Logger.error("Camera access failed", e);
+            Logger.setStatus(this.getCameraMicErrorMessage(e));
+            throw e;
+        }
     }
     replaceVideoTrack(track) {
         if (!this.plugin)
             return;
-        this.plugin.replaceTracks({
-            tracks: [{ type: "video", capture: track, recv: false }]
-        });
-        this.media.setLocalTrack(this.localVideo, track);
+        try {
+            this.plugin.replaceTracks({
+                tracks: [{ type: "video", capture: track, recv: false }]
+            });
+            this.media.setLocalTrack(this.localVideo, track);
+        }
+        catch (e) {
+            Logger.error("replaceVideoTrack failed", e);
+            Logger.setStatus("Video track switch failed.");
+        }
     }
 }
 // import {Dom} from "./Dom";

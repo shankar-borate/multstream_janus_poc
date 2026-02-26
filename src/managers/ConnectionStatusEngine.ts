@@ -21,6 +21,7 @@ class ConnectionStatusEngine {
   private remoteNegotiationReady = false;
   private selectedPairId: string | null = null;
   private remoteVideoTracksByFeed = new Map<number, Set<string>>();
+  private localVideoTrackIds = new Set<string>();
 
   private publisherPc: RTCPeerConnection | null = null;
   private subscriberPcs = new Map<number, RTCPeerConnection>();
@@ -43,6 +44,8 @@ class ConnectionStatusEngine {
   private serverRetryMax = 0;
   private peerRetryAttempt = 0;
   private peerRetryMax = 0;
+  private lastStatsErrorLogAt = 0;
+  private fatalError: { primary: string; secondary: string } | null = null;
 
   constructor(private onUpdate?: (status: ConnectionStatusView) => void) {
     this.transition("INIT", true);
@@ -79,10 +82,16 @@ class ConnectionStatusEngine {
     this.subscriberIceStates.clear();
     this.subscriberConnStates.clear();
     this.remoteVideoTracksByFeed.clear();
+    this.localVideoTrackIds.clear();
     this.serverRetryAttempt = 0;
     this.serverRetryMax = 0;
     this.peerRetryAttempt = 0;
     this.peerRetryMax = 0;
+    this.publisherPc = null;
+    this.localIceState = "new";
+    this.localConnState = "new";
+    this.localSignalingState = "stable";
+    this.fatalError = null;
     this.transition("MEDIA_PREP", true);
   }
 
@@ -120,7 +129,13 @@ class ConnectionStatusEngine {
   }
 
   onLeft() {
+    this.fatalError = null;
     this.transition("INIT", true);
+  }
+
+  setFatalError(primary: string, secondary: string = "") {
+    this.fatalError = { primary, secondary };
+    this.publishFatalError();
   }
 
   setRemoteParticipantCount(count: number) {
@@ -191,6 +206,16 @@ class ConnectionStatusEngine {
       if (tracks.size === 0) {
         this.remoteVideoTracksByFeed.delete(feedId);
       }
+    }
+    this.evaluate();
+  }
+
+  onLocalTrackSignal(track: MediaStreamTrack, on: boolean) {
+    if (track.kind !== "video") return;
+    if (on) {
+      this.localVideoTrackIds.add(track.id);
+    } else {
+      this.localVideoTrackIds.delete(track.id);
     }
     this.evaluate();
   }
@@ -266,18 +291,20 @@ class ConnectionStatusEngine {
         jobs.push(
           this.publisherPc.getStats()
             .then((report: RTCStatsReport) => this.consumePublisherStats(report))
-            .catch(() => {})
+            .catch((e: any) => this.logStatsError("publisher getStats failed", e))
         );
       }
       for (const [feedId, pc] of this.subscriberPcs.entries()) {
         jobs.push(
           pc.getStats()
             .then((report: RTCStatsReport) => this.consumeSubscriberStats(feedId, report))
-            .catch(() => {})
+            .catch((e: any) => this.logStatsError(`subscriber getStats failed (feedId=${feedId})`, e))
         );
       }
       await Promise.all(jobs);
-    } catch {}
+    } catch (e: any) {
+      this.logStatsError("sampleStats failed", e);
+    }
     this.statsBusy = false;
   }
 
@@ -367,6 +394,11 @@ class ConnectionStatusEngine {
   }
 
   private evaluate() {
+    if (this.fatalError) {
+      this.publishFatalError();
+      return;
+    }
+
     if (this.status.state === "SERVER_RETRYING" || this.status.state === "PEER_RETRYING") {
       return;
     }
@@ -378,6 +410,7 @@ class ConnectionStatusEngine {
     const connectedIce = localConnected || remoteConnected;
     const mediaFlowing = this.remoteMediaFlowAt !== null && now - this.remoteMediaFlowAt <= APP_CONFIG.connectionStatus.mediaFlowRecentMs;
     const liveRemoteVideo = this.hasLiveRemoteVideoTrack();
+    const hasLocalVideo = this.localVideoTrackIds.size > 0;
 
     const anyFailed =
       this.localIceState === "failed" ||
@@ -396,21 +429,22 @@ class ConnectionStatusEngine {
 
     if (anyDisconnected) {
       if (this.disconnectedSince === null) this.disconnectedSince = now;
-      if (now - this.disconnectedSince > APP_CONFIG.connectionStatus.disconnectedRetryMs) {
-        this.transition("RETRYING");
-      } else {
-        this.transition("DEGRADED");
-      }
+      this.transition("DEGRADED");
       return;
     }
     this.disconnectedSince = null;
+
+    if (hasRemote && !hasLocalVideo) {
+      this.transition("NEGOTIATING");
+      return;
+    }
 
     // Prefer real user-visible media signals first.
     // Stats-based bytes can intermittently miss samples, which causes false
     // "connecting/slow" messages even while the call is clearly live.
     const remoteMediaLive = mediaFlowing || liveRemoteVideo;
     const transportReady = connectedIce || this.remoteNegotiationReady;
-    if (hasRemote && remoteMediaLive && transportReady) {
+    if (hasRemote && hasLocalVideo && remoteMediaLive && transportReady) {
       this.transition("CONNECTED");
       return;
     }
@@ -465,7 +499,7 @@ class ConnectionStatusEngine {
     }
 
     if (!hasRemote) {
-      this.transition(this.joinedAt ? "WAITING_REMOTE" : "NEGOTIATING");
+      this.transition(this.joinedAt && hasLocalVideo ? "WAITING_REMOTE" : "NEGOTIATING");
       return;
     }
 
@@ -553,5 +587,30 @@ class ConnectionStatusEngine {
       ? `${status.primaryText} ${status.secondaryText}`
       : status.primaryText;
     console.log(`${prefix}: ${msg}`);
+  }
+
+  private publishFatalError() {
+    if (!this.fatalError) return;
+    const nextStatus: ConnectionStatusView = {
+      owner: "SYSTEM",
+      severity: "error",
+      primaryText: this.fatalError.primary,
+      secondaryText: this.fatalError.secondary,
+      state: "FAILED"
+    };
+    const key = `${nextStatus.state}|${nextStatus.owner}|${nextStatus.primaryText}|${nextStatus.secondaryText}`;
+    this.status = nextStatus;
+    if (this.lastPublishedKey !== key) {
+      this.logOwnership(nextStatus);
+      this.lastPublishedKey = key;
+    }
+    this.onUpdate?.(nextStatus);
+  }
+
+  private logStatsError(message: string, err?: unknown) {
+    const now = Date.now();
+    if (now - this.lastStatsErrorLogAt < 5000) return;
+    this.lastStatsErrorLogAt = now;
+    Logger.error(`[connection-status] ${message}`, err);
   }
 }

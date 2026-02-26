@@ -63,7 +63,10 @@ private getBgUrl(): string {
   async enable(stream: MediaStream): Promise<MediaStream>{
     this.srcStream = stream;
     this.inVideo.srcObject = stream;
-    await this.inVideo.play().catch(()=>{});
+    await this.inVideo.play().catch((e:any)=>{
+      if (e?.name === "AbortError") return;
+      Logger.error("Virtual background input video play failed", e);
+    });
 
     await this.ensureBgLoaded();
 

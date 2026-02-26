@@ -4,7 +4,9 @@ class ParentBridge {
       if(window.parent && window.parent !== window){
         window.parent.postMessage(evt, "*");
       }
-    }catch{}
+    }catch(e:any){
+      Logger.error("ParentBridge postMessage failed", e);
+    }
   }
 
   onCommand(cb:(cmd:any)=>void){

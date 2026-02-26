@@ -8,6 +8,6 @@ class EventBus {
   emit<T=any>(event:string, payload:T){
     const hs = this.handlers.get(event);
     if(!hs) return;
-    hs.forEach(h=>{ try{ (h as EventHandler<T>)(payload);} catch(e){ console.error(e);} });
+    hs.forEach(h=>{ try{ (h as EventHandler<T>)(payload);} catch(e){ Logger.error(`EventBus handler failed for event=${event}`, e);} });
   }
 }

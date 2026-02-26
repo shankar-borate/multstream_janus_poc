@@ -59,6 +59,7 @@ class JanusGateway {
     if (!this.janus) {
       Logger.setStatus("Janus not ready");
       Logger.user("attachPublisher called but Janus session is null");
+      onError?.(new Error("Janus not ready"));
       return;
     }
 
@@ -103,13 +104,17 @@ class JanusGateway {
 
     try {
       this.publisher?.detach?.();
-    } catch {}
+    } catch (e: any) {
+      Logger.error("Publisher detach failed during destroy", e);
+    }
 
     this.publisher = null;
 
     try {
       this.janus?.destroy?.();
-    } catch {}
+    } catch (e: any) {
+      Logger.error("Janus destroy failed", e);
+    }
 
     this.janus = null;
   }
