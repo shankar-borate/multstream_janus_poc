@@ -53,6 +53,8 @@ class UIController {
   // ✅ recording state
   private recording = false;
   private renderedParticipantCount = 0;
+  private lastRemoteVideoTime = 0;
+  private remoteVideoFrameProgressAt = 0;
   private connectionStatus: ConnectionStatusView | null = null;
   private remoteVideoMonitorTimer: number | null = null;
 
@@ -116,6 +118,13 @@ class UIController {
         this.updateDebugState({
           rosterParticipants: count
         });
+    });
+    this.bus.on<any>("telemetry-context", (ctx) => {
+      this.updateDebugState({
+        callId: ctx?.callId,
+        roomId: ctx?.roomId,
+        participantId: ctx?.participantId
+      });
     });
     this.bus.on<any>("connectivity", (s) => {
         this.updateDebugState({
@@ -293,6 +302,8 @@ class UIController {
     this.lastCfg = cfg;
     this.recording = false;
     this.renderedParticipantCount = 0;
+    this.lastRemoteVideoTime = 0;
+    this.remoteVideoFrameProgressAt = 0;
     this.updateRecordUI();
     this.renderCallMeta(cfg);
 
@@ -383,17 +394,40 @@ class UIController {
   }
 
   private renderConnectionStatus(status: ConnectionStatusView) {
-    this.connectionStatus = status;
-    this.logger.setStatus(status.primaryText);
-    this.logger.setInfo(status.secondaryText);
+    const resolved = this.resolveVisibleConnectionStatus(status);
+    this.connectionStatus = resolved;
+    this.logger.setStatus(resolved.primaryText);
+    this.logger.setInfo(resolved.secondaryText);
     this.applyConnectionOverlays();
     this.renderRemoteFallback();
 
     this.updateDebugState({
-      connectionOwner: status.owner,
-      connectionSeverity: status.severity,
-      connectionState: status.state
+      connectionOwner: resolved.owner,
+      connectionSeverity: resolved.severity,
+      connectionState: resolved.state
     });
+  }
+
+  private resolveVisibleConnectionStatus(status: ConnectionStatusView): ConnectionStatusView {
+    // Keep hard failures visible as-is.
+    if (status.severity === "error" || status.state === "FAILED") {
+      return status;
+    }
+    const inSetupPhase = status.state === "NEGOTIATING" || status.state === "WAITING_REMOTE";
+    if (!inSetupPhase) {
+      return status;
+    }
+    // If both videos are actually live in the UI, present connected state.
+    if (this.hasLocalVideoTrack() && this.hasRemoteVideoTrack()) {
+      return {
+        owner: "NEUTRAL",
+        severity: "info",
+        state: "CONNECTED",
+        primaryText: "Connected",
+        secondaryText: "Video and audio are live."
+      };
+    }
+    return status;
   }
 
   private setupRemoteFallbackMonitor() {
@@ -418,31 +452,65 @@ class UIController {
     refresh();
   }
 
-  private hasRenderableVideoTrack(videoEl: HTMLVideoElement): boolean {
+  private hasLiveVideoTrack(videoEl: HTMLVideoElement): boolean {
     const ms = videoEl.srcObject as MediaStream | null;
     if (!ms) return false;
     const tracks = ms.getVideoTracks();
     if (!tracks || tracks.length === 0) return false;
-    const hasLiveTrack = tracks.some(t => t.readyState === "live" && t.enabled !== false);
-    if (!hasLiveTrack) return false;
+    return tracks.some(t => t.readyState === "live" && t.enabled !== false);
+  }
+
+  private hasRenderableVideoTrack(videoEl: HTMLVideoElement): boolean {
+    if (!this.hasLiveVideoTrack(videoEl)) return false;
 
     const hasDecodedFrame =
       videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
       videoEl.videoWidth > 0 &&
       videoEl.videoHeight > 0;
-    const hasStartedPlayback = videoEl.currentTime > 0.05;
-    return hasDecodedFrame && hasStartedPlayback;
+    const isPlaying = !videoEl.paused;
+    return hasDecodedFrame && isPlaying;
   }
 
   private hasLocalVideoTrack(): boolean {
-    return this.hasRenderableVideoTrack(this.localVideoEl);
+    // Local participant is considered present when local camera track is live.
+    return this.hasLiveVideoTrack(this.localVideoEl);
   }
 
   private hasRemoteVideoTrack(): boolean {
-    return this.hasRenderableVideoTrack(this.remoteVideoEl);
+    this.updateRemoteVideoProgress();
+    if (!this.hasRenderableVideoTrack(this.remoteVideoEl)) return false;
+    if (this.remoteVideoFrameProgressAt === 0) return false;
+    return Date.now() - this.remoteVideoFrameProgressAt <= APP_CONFIG.ui.remoteVideoStallThresholdMs;
+  }
+
+  private updateRemoteVideoProgress() {
+    const now = Date.now();
+    if (!this.hasLiveVideoTrack(this.remoteVideoEl)) {
+      this.lastRemoteVideoTime = 0;
+      this.remoteVideoFrameProgressAt = 0;
+      return;
+    }
+
+    const currentTime = Number.isFinite(this.remoteVideoEl.currentTime) ? this.remoteVideoEl.currentTime : 0;
+    if (currentTime + 0.01 < this.lastRemoteVideoTime) {
+      this.lastRemoteVideoTime = currentTime;
+      this.remoteVideoFrameProgressAt = 0;
+      return;
+    }
+
+    if (currentTime > this.lastRemoteVideoTime + 0.03) {
+      this.lastRemoteVideoTime = currentTime;
+      this.remoteVideoFrameProgressAt = now;
+      return;
+    }
+
+    if (this.remoteVideoFrameProgressAt === 0 && currentTime > 0) {
+      this.remoteVideoFrameProgressAt = now;
+    }
   }
 
   private refreshRenderedParticipantCount() {
+    this.updateRemoteVideoProgress();
     const count =
       (this.hasLocalVideoTrack() ? 1 : 0) +
       (this.hasRemoteVideoTrack() ? 1 : 0);
@@ -485,7 +553,7 @@ class UIController {
         local: l,
         remote: r
       });
-    });
+    }, () => this.controller.getNetworkQualityPeers());
   }
 
   private setupParentBridge() {

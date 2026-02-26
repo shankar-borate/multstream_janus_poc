@@ -30,4 +30,5 @@ type RemoteFeedObserver = {
   onSubscriberPcReady?: (feedId: number, pc: RTCPeerConnection) => void;
   onRemoteTrackSignal?: (feedId: number, track: MediaStreamTrack, on: boolean) => void;
   onRemoteFeedCleanup?: (feedId: number) => void;
+  onRemoteFeedRetryExhausted?: (feedId: number, attempts: number) => void;
 };

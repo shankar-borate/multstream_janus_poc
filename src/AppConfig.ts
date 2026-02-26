@@ -136,6 +136,10 @@ const APP_CONFIG = {
     participantSyncCooldownMs: 2500,
     participantSyncRequestTimeoutMs: 7000,
     remoteFeedRetryDelayMs: 1200,
+    remoteFeedRetryMaxDelayMs: 12000,
+    remoteFeedRetryJitterMs: 350,
+    remoteFeedRetryMaxAttempts: 5,
+    remoteFeedRetryCooldownMs: 30000,
     remoteFeedAttachTimeoutMs: 8000,
     remoteFeedStartTimeoutMs: 12000,
     retry: {
@@ -146,7 +150,8 @@ const APP_CONFIG = {
     }
   },
   ui: {
-    remoteFallbackRefreshMs: 2500
+    remoteFallbackRefreshMs: 2500,
+    remoteVideoStallThresholdMs: 4000
   },
   recording: {
     folderPath: "/opt/efs-janus-app/dev/VideoRecDownloads",
@@ -154,6 +159,7 @@ const APP_CONFIG = {
   },
   networkQuality: {
     sampleIntervalMs: 3000,
+    useSimulatedFallback: false,
     simulated: {
       rttBaseMs: 30,
       rttSpreadMs: 200,

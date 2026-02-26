@@ -203,6 +203,11 @@ class ConnectionStatusEngine {
     this.evaluate();
   }
 
+  onRemoteFeedRetryExhausted(feedId: number, attempts: number) {
+    Logger.warn(`[connection-status] remote feed retry exhausted feedId=${feedId} attempts=${attempts}`);
+    this.transition("DEGRADED", true);
+  }
+
   unregisterSubscriber(feedId: number) {
     this.subscriberPcs.delete(feedId);
     this.subscriberBytes.delete(feedId);
@@ -437,12 +442,12 @@ class ConnectionStatusEngine {
     }
 
     const now = Date.now();
-    const hasRemote = this.remoteParticipantCount > 0;
+    const liveRemoteVideo = this.hasLiveRemoteVideoTrack();
+    const hasRemote = this.remoteParticipantCount > 0 || liveRemoteVideo;
     const localConnected = this.localIceState === "connected" || this.localIceState === "completed";
     const remoteConnected = Array.from(this.subscriberIceStates.values()).some(s => s === "connected" || s === "completed");
     const connectedIce = localConnected || remoteConnected;
     const mediaFlowing = this.remoteMediaFlowAt !== null && now - this.remoteMediaFlowAt <= APP_CONFIG.connectionStatus.mediaFlowRecentMs;
-    const liveRemoteVideo = this.hasLiveRemoteVideoTrack();
     const hasLocalVideo = this.localVideoTrackIds.size > 0;
 
     const anyFailed =
@@ -472,11 +477,14 @@ class ConnectionStatusEngine {
       return;
     }
 
-    // Connected means both sides are truly exchanging media:
-    // local video ready + remote track signaled + inbound media flow.
-    // Requiring both remote signals avoids false positives where a track is
-    // signaled but no real remote video is visible yet.
-    const remoteMediaLive = mediaFlowing && liveRemoteVideo;
+    // Connected means both sides are exchanging media:
+    // local video ready + remote video track is live, with stats flow when available.
+    // Some environments do not expose stable inbound byte growth every sample,
+    // so we accept recent remote track signal as a bounded fallback.
+    const remoteTrackRecent =
+      this.remoteTrackSeenAt !== null &&
+      now - this.remoteTrackSeenAt <= APP_CONFIG.connectionStatus.mediaFlowRecentMs;
+    const remoteMediaLive = liveRemoteVideo && (mediaFlowing || remoteTrackRecent);
     const transportReady = connectedIce || this.remoteNegotiationReady;
     if (hasRemote && hasLocalVideo && remoteMediaLive && transportReady) {
       this.transition("CONNECTED");

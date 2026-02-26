@@ -134,6 +134,10 @@ const APP_CONFIG = {
         participantSyncCooldownMs: 2500,
         participantSyncRequestTimeoutMs: 7000,
         remoteFeedRetryDelayMs: 1200,
+        remoteFeedRetryMaxDelayMs: 12000,
+        remoteFeedRetryJitterMs: 350,
+        remoteFeedRetryMaxAttempts: 5,
+        remoteFeedRetryCooldownMs: 30000,
         remoteFeedAttachTimeoutMs: 8000,
         remoteFeedStartTimeoutMs: 12000,
         retry: {
@@ -144,7 +148,8 @@ const APP_CONFIG = {
         }
     },
     ui: {
-        remoteFallbackRefreshMs: 2500
+        remoteFallbackRefreshMs: 2500,
+        remoteVideoStallThresholdMs: 4000
     },
     recording: {
         folderPath: "/opt/efs-janus-app/dev/VideoRecDownloads",
@@ -152,6 +157,7 @@ const APP_CONFIG = {
     },
     networkQuality: {
         sampleIntervalMs: 3000,
+        useSimulatedFallback: false,
         simulated: {
             rttBaseMs: 30,
             rttSpreadMs: 200,
@@ -963,28 +969,70 @@ class ScreenShareManager {
 class NetworkQualityManager {
     constructor() {
         this.timer = null;
+        this.previousBytes = new Map();
+        this.sampleBusy = false;
     }
-    start(cb) {
+    start(cb, peersProvider) {
         this.stop();
+        const sample = async () => {
+            if (this.sampleBusy)
+                return;
+            this.sampleBusy = true;
+            try {
+                const peers = peersProvider?.() ?? { publisher: null, subscribers: [] };
+                const hasPeers = !!peers.publisher || peers.subscribers.length > 0;
+                if (hasPeers) {
+                    const localMetrics = peers.publisher
+                        ? await this.collectPeerMetrics("publisher", peers.publisher)
+                        : null;
+                    const remoteMetricsList = await Promise.all(peers.subscribers.map((pc, i) => this.collectPeerMetrics(`subscriber-${i}`, pc)));
+                    const remoteMetrics = this.mergePeerMetrics(remoteMetricsList);
+                    const local = localMetrics
+                        ? this.calc(localMetrics.rttMs, localMetrics.jitterMs, localMetrics.lossPct, localMetrics.bitrateKbps)
+                        : "Low";
+                    const remote = remoteMetrics
+                        ? this.calc(remoteMetrics.rttMs, remoteMetrics.jitterMs, remoteMetrics.lossPct, remoteMetrics.bitrateKbps)
+                        : "Low";
+                    const details = [
+                        "src=webrtc-stats",
+                        localMetrics
+                            ? `local(rtt=${Math.round(localMetrics.rttMs)}ms jitter=${Math.round(localMetrics.jitterMs)}ms loss=${localMetrics.lossPct.toFixed(1)}% bitrate=${Math.round(localMetrics.bitrateKbps)}kbps)`
+                            : "local(n/a)",
+                        remoteMetrics
+                            ? `remote(rtt=${Math.round(remoteMetrics.rttMs)}ms jitter=${Math.round(remoteMetrics.jitterMs)}ms loss=${remoteMetrics.lossPct.toFixed(1)}% bitrate=${Math.round(remoteMetrics.bitrateKbps)}kbps)`
+                            : "remote(n/a)"
+                    ].join(" ");
+                    cb(local, remote, details);
+                    return;
+                }
+                if (APP_CONFIG.networkQuality.useSimulatedFallback) {
+                    const sim = this.sampleSimulatedMetrics();
+                    const q = this.calc(sim.rttMs, sim.jitterMs, sim.lossPct, sim.bitrateKbps);
+                    cb(q, q, `[simulated] rtt=${Math.round(sim.rttMs)}ms jitter=${Math.round(sim.jitterMs)}ms loss=${sim.lossPct.toFixed(1)}% bitrate=${Math.round(sim.bitrateKbps)}kbps`);
+                    return;
+                }
+                cb("Low", "Low", "src=webrtc-stats unavailable");
+            }
+            catch (e) {
+                Logger.error("[network-quality] stats sampling failed", e);
+                cb("Low", "Low", "src=webrtc-stats error");
+            }
+            finally {
+                this.sampleBusy = false;
+            }
+        };
         this.timer = window.setInterval(() => {
-            // synthetic values (replace with getStats wiring)
-            const rtt = Math.round(APP_CONFIG.networkQuality.simulated.rttBaseMs +
-                Math.random() * APP_CONFIG.networkQuality.simulated.rttSpreadMs);
-            const jitter = Math.round(APP_CONFIG.networkQuality.simulated.jitterBaseMs +
-                Math.random() * APP_CONFIG.networkQuality.simulated.jitterSpreadMs);
-            const loss = Math.round(Math.random() * APP_CONFIG.networkQuality.simulated.lossMaxPct);
-            const bitrate = Math.round(APP_CONFIG.networkQuality.simulated.bitrateBaseKbps +
-                Math.random() * APP_CONFIG.networkQuality.simulated.bitrateSpreadKbps);
-            const q = this.calc(rtt, jitter, loss, bitrate);
-            const details = `rtt=${rtt}ms jitter=${jitter}ms loss=${loss}% bitrate=${bitrate}kbps`;
-            cb(q, q, details);
+            void sample();
         }, APP_CONFIG.networkQuality.sampleIntervalMs);
+        void sample();
     }
     stop() {
         if (this.timer != null) {
             clearInterval(this.timer);
             this.timer = null;
         }
+        this.sampleBusy = false;
+        this.previousBytes.clear();
     }
     calc(rtt, jitter, loss, bitrate) {
         let score = 0;
@@ -1001,6 +1049,77 @@ class NetworkQualityManager {
         if (score >= 2)
             return "Medium";
         return "Low";
+    }
+    async collectPeerMetrics(key, pc) {
+        const report = await pc.getStats();
+        let rttMs = 0;
+        let jitterMs = 0;
+        let packetsTotal = 0;
+        let packetsLost = 0;
+        let bytesTotal = 0;
+        report.forEach((s) => {
+            const anyS = s;
+            if (s.type === "candidate-pair" && (anyS.selected || anyS.nominated) && typeof anyS.currentRoundTripTime === "number") {
+                rttMs = Math.max(rttMs, anyS.currentRoundTripTime * 1000);
+            }
+            if (s.type === "remote-inbound-rtp" && (anyS.kind === "video" || anyS.mediaType === "video") && typeof anyS.roundTripTime === "number") {
+                rttMs = Math.max(rttMs, anyS.roundTripTime * 1000);
+            }
+            if ((s.type === "inbound-rtp" || s.type === "outbound-rtp") && (anyS.kind === "video" || anyS.mediaType === "video")) {
+                if (typeof anyS.jitter === "number") {
+                    jitterMs = Math.max(jitterMs, anyS.jitter * 1000);
+                }
+                const recv = typeof anyS.packetsReceived === "number" ? anyS.packetsReceived : 0;
+                const sent = typeof anyS.packetsSent === "number" ? anyS.packetsSent : 0;
+                const lost = typeof anyS.packetsLost === "number" ? anyS.packetsLost : 0;
+                packetsTotal += recv + sent + lost;
+                packetsLost += lost;
+                const bytesReceived = typeof anyS.bytesReceived === "number" ? anyS.bytesReceived : 0;
+                const bytesSent = typeof anyS.bytesSent === "number" ? anyS.bytesSent : 0;
+                bytesTotal += bytesReceived + bytesSent;
+            }
+        });
+        const lossPct = packetsTotal > 0 ? (packetsLost / packetsTotal) * 100 : 0;
+        const bitrateKbps = this.computeBitrateKbps(key, bytesTotal);
+        return { rttMs, jitterMs, lossPct, bitrateKbps };
+    }
+    mergePeerMetrics(metrics) {
+        if (metrics.length === 0)
+            return null;
+        const totals = metrics.reduce((acc, m) => {
+            acc.rttMs += m.rttMs;
+            acc.jitterMs += m.jitterMs;
+            acc.lossPct += m.lossPct;
+            acc.bitrateKbps += m.bitrateKbps;
+            return acc;
+        }, { rttMs: 0, jitterMs: 0, lossPct: 0, bitrateKbps: 0 });
+        const n = metrics.length;
+        return {
+            rttMs: totals.rttMs / n,
+            jitterMs: totals.jitterMs / n,
+            lossPct: totals.lossPct / n,
+            bitrateKbps: totals.bitrateKbps / n
+        };
+    }
+    computeBitrateKbps(key, bytes) {
+        const now = Date.now();
+        const prev = this.previousBytes.get(key);
+        this.previousBytes.set(key, { bytes, at: now });
+        if (!prev || now <= prev.at)
+            return 0;
+        const deltaBytes = Math.max(0, bytes - prev.bytes);
+        const seconds = (now - prev.at) / 1000;
+        if (seconds <= 0)
+            return 0;
+        return (deltaBytes * 8) / 1000 / seconds;
+    }
+    sampleSimulatedMetrics() {
+        return {
+            rttMs: APP_CONFIG.networkQuality.simulated.rttBaseMs + Math.random() * APP_CONFIG.networkQuality.simulated.rttSpreadMs,
+            jitterMs: APP_CONFIG.networkQuality.simulated.jitterBaseMs + Math.random() * APP_CONFIG.networkQuality.simulated.jitterSpreadMs,
+            lossPct: Math.random() * APP_CONFIG.networkQuality.simulated.lossMaxPct,
+            bitrateKbps: APP_CONFIG.networkQuality.simulated.bitrateBaseKbps + Math.random() * APP_CONFIG.networkQuality.simulated.bitrateSpreadKbps
+        };
     }
 }
 class ConnectionStatusEngine {
@@ -1186,6 +1305,10 @@ class ConnectionStatusEngine {
     onSubscriberRequested() {
         this.remoteNegotiationReady = true;
         this.evaluate();
+    }
+    onRemoteFeedRetryExhausted(feedId, attempts) {
+        Logger.warn(`[connection-status] remote feed retry exhausted feedId=${feedId} attempts=${attempts}`);
+        this.transition("DEGRADED", true);
     }
     unregisterSubscriber(feedId) {
         this.subscriberPcs.delete(feedId);
@@ -1408,12 +1531,12 @@ class ConnectionStatusEngine {
             return;
         }
         const now = Date.now();
-        const hasRemote = this.remoteParticipantCount > 0;
+        const liveRemoteVideo = this.hasLiveRemoteVideoTrack();
+        const hasRemote = this.remoteParticipantCount > 0 || liveRemoteVideo;
         const localConnected = this.localIceState === "connected" || this.localIceState === "completed";
         const remoteConnected = Array.from(this.subscriberIceStates.values()).some(s => s === "connected" || s === "completed");
         const connectedIce = localConnected || remoteConnected;
         const mediaFlowing = this.remoteMediaFlowAt !== null && now - this.remoteMediaFlowAt <= APP_CONFIG.connectionStatus.mediaFlowRecentMs;
-        const liveRemoteVideo = this.hasLiveRemoteVideoTrack();
         const hasLocalVideo = this.localVideoTrackIds.size > 0;
         const anyFailed = this.localIceState === "failed" ||
             this.localConnState === "failed" ||
@@ -1436,11 +1559,13 @@ class ConnectionStatusEngine {
             this.transition("NEGOTIATING");
             return;
         }
-        // Connected means both sides are truly exchanging media:
-        // local video ready + remote track signaled + inbound media flow.
-        // Requiring both remote signals avoids false positives where a track is
-        // signaled but no real remote video is visible yet.
-        const remoteMediaLive = mediaFlowing && liveRemoteVideo;
+        // Connected means both sides are exchanging media:
+        // local video ready + remote video track is live, with stats flow when available.
+        // Some environments do not expose stable inbound byte growth every sample,
+        // so we accept recent remote track signal as a bounded fallback.
+        const remoteTrackRecent = this.remoteTrackSeenAt !== null &&
+            now - this.remoteTrackSeenAt <= APP_CONFIG.connectionStatus.mediaFlowRecentMs;
+        const remoteMediaLive = liveRemoteVideo && (mediaFlowing || remoteTrackRecent);
         const transportReady = connectedIce || this.remoteNegotiationReady;
         if (hasRemote && hasLocalVideo && remoteMediaLive && transportReady) {
             this.transition("CONNECTED");
@@ -1703,6 +1828,8 @@ class RemoteFeedManager {
         this.pendingAttachTimers = new Map();
         this.feedStartTimers = new Map();
         this.retryTimers = new Map();
+        this.retryAttempts = new Map();
+        this.retryBlockedUntil = new Map();
     }
     clearAttachTimer(feedId) {
         const t = this.pendingAttachTimers.get(feedId);
@@ -1725,19 +1852,54 @@ class RemoteFeedManager {
             this.retryTimers.delete(feedId);
         }
     }
+    resetRetryState(feedId) {
+        this.retryAttempts.delete(feedId);
+        this.retryBlockedUntil.delete(feedId);
+    }
     scheduleReattach(feedId, reason) {
         if (this.retryTimers.has(feedId))
             return;
-        Logger.error(`Remote feed ${feedId} retry scheduled: ${reason}`);
+        const now = Date.now();
+        const blockedUntil = this.retryBlockedUntil.get(feedId) ?? 0;
+        if (blockedUntil > now) {
+            Logger.warn(`Remote feed ${feedId} retry blocked until ${new Date(blockedUntil).toISOString()}`);
+            return;
+        }
+        const maxAttempts = APP_CONFIG.call.remoteFeedRetryMaxAttempts;
+        const attempt = (this.retryAttempts.get(feedId) ?? 0) + 1;
+        this.retryAttempts.set(feedId, attempt);
+        if (attempt > maxAttempts) {
+            const cooldownUntil = now + APP_CONFIG.call.remoteFeedRetryCooldownMs;
+            this.retryAttempts.set(feedId, 0);
+            this.retryBlockedUntil.set(feedId, cooldownUntil);
+            Logger.error(`Remote feed ${feedId} retries exhausted after ${maxAttempts} attempts. Cooldown started. reason=${reason}`);
+            this.observer?.onRemoteFeedRetryExhausted?.(feedId, maxAttempts);
+            return;
+        }
+        const baseDelayMs = APP_CONFIG.call.remoteFeedRetryDelayMs;
+        const maxDelayMs = APP_CONFIG.call.remoteFeedRetryMaxDelayMs;
+        const jitterMaxMs = APP_CONFIG.call.remoteFeedRetryJitterMs;
+        const backoffDelay = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, Math.max(0, attempt - 1)));
+        const jitter = Math.floor(Math.random() * Math.max(1, jitterMaxMs));
+        const delayMs = backoffDelay + jitter;
+        Logger.warn(`Remote feed ${feedId} retry scheduled (${attempt}/${maxAttempts}, delay=${delayMs}ms): ${reason}`);
         const t = window.setTimeout(() => {
             this.retryTimers.delete(feedId);
             this.addFeed(feedId);
-        }, APP_CONFIG.call.remoteFeedRetryDelayMs);
+        }, delayMs);
         this.retryTimers.set(feedId, t);
     }
     addFeed(feedId) {
         if (this.feeds.has(feedId) || this.pendingFeedAttach.has(feedId))
             return;
+        const blockedUntil = this.retryBlockedUntil.get(feedId) ?? 0;
+        if (blockedUntil > Date.now()) {
+            Logger.warn(`Remote feed ${feedId} add skipped during cooldown`);
+            return;
+        }
+        if (blockedUntil !== 0) {
+            this.retryBlockedUntil.delete(feedId);
+        }
         if (!this.janus) {
             Logger.error(`Remote feed ${feedId} attach skipped: Janus session not ready`);
             return;
@@ -1763,6 +1925,7 @@ class RemoteFeedManager {
                 this.pendingFeedAttach.delete(feedId);
                 this.clearAttachTimer(feedId);
                 this.feeds.set(feedId, h);
+                this.resetRetryState(feedId);
                 this.clearFeedStartTimer(feedId);
                 const startTimer = window.setTimeout(() => {
                     if (!this.feeds.has(feedId))
@@ -1811,6 +1974,7 @@ class RemoteFeedManager {
             onremotetrack: (track, _mid, on) => {
                 this.observer?.onRemoteTrackSignal?.(feedId, track, on);
                 if (on) {
+                    this.resetRetryState(feedId);
                     this.clearFeedStartTimer(feedId);
                 }
                 let byId = this.feedTracks.get(feedId);
@@ -1879,6 +2043,8 @@ class RemoteFeedManager {
         this.feedStartTimers.clear();
         this.retryTimers.forEach(t => window.clearTimeout(t));
         this.retryTimers.clear();
+        this.retryAttempts.clear();
+        this.retryBlockedUntil.clear();
         this.pendingFeedAttach.clear();
         Array.from(this.feeds.keys()).forEach(id => this.removeFeed(id, true, false));
         this.media.clearRemote(this.remoteVideo);
@@ -1920,6 +2086,9 @@ class CallController {
         this.participantSyncRequestSeq = 0;
         this.recordingRetryDelayMs = 700;
         this.cameraStreamOrientation = null;
+        this.publisherPc = null;
+        this.subscriberPcs = new Map();
+        this.callId = null;
         this.gateway = new JanusGateway();
         this.media = new MediaManager();
         this.vbManager = new VirtualBackgroundManager();
@@ -1930,6 +2099,9 @@ class CallController {
         this.gateway.init();
     }
     async join(cfg, opts) {
+        if (!opts?.internalRetry || !this.callId) {
+            this.callId = Correlation.newId();
+        }
         this.activeJoinCfg = cfg;
         this.isLeaving = false;
         this.suppressPublisherCleanupRetry = false;
@@ -1938,6 +2110,12 @@ class CallController {
             this.peerRetryAttempt = 0;
             this.clearRetryTimer();
         }
+        Logger.user(`[call] join start callId=${this.callId} roomId=${cfg.roomId} participantId=${cfg.participantId ?? "n/a"}`);
+        this.bus.emit("telemetry-context", {
+            callId: this.callId,
+            roomId: cfg.roomId,
+            participantId: cfg.participantId ?? null
+        });
         this.connectionEngine.onJoinStarted();
         try {
             const server = UrlConfig.getVcxServer().server;
@@ -1956,6 +2134,8 @@ class CallController {
             });
         }
         catch (e) {
+            const requestId = String(e?.requestId || "n/a");
+            Logger.error(`[join] failed callId=${this.callId} roomId=${cfg.roomId} requestId=${requestId}`, e);
             this.scheduleServerRetry("Join error: " + (e?.message || e));
         }
     }
@@ -1981,6 +2161,8 @@ class CallController {
         this.roomCreateAttempted = false;
         this.privateId = null;
         this.selfId = null;
+        this.publisherPc = null;
+        this.subscriberPcs.clear();
         this.recording = false;
         this.currentRecordingId = null;
         this.currentRoomId = null;
@@ -2027,7 +2209,7 @@ class CallController {
             else {
                 Logger.setStatus("TURN/peer connection failed. Retry limit reached.");
             }
-            Logger.error(`[retry] ${kind} retries exhausted. reason=${reason}`);
+            Logger.error(`[retry] ${kind} retries exhausted. callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} reason=${reason}`);
             return;
         }
         if (kind === "server") {
@@ -2038,7 +2220,7 @@ class CallController {
             this.connectionEngine.onPeerRetrying(attempt, maxAttempts);
             Logger.setStatus(`TURN/peer connection failed. Retrying (${attempt}/${maxAttempts})...`);
         }
-        Logger.warn(`[retry] ${kind} scheduled (${attempt}/${maxAttempts}). reason=${reason}`);
+        Logger.warn(`[retry] ${kind} scheduled (${attempt}/${maxAttempts}). callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} reason=${reason}`);
         this.cleanupForRetry();
         this.retryTimer = window.setTimeout(() => {
             this.retryTimer = null;
@@ -2051,6 +2233,8 @@ class CallController {
             this.joinedRoom = false;
             this.roomCreateAttempted = false;
             this.selfId = null;
+            this.publisherPc = null;
+            this.subscriberPcs.clear();
             this.roster.reset();
             this.stopParticipantSync();
             // reset recording
@@ -2138,6 +2322,58 @@ class CallController {
             }
         });
     }
+    isParticipantIdCollisionError(errorCode, errorText) {
+        const lower = errorText.toLowerCase();
+        if (errorCode === 436)
+            return true;
+        return lower.includes("id") &&
+            (lower.includes("exists") || lower.includes("exist") || lower.includes("already") || lower.includes("taken"));
+    }
+    handlePublisherJoinError(cfg, data, errorCodeRaw) {
+        const errorCode = Number.isFinite(Number(errorCodeRaw)) ? Number(errorCodeRaw) : null;
+        const errorText = String(data?.error || data?.error_reason || data?.reason || "").trim();
+        const lower = errorText.toLowerCase();
+        if (errorCode === 426) {
+            if (!this.roomCreateAttempted) {
+                this.roomCreateAttempted = true;
+                this.sendCreateRoom(cfg);
+            }
+            else {
+                this.scheduleServerRetry("Room join failed with 426 after create attempt");
+            }
+            return true;
+        }
+        if (this.isParticipantIdCollisionError(errorCode, errorText)) {
+            const msg = "Participant ID already in use. Use a unique Participant ID and reconnect.";
+            Logger.error(`[join] participant id collision callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} participantId=${cfg.participantId ?? "n/a"} code=${errorCode ?? "n/a"} detail=${errorText}`);
+            Logger.setStatus(msg);
+            this.connectionEngine.setFatalError(msg, "Open call with a unique participant ID.");
+            this.bus.emit("joined", false);
+            return true;
+        }
+        const unauthorized = lower.includes("unauthor") || lower.includes("forbidden") || errorCode === 433 || errorCode === 428;
+        if (unauthorized) {
+            const msg = "Authorization failed for call join. Please refresh and re-authenticate.";
+            Logger.error(`[join] unauthorized callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} code=${errorCode ?? "n/a"} detail=${errorText}`);
+            Logger.setStatus(msg);
+            this.connectionEngine.setFatalError(msg, "Retry after authentication.");
+            this.bus.emit("joined", false);
+            return true;
+        }
+        const roomMissing = lower.includes("no such room") || lower.includes("room not found");
+        if (roomMissing) {
+            if (!this.roomCreateAttempted) {
+                this.roomCreateAttempted = true;
+                this.sendCreateRoom(cfg);
+            }
+            else {
+                this.scheduleServerRetry(`Room missing after create attempt (code=${errorCode ?? "n/a"})`);
+            }
+            return true;
+        }
+        this.scheduleServerRetry(`Publisher join error code=${errorCode ?? "n/a"} detail=${errorText || JSON.stringify(data)}`);
+        return true;
+    }
     onPublisherMessage(cfg, msg, jsep) {
         if (msg?.janus === "hangup") {
             const reason = String(msg?.reason || "Peer hangup");
@@ -2152,16 +2388,9 @@ class CallController {
         const errorCode = data["error_code"];
         if (data?.error || errorCode) {
             Logger.error(`Publisher plugin error: ${JSON.stringify(data)}`);
-        }
-        if (event === "event" && errorCode === 426) {
-            if (!this.roomCreateAttempted) {
-                this.roomCreateAttempted = true;
-                this.sendCreateRoom(cfg);
+            if (!this.joinedRoom && this.handlePublisherJoinError(cfg, data, errorCode)) {
+                return;
             }
-            else {
-                this.scheduleServerRetry("Room join failed with 426 after create attempt");
-            }
-            return;
         }
         if (event === "joined") {
             this.joinedRoom = true;
@@ -2178,12 +2407,14 @@ class CallController {
             Logger.setStatus("Joined. Publishing...");
             this.remoteFeeds = new RemoteFeedManager(this.gateway.getJanus(), cfg.roomId, this.privateId, this.gateway.getOpaqueId(), this.media, this.remoteVideo, {
                 onSubscriberPcReady: (feedId, pc) => {
+                    this.subscriberPcs.set(feedId, pc);
                     this.connectionEngine.registerSubscriberPc(feedId, pc);
                 },
                 onRemoteTrackSignal: (feedId, track, on) => {
                     this.connectionEngine.onRemoteTrackSignal(feedId, track, on);
                 },
                 onRemoteFeedCleanup: (feedId) => {
+                    this.subscriberPcs.delete(feedId);
                     this.connectionEngine.unregisterSubscriber(feedId);
                     if (this.isLeaving || this.suppressRemoteFeedRetry) {
                         Logger.warn(`Remote feed ${feedId} cleanup ignored (controlled cleanup)`);
@@ -2195,6 +2426,12 @@ class CallController {
                             this.remoteFeeds?.addFeed(feedId);
                         }, APP_CONFIG.call.remoteFeedRetryDelayMs);
                     }
+                },
+                onRemoteFeedRetryExhausted: (feedId, attempts) => {
+                    this.subscriberPcs.delete(feedId);
+                    this.connectionEngine.onRemoteFeedRetryExhausted(feedId, attempts);
+                    Logger.setStatus("Remote video is unstable. Ask participant to reconnect.");
+                    Logger.error(`[remote-feed] retry exhausted callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} feedId=${feedId} attempts=${attempts}`);
                 }
             });
             this.publish();
@@ -2324,6 +2561,7 @@ class CallController {
         if (feedId === this.selfId)
             return;
         this.roster.remove(feedId);
+        this.subscriberPcs.delete(feedId);
         this.remoteFeeds?.removeFeed(feedId);
         this.publishParticipants(cfg);
     }
@@ -2458,18 +2696,16 @@ class CallController {
         };
     }
     async getPublishTracks() {
-        if (!this.isIOSDevice()) {
-            return [
-                { type: "audio", capture: true, recv: false },
-                { type: "video", capture: true, recv: false }
-            ];
-        }
         const stream = await this.ensureCameraStream();
         const audioTrack = stream.getAudioTracks()[0];
         const videoTrack = stream.getVideoTracks()[0];
         if (!audioTrack || !videoTrack) {
             throw new Error("Camera or microphone track unavailable");
         }
+        // Ensure local preview and connectivity state are updated even when
+        // browser/Janus onlocaltrack callback is delayed or missing.
+        this.connectionEngine.onLocalTrackSignal(videoTrack, true);
+        this.media.setLocalTrack(this.localVideo, videoTrack);
         return [
             { type: "audio", capture: audioTrack, recv: false },
             { type: "video", capture: videoTrack, recv: false }
@@ -2514,6 +2750,7 @@ class CallController {
                     // TODO: If Janus internals change and webrtcStuff.pc is unavailable, bind the publisher PC from Janus plugin callbacks.
                     const pc = this.plugin?.webrtcStuff?.pc;
                     if (pc) {
+                        this.publisherPc = pc;
                         this.connectionEngine.registerPublisherPc(pc);
                         this.tuneVideoSenderBitrate(pc, videoCfg.bitrate_bps, videoCfg.max_framerate);
                         const emit = () => {
@@ -2554,6 +2791,7 @@ class CallController {
                         };
                     }
                     else {
+                        this.publisherPc = null;
                         console.log("VCX_CONNECTIVITY=pc_not_available");
                         this.bus.emit("connectivity", {
                             ice: "n/a",
@@ -2603,6 +2841,12 @@ class CallController {
     }
     markRetrying() {
         this.connectionEngine.onReconnect();
+    }
+    getNetworkQualityPeers() {
+        return {
+            publisher: this.publisherPc,
+            subscribers: Array.from(this.subscriberPcs.values())
+        };
     }
     stopVideo() {
         this.plugin?.send({ message: { request: "unpublish" } });
@@ -2710,12 +2954,17 @@ class CallController {
             this.currentRoomId = null;
             this.activeJoinCfg = null;
             this.selfId = null;
+            this.publisherPc = null;
+            this.subscriberPcs.clear();
             this.roster.reset();
             this.bus.emit("recording-changed", false);
             this.bus.emit("joined", false);
             this.connectionEngine.onLeft();
             this.media.clearLocal(this.localVideo);
             this.media.clearRemote(this.remoteVideo);
+            this.cameraStream = null;
+            this.cameraStreamOrientation = null;
+            this.callId = null;
             Logger.setStatus("Left");
         }
         catch (e) {
@@ -2791,7 +3040,11 @@ class CallController {
     async ensureCameraStream() {
         try {
             const desiredOrientation = this.getViewportOrientation();
+            const hasLiveVideo = !!this.cameraStream?.getVideoTracks().some(t => t.readyState === "live");
+            const hasLiveAudio = !!this.cameraStream?.getAudioTracks().some(t => t.readyState === "live");
             const needsRecreate = !this.cameraStream ||
+                !hasLiveVideo ||
+                !hasLiveAudio ||
                 (this.isIOSDevice() && this.cameraStreamOrientation !== desiredOrientation);
             if (needsRecreate) {
                 if (this.cameraStream) {
@@ -2883,6 +3136,8 @@ class UIController {
         // ✅ recording state
         this.recording = false;
         this.renderedParticipantCount = 0;
+        this.lastRemoteVideoTime = 0;
+        this.remoteVideoFrameProgressAt = 0;
         this.connectionStatus = null;
         this.remoteVideoMonitorTimer = null;
         const qn = this.getQueryParam("name");
@@ -2932,6 +3187,13 @@ class UIController {
             console.log("VCX_ROSTER_PARTICIPANTS=" + count);
             this.updateDebugState({
                 rosterParticipants: count
+            });
+        });
+        this.bus.on("telemetry-context", (ctx) => {
+            this.updateDebugState({
+                callId: ctx?.callId,
+                roomId: ctx?.roomId,
+                participantId: ctx?.participantId
             });
         });
         this.bus.on("connectivity", (s) => {
@@ -3088,6 +3350,8 @@ class UIController {
         this.lastCfg = cfg;
         this.recording = false;
         this.renderedParticipantCount = 0;
+        this.lastRemoteVideoTime = 0;
+        this.remoteVideoFrameProgressAt = 0;
         this.updateRecordUI();
         this.renderCallMeta(cfg);
         Logger.setStatus(`Joining... roomId=${cfg.roomId}, name=${cfg.display}${cfg.participantId ? `, participantId=${cfg.participantId}` : ""}`);
@@ -3166,16 +3430,38 @@ class UIController {
         this.remoteOverlay.innerText = remoteBase;
     }
     renderConnectionStatus(status) {
-        this.connectionStatus = status;
-        this.logger.setStatus(status.primaryText);
-        this.logger.setInfo(status.secondaryText);
+        const resolved = this.resolveVisibleConnectionStatus(status);
+        this.connectionStatus = resolved;
+        this.logger.setStatus(resolved.primaryText);
+        this.logger.setInfo(resolved.secondaryText);
         this.applyConnectionOverlays();
         this.renderRemoteFallback();
         this.updateDebugState({
-            connectionOwner: status.owner,
-            connectionSeverity: status.severity,
-            connectionState: status.state
+            connectionOwner: resolved.owner,
+            connectionSeverity: resolved.severity,
+            connectionState: resolved.state
         });
+    }
+    resolveVisibleConnectionStatus(status) {
+        // Keep hard failures visible as-is.
+        if (status.severity === "error" || status.state === "FAILED") {
+            return status;
+        }
+        const inSetupPhase = status.state === "NEGOTIATING" || status.state === "WAITING_REMOTE";
+        if (!inSetupPhase) {
+            return status;
+        }
+        // If both videos are actually live in the UI, present connected state.
+        if (this.hasLocalVideoTrack() && this.hasRemoteVideoTrack()) {
+            return {
+                owner: "NEUTRAL",
+                severity: "info",
+                state: "CONNECTED",
+                primaryText: "Connected",
+                secondaryText: "Video and audio are live."
+            };
+        }
+        return status;
     }
     setupRemoteFallbackMonitor() {
         const refresh = () => {
@@ -3196,29 +3482,60 @@ class UIController {
         this.remoteVideoMonitorTimer = window.setInterval(refresh, APP_CONFIG.ui.remoteFallbackRefreshMs);
         refresh();
     }
-    hasRenderableVideoTrack(videoEl) {
+    hasLiveVideoTrack(videoEl) {
         const ms = videoEl.srcObject;
         if (!ms)
             return false;
         const tracks = ms.getVideoTracks();
         if (!tracks || tracks.length === 0)
             return false;
-        const hasLiveTrack = tracks.some(t => t.readyState === "live" && t.enabled !== false);
-        if (!hasLiveTrack)
+        return tracks.some(t => t.readyState === "live" && t.enabled !== false);
+    }
+    hasRenderableVideoTrack(videoEl) {
+        if (!this.hasLiveVideoTrack(videoEl))
             return false;
         const hasDecodedFrame = videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
             videoEl.videoWidth > 0 &&
             videoEl.videoHeight > 0;
-        const hasStartedPlayback = videoEl.currentTime > 0.05;
-        return hasDecodedFrame && hasStartedPlayback;
+        const isPlaying = !videoEl.paused;
+        return hasDecodedFrame && isPlaying;
     }
     hasLocalVideoTrack() {
-        return this.hasRenderableVideoTrack(this.localVideoEl);
+        // Local participant is considered present when local camera track is live.
+        return this.hasLiveVideoTrack(this.localVideoEl);
     }
     hasRemoteVideoTrack() {
-        return this.hasRenderableVideoTrack(this.remoteVideoEl);
+        this.updateRemoteVideoProgress();
+        if (!this.hasRenderableVideoTrack(this.remoteVideoEl))
+            return false;
+        if (this.remoteVideoFrameProgressAt === 0)
+            return false;
+        return Date.now() - this.remoteVideoFrameProgressAt <= APP_CONFIG.ui.remoteVideoStallThresholdMs;
+    }
+    updateRemoteVideoProgress() {
+        const now = Date.now();
+        if (!this.hasLiveVideoTrack(this.remoteVideoEl)) {
+            this.lastRemoteVideoTime = 0;
+            this.remoteVideoFrameProgressAt = 0;
+            return;
+        }
+        const currentTime = Number.isFinite(this.remoteVideoEl.currentTime) ? this.remoteVideoEl.currentTime : 0;
+        if (currentTime + 0.01 < this.lastRemoteVideoTime) {
+            this.lastRemoteVideoTime = currentTime;
+            this.remoteVideoFrameProgressAt = 0;
+            return;
+        }
+        if (currentTime > this.lastRemoteVideoTime + 0.03) {
+            this.lastRemoteVideoTime = currentTime;
+            this.remoteVideoFrameProgressAt = now;
+            return;
+        }
+        if (this.remoteVideoFrameProgressAt === 0 && currentTime > 0) {
+            this.remoteVideoFrameProgressAt = now;
+        }
     }
     refreshRenderedParticipantCount() {
+        this.updateRemoteVideoProgress();
         const count = (this.hasLocalVideoTrack() ? 1 : 0) +
             (this.hasRemoteVideoTrack() ? 1 : 0);
         if (count === this.renderedParticipantCount)
@@ -3253,7 +3570,7 @@ class UIController {
                 local: l,
                 remote: r
             });
-        });
+        }, () => this.controller.getNetworkQualityPeers());
     }
     setupParentBridge() {
         this.bridge.onCommand((cmd) => {

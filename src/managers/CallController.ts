@@ -41,6 +41,9 @@ class CallController {
   private participantSyncRequestSeq = 0;
   private readonly recordingRetryDelayMs = 700;
   private cameraStreamOrientation: "portrait" | "landscape" | null = null;
+  private publisherPc: RTCPeerConnection | null = null;
+  private subscriberPcs = new Map<number, RTCPeerConnection>();
+  private callId: string | null = null;
 
   constructor(
     private bus: EventBus,
@@ -58,6 +61,9 @@ class CallController {
   }
 
   async join(cfg: JoinConfig, opts?: { internalRetry?: boolean }) {
+    if (!opts?.internalRetry || !this.callId) {
+      this.callId = Correlation.newId();
+    }
     this.activeJoinCfg = cfg;
     this.isLeaving = false;
     this.suppressPublisherCleanupRetry = false;
@@ -66,6 +72,12 @@ class CallController {
       this.peerRetryAttempt = 0;
       this.clearRetryTimer();
     }
+    Logger.user(`[call] join start callId=${this.callId} roomId=${cfg.roomId} participantId=${cfg.participantId ?? "n/a"}`);
+    this.bus.emit("telemetry-context", {
+      callId: this.callId,
+      roomId: cfg.roomId,
+      participantId: cfg.participantId ?? null
+    });
     this.connectionEngine.onJoinStarted();
     try {
       const server = UrlConfig.getVcxServer().server;
@@ -91,6 +103,8 @@ class CallController {
         }
       );
     } catch (e: any) {
+      const requestId = String(e?.requestId || "n/a");
+      Logger.error(`[join] failed callId=${this.callId} roomId=${cfg.roomId} requestId=${requestId}`, e);
       this.scheduleServerRetry("Join error: " + (e?.message || e));
     }
   }
@@ -119,6 +133,8 @@ class CallController {
     this.roomCreateAttempted = false;
     this.privateId = null;
     this.selfId = null;
+    this.publisherPc = null;
+    this.subscriberPcs.clear();
     this.recording = false;
     this.currentRecordingId = null;
     this.currentRoomId = null;
@@ -168,7 +184,7 @@ class CallController {
       } else {
         Logger.setStatus("TURN/peer connection failed. Retry limit reached.");
       }
-      Logger.error(`[retry] ${kind} retries exhausted. reason=${reason}`);
+      Logger.error(`[retry] ${kind} retries exhausted. callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} reason=${reason}`);
       return;
     }
 
@@ -179,7 +195,7 @@ class CallController {
       this.connectionEngine.onPeerRetrying(attempt, maxAttempts);
       Logger.setStatus(`TURN/peer connection failed. Retrying (${attempt}/${maxAttempts})...`);
     }
-    Logger.warn(`[retry] ${kind} scheduled (${attempt}/${maxAttempts}). reason=${reason}`);
+    Logger.warn(`[retry] ${kind} scheduled (${attempt}/${maxAttempts}). callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} reason=${reason}`);
 
     this.cleanupForRetry();
     this.retryTimer = window.setTimeout(() => {
@@ -197,6 +213,8 @@ class CallController {
         this.joinedRoom = false;
         this.roomCreateAttempted = false;
         this.selfId = null;
+        this.publisherPc = null;
+        this.subscriberPcs.clear();
         this.roster.reset();
         this.stopParticipantSync();
 
@@ -297,6 +315,62 @@ class CallController {
     });
   }
 
+  private isParticipantIdCollisionError(errorCode: number | null, errorText: string): boolean {
+    const lower = errorText.toLowerCase();
+    if (errorCode === 436) return true;
+    return lower.includes("id") &&
+      (lower.includes("exists") || lower.includes("exist") || lower.includes("already") || lower.includes("taken"));
+  }
+
+  private handlePublisherJoinError(cfg: JoinConfig, data: any, errorCodeRaw: unknown): boolean {
+    const errorCode = Number.isFinite(Number(errorCodeRaw)) ? Number(errorCodeRaw) : null;
+    const errorText = String(data?.error || data?.error_reason || data?.reason || "").trim();
+    const lower = errorText.toLowerCase();
+
+    if (errorCode === 426) {
+      if (!this.roomCreateAttempted) {
+        this.roomCreateAttempted = true;
+        this.sendCreateRoom(cfg);
+      } else {
+        this.scheduleServerRetry("Room join failed with 426 after create attempt");
+      }
+      return true;
+    }
+
+    if (this.isParticipantIdCollisionError(errorCode, errorText)) {
+      const msg = "Participant ID already in use. Use a unique Participant ID and reconnect.";
+      Logger.error(`[join] participant id collision callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} participantId=${cfg.participantId ?? "n/a"} code=${errorCode ?? "n/a"} detail=${errorText}`);
+      Logger.setStatus(msg);
+      this.connectionEngine.setFatalError(msg, "Open call with a unique participant ID.");
+      this.bus.emit("joined", false);
+      return true;
+    }
+
+    const unauthorized = lower.includes("unauthor") || lower.includes("forbidden") || errorCode === 433 || errorCode === 428;
+    if (unauthorized) {
+      const msg = "Authorization failed for call join. Please refresh and re-authenticate.";
+      Logger.error(`[join] unauthorized callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} code=${errorCode ?? "n/a"} detail=${errorText}`);
+      Logger.setStatus(msg);
+      this.connectionEngine.setFatalError(msg, "Retry after authentication.");
+      this.bus.emit("joined", false);
+      return true;
+    }
+
+    const roomMissing = lower.includes("no such room") || lower.includes("room not found");
+    if (roomMissing) {
+      if (!this.roomCreateAttempted) {
+        this.roomCreateAttempted = true;
+        this.sendCreateRoom(cfg);
+      } else {
+        this.scheduleServerRetry(`Room missing after create attempt (code=${errorCode ?? "n/a"})`);
+      }
+      return true;
+    }
+
+    this.scheduleServerRetry(`Publisher join error code=${errorCode ?? "n/a"} detail=${errorText || JSON.stringify(data)}`);
+    return true;
+  }
+
   private onPublisherMessage(cfg: JoinConfig, msg: any, jsep: any) {
     if (msg?.janus === "hangup") {
       const reason = String(msg?.reason || "Peer hangup");
@@ -312,16 +386,9 @@ class CallController {
     const errorCode = data["error_code"];
     if (data?.error || errorCode) {
       Logger.error(`Publisher plugin error: ${JSON.stringify(data)}`);
-    }
-
-    if (event === "event" && errorCode === 426) {
-      if (!this.roomCreateAttempted) {
-        this.roomCreateAttempted = true;
-        this.sendCreateRoom(cfg);
-      } else {
-        this.scheduleServerRetry("Room join failed with 426 after create attempt");
+      if (!this.joinedRoom && this.handlePublisherJoinError(cfg, data, errorCode)) {
+        return;
       }
-      return;
     }
 
     if (event === "joined") {
@@ -350,12 +417,14 @@ class CallController {
         this.remoteVideo,
         {
           onSubscriberPcReady: (feedId: number, pc: RTCPeerConnection) => {
+            this.subscriberPcs.set(feedId, pc);
             this.connectionEngine.registerSubscriberPc(feedId, pc);
           },
           onRemoteTrackSignal: (feedId: number, track: MediaStreamTrack, on: boolean) => {
             this.connectionEngine.onRemoteTrackSignal(feedId, track, on);
           },
           onRemoteFeedCleanup: (feedId: number) => {
+            this.subscriberPcs.delete(feedId);
             this.connectionEngine.unregisterSubscriber(feedId);
             if (this.isLeaving || this.suppressRemoteFeedRetry) {
               Logger.warn(`Remote feed ${feedId} cleanup ignored (controlled cleanup)`);
@@ -367,6 +436,12 @@ class CallController {
                 this.remoteFeeds?.addFeed(feedId);
               }, APP_CONFIG.call.remoteFeedRetryDelayMs);
             }
+          },
+          onRemoteFeedRetryExhausted: (feedId: number, attempts: number) => {
+            this.subscriberPcs.delete(feedId);
+            this.connectionEngine.onRemoteFeedRetryExhausted(feedId, attempts);
+            Logger.setStatus("Remote video is unstable. Ask participant to reconnect.");
+            Logger.error(`[remote-feed] retry exhausted callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} feedId=${feedId} attempts=${attempts}`);
           }
         }
       );
@@ -506,6 +581,7 @@ class CallController {
   private removeParticipant(cfg: JoinConfig, feedId: number) {
     if (feedId === this.selfId) return;
     this.roster.remove(feedId);
+    this.subscriberPcs.delete(feedId);
     this.remoteFeeds?.removeFeed(feedId);
     this.publishParticipants(cfg);
   }
@@ -658,13 +734,6 @@ class CallController {
   }
 
   private async getPublishTracks(): Promise<any[]> {
-    if (!this.isIOSDevice()) {
-      return [
-        { type: "audio", capture: true, recv: false },
-        { type: "video", capture: true, recv: false }
-      ];
-    }
-
     const stream = await this.ensureCameraStream();
     const audioTrack = stream.getAudioTracks()[0];
     const videoTrack = stream.getVideoTracks()[0];
@@ -672,6 +741,11 @@ class CallController {
     if (!audioTrack || !videoTrack) {
       throw new Error("Camera or microphone track unavailable");
     }
+
+    // Ensure local preview and connectivity state are updated even when
+    // browser/Janus onlocaltrack callback is delayed or missing.
+    this.connectionEngine.onLocalTrackSignal(videoTrack, true);
+    this.media.setLocalTrack(this.localVideo, videoTrack);
 
     return [
       { type: "audio", capture: audioTrack, recv: false },
@@ -725,6 +799,7 @@ class CallController {
           const pc: RTCPeerConnection | undefined = this.plugin?.webrtcStuff?.pc;
 
           if (pc) {
+            this.publisherPc = pc;
             this.connectionEngine.registerPublisherPc(pc);
             this.tuneVideoSenderBitrate(pc, videoCfg.bitrate_bps, videoCfg.max_framerate);
             const emit = () => {
@@ -770,6 +845,7 @@ class CallController {
               emit();
             };
           } else {
+            this.publisherPc = null;
             console.log("VCX_CONNECTIVITY=pc_not_available");
             this.bus.emit("connectivity", {
               ice: "n/a",
@@ -824,6 +900,13 @@ class CallController {
 
   markRetrying() {
     this.connectionEngine.onReconnect();
+  }
+
+  public getNetworkQualityPeers(): { publisher: RTCPeerConnection | null; subscribers: RTCPeerConnection[] } {
+    return {
+      publisher: this.publisherPc,
+      subscribers: Array.from(this.subscriberPcs.values())
+    };
   }
 
   stopVideo() {
@@ -943,6 +1026,8 @@ class CallController {
       this.currentRoomId = null;
       this.activeJoinCfg = null;
       this.selfId = null;
+      this.publisherPc = null;
+      this.subscriberPcs.clear();
       this.roster.reset();
 
       this.bus.emit("recording-changed", false);
@@ -951,6 +1036,9 @@ class CallController {
 
       this.media.clearLocal(this.localVideo);
       this.media.clearRemote(this.remoteVideo);
+      this.cameraStream = null;
+      this.cameraStreamOrientation = null;
+      this.callId = null;
 
       Logger.setStatus("Left");
 
@@ -1018,8 +1106,12 @@ class CallController {
   private async ensureCameraStream(): Promise<MediaStream>{
     try {
       const desiredOrientation = this.getViewportOrientation();
+      const hasLiveVideo = !!this.cameraStream?.getVideoTracks().some(t => t.readyState === "live");
+      const hasLiveAudio = !!this.cameraStream?.getAudioTracks().some(t => t.readyState === "live");
       const needsRecreate =
         !this.cameraStream ||
+        !hasLiveVideo ||
+        !hasLiveAudio ||
         (this.isIOSDevice() && this.cameraStreamOrientation !== desiredOrientation);
 
       if (needsRecreate) {
