@@ -2,24 +2,10 @@ class ScreenShareManager {
   private stream: MediaStream | null = null;
 
   async start(): Promise<MediaStream>{
-
-    // Get screen share stream
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: true
+    this.stream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: true
     });
-
-    // Get audio stream
-    const mic = await navigator.mediaDevices.getUserMedia({
-       audio: true
-    });
-
-    // combine streams
-    mic.getAudioTracks().forEach(track =>
-      stream.addTrack(track)
-    );
-
-    this.stream = stream;
-
     return this.stream;
   }
 
