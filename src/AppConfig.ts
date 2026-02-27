@@ -113,9 +113,9 @@ const APP_CONFIG = {
     }
   },
   vcx: {
-    imsBaseUrl: "https://localhost.beta.videocx.io",
+    imsBaseUrl: "https://beta.videocx.io",
     clientId: "101",
-    defaultJanusServer: "wss://localhost.beta.videocx.io/mstream_janus",
+    defaultJanusServer: "wss://beta.videocx.io/mstream_janus",
     defaultDisplayName: "Guest"
   },
   videoroom: {
