@@ -932,12 +932,14 @@ class CallController {
     if (this.recording) return;
 
     this.currentRecordingId = recordingId;
-
+    const recordingIdRandom = Math.floor(100000 + Math.random() * 900000);
     this.plugin.send({
-      message: {
-        request: "enable_recording",
-        record: true,
-        room: this.currentRoomId
+    message: {
+          request: "enable_recording",
+          record: true,
+          room: this.currentRoomId,
+          recordingId: recordingIdRandom,
+          participantId: this.activeJoinCfg?.participantId
       },
       success: () => {
         this.recording = true;
