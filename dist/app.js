@@ -129,16 +129,16 @@ const APP_CONFIG = {
         maxFramerateCap: 30
     },
     call: {
-        reconnectDelayMs: 800,
-        participantSyncIntervalMs: 8000,
+        reconnectDelayMs: 1000,
+        participantSyncIntervalMs: 5000,
         participantSyncCooldownMs: 2500,
-        participantSyncRequestTimeoutMs: 7000,
+        participantSyncRequestTimeoutMs: 4500,
         remoteFeedRetryDelayMs: 1200,
-        remoteFeedRetryMaxDelayMs: 12000,
-        remoteFeedRetryJitterMs: 350,
         remoteFeedRetryMaxAttempts: 5,
-        remoteFeedRetryCooldownMs: 30000,
-        remoteFeedAttachTimeoutMs: 8000,
+        remoteFeedRetryCooldownMs: 15000,
+        remoteFeedRetryMaxDelayMs: 7000,
+        remoteFeedRetryJitterMs: 400,
+        remoteFeedAttachTimeoutMs: 10000,
         remoteFeedStartTimeoutMs: 12000,
         retry: {
             serverMaxAttempts: 3,
@@ -150,6 +150,12 @@ const APP_CONFIG = {
     ui: {
         remoteFallbackRefreshMs: 2500,
         remoteVideoStallThresholdMs: 4000
+    },
+    virtualBackground: {
+        maskMode: "auto",
+        maskAutoConfirmFrames: 4,
+        maskAutoProbeFrames: 15,
+        maskAutoMinDiff: 10
     },
     recording: {
         folderPath: "/opt/efs-janus-app/dev/VideoRecDownloads",
@@ -173,6 +179,12 @@ const APP_CONFIG = {
             lossGoodPct: 2,
             bitrateGoodKbps: 400
         }
+    },
+    mediaTelemetry: {
+        sampleIntervalMs: 1000,
+        stallWindowMs: 3500,
+        peerTelemetryFreshnessMs: 6000,
+        enablePeerTelemetry: true
     },
     connectionStatus: {
         tickIntervalMs: 1000,
@@ -832,25 +844,47 @@ class VirtualBackgroundManager {
         this.bg = new Image();
         this.seg = null;
         this.running = false;
+        this.segInFlight = false;
         this.srcStream = null;
         this.outStream = null;
-        // IMPORTANT: put virtual.jpeg next to index.html
+        this.resolvedMaskMode = null;
+        this.maskVotes = { normal: 0, inverted: 0 };
+        this.maskProbeFrames = 0;
+        this.sourceProvider = null;
+        this.lastRecoverAttemptAt = 0;
+        this.recoverCooldownMs = 1200;
         this.bgUrl = this.getBgUrl();
-        // For local file (same origin), no crossOrigin needed
         this.bg.src = this.bgUrl;
         this.canvas = document.createElement("canvas");
         const c = this.canvas.getContext("2d");
         if (!c)
             throw new Error("No canvas 2d");
         this.ctx = c;
+        this.srcCanvas = document.createElement("canvas");
+        const sc = this.srcCanvas.getContext("2d");
+        if (!sc)
+            throw new Error("No source canvas 2d");
+        this.srcCtx = sc;
+        this.maskCanvas = document.createElement("canvas");
+        const mc = this.maskCanvas.getContext("2d");
+        if (!mc)
+            throw new Error("No mask canvas 2d");
+        this.maskCtx = mc;
+        this.bgCanvas = document.createElement("canvas");
+        const bc = this.bgCanvas.getContext("2d");
+        if (!bc)
+            throw new Error("No background canvas 2d");
+        this.bgCtx = bc;
         this.inVideo = document.createElement("video");
         this.inVideo.autoplay = true;
         this.inVideo.playsInline = true;
         this.inVideo.muted = true;
+        this.inVideo.style.cssText = "position:fixed;left:-10000px;top:-10000px;width:1px;height:1px;opacity:0;pointer-events:none;";
+    }
+    setSourceProvider(provider) {
+        this.sourceProvider = provider;
     }
     getBgUrl() {
-        // Same folder as index.html (works even with query params)
-        // http://localhost/app/index.html?x=1 -> http://localhost/app/virtual.jpeg
         try {
             return new URL("./virtual.jpeg", window.location.href).toString();
         }
@@ -862,7 +896,6 @@ class VirtualBackgroundManager {
         const img = this.bg;
         const url = this.bgUrl;
         if (!img.src || img.src !== url) {
-            img.crossOrigin = "anonymous";
             img.src = url;
         }
         Logger.user(`VB background loading: ${img.src}`);
@@ -881,25 +914,66 @@ class VirtualBackgroundManager {
             };
         });
     }
-    async enable(stream) {
-        this.srcStream = stream;
-        this.inVideo.srcObject = stream;
+    cloneVideoOnlyStream(stream) {
+        const inputTrack = stream.getVideoTracks()[0];
+        if (!inputTrack) {
+            return new MediaStream();
+        }
+        const clonedTrack = inputTrack.clone();
+        clonedTrack.enabled = inputTrack.enabled !== false;
+        return new MediaStream([clonedTrack]);
+    }
+    releaseSourceStream() {
+        if (this.srcStream) {
+            this.srcStream.getTracks().forEach((t) => {
+                try {
+                    t.stop();
+                }
+                catch { }
+            });
+        }
+        this.srcStream = null;
+        this.inVideo.srcObject = null;
+    }
+    async prepareSourceStream(stream) {
+        const cloned = this.cloneVideoOnlyStream(stream);
+        const track = cloned.getVideoTracks()[0];
+        if (!track) {
+            throw new Error("Virtual background source video track unavailable");
+        }
+        this.releaseSourceStream();
+        this.srcStream = cloned;
+        this.inVideo.srcObject = cloned;
+        if (typeof document !== "undefined" && document.body && !document.body.contains(this.inVideo)) {
+            document.body.appendChild(this.inVideo);
+        }
         await this.inVideo.play().catch((e) => {
             if (e?.name === "AbortError")
                 return;
             Logger.error("Virtual background input video play failed", e);
         });
+    }
+    ensureSegmentation() {
+        if (this.seg)
+            return;
+        this.seg = new SelfieSegmentation({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}`
+        });
+        this.seg.setOptions({ modelSelection: 1 });
+        this.seg.onResults((r) => this.onResults(r));
+    }
+    async enable(stream) {
+        this.running = false;
+        this.segInFlight = false;
+        this.resolvedMaskMode = null;
+        this.maskVotes.normal = 0;
+        this.maskVotes.inverted = 0;
+        this.maskProbeFrames = 0;
+        await this.prepareSourceStream(stream);
         await this.ensureBgLoaded();
-        if (!this.seg) {
-            this.seg = new SelfieSegmentation({
-                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}`
-            });
-            this.seg.setOptions({ modelSelection: 1 });
-            this.seg.onResults((r) => this.onResults(r));
-        }
+        this.ensureSegmentation();
         this.running = true;
         this.loop();
-        // 24 fps is OK for mobile; adjust if needed
         this.outStream = this.canvas.captureStream(24);
         Logger.user("Virtual background enabled");
         Logger.setStatus("Virtual background enabled");
@@ -907,48 +981,216 @@ class VirtualBackgroundManager {
     }
     disable() {
         this.running = false;
+        this.segInFlight = false;
         this.outStream = null;
+        this.releaseSourceStream();
         Logger.user("Virtual background disabled");
         Logger.setStatus("Virtual background disabled");
     }
     getSourceStream() { return this.srcStream; }
+    getOutputStream() { return this.outStream; }
+    async tryRecoverSource() {
+        if (!this.sourceProvider)
+            return;
+        const now = Date.now();
+        if (now - this.lastRecoverAttemptAt < this.recoverCooldownMs)
+            return;
+        this.lastRecoverAttemptAt = now;
+        try {
+            const next = await this.sourceProvider();
+            const nextTrack = next?.getVideoTracks()[0];
+            if (!next || !nextTrack || nextTrack.readyState !== "live")
+                return;
+            await this.prepareSourceStream(next);
+            Logger.user("Virtual background source recovered");
+        }
+        catch (e) {
+            Logger.error("Virtual background source recovery failed", e);
+        }
+    }
     async loop() {
         while (this.running) {
             if (this.inVideo.readyState >= 2) {
-                await this.seg.send({ image: this.inVideo });
+                try {
+                    if (this.inVideo.paused) {
+                        await this.inVideo.play().catch(() => { });
+                    }
+                    const srcVideoTrack = this.srcStream?.getVideoTracks()[0] ?? null;
+                    if (!srcVideoTrack || srcVideoTrack.readyState !== "live") {
+                        await this.tryRecoverSource();
+                    }
+                    else {
+                        if (!srcVideoTrack.enabled)
+                            srcVideoTrack.enabled = true;
+                        // Always paint raw camera first so preview never goes black.
+                        const w = this.inVideo.videoWidth || 640;
+                        const h = this.inVideo.videoHeight || 480;
+                        this.ensureCanvasSizes(w, h);
+                        this.ctx.globalCompositeOperation = "source-over";
+                        this.ctx.clearRect(0, 0, w, h);
+                        this.ctx.drawImage(this.inVideo, 0, 0, w, h);
+                        // Kick segmentation in non-blocking mode to avoid loop freeze.
+                        if (!this.segInFlight && this.seg) {
+                            this.segInFlight = true;
+                            void this.seg.send({ image: this.inVideo })
+                                .catch((e) => {
+                                Logger.error("Virtual background segmentation frame failed", e);
+                            })
+                                .finally(() => {
+                                this.segInFlight = false;
+                            });
+                        }
+                    }
+                }
+                catch (e) {
+                    Logger.error("Virtual background loop failed", e);
+                }
+            }
+            else {
+                await this.tryRecoverSource();
             }
             await new Promise(r => setTimeout(r, 33));
         }
     }
-    onResults(results) {
-        const w = (results.image && results.image.width) || this.inVideo.videoWidth || 640;
-        const h = (results.image && results.image.height) || this.inVideo.videoHeight || 480;
-        if (!w || !h)
-            return;
+    ensureCanvasSizes(w, h) {
         if (this.canvas.width !== w)
             this.canvas.width = w;
         if (this.canvas.height !== h)
             this.canvas.height = h;
-        const ctx = this.ctx;
-        ctx.clearRect(0, 0, w, h);
-        // 1) Draw the camera frame
-        ctx.globalCompositeOperation = "source-over";
-        ctx.drawImage(results.image, 0, 0, w, h);
-        // 2) Keep ONLY the person using segmentation mask
-        // segmentationMask: white = person, black = background
-        ctx.globalCompositeOperation = "destination-in";
-        ctx.drawImage(results.segmentationMask, 0, 0, w, h);
-        // 3) Draw background BEHIND the person
-        ctx.globalCompositeOperation = "destination-over";
-        if (this.bg.complete && this.bg.naturalWidth > 0) {
-            ctx.drawImage(this.bg, 0, 0, w, h);
+        if (this.srcCanvas.width !== w)
+            this.srcCanvas.width = w;
+        if (this.srcCanvas.height !== h)
+            this.srcCanvas.height = h;
+        if (this.maskCanvas.width !== w)
+            this.maskCanvas.width = w;
+        if (this.maskCanvas.height !== h)
+            this.maskCanvas.height = h;
+        if (this.bgCanvas.width !== w)
+            this.bgCanvas.width = w;
+        if (this.bgCanvas.height !== h)
+            this.bgCanvas.height = h;
+    }
+    onResults(results) {
+        if (!this.running)
+            return;
+        if (!results?.image || !results?.segmentationMask)
+            return;
+        const w = (results.image && results.image.width) || this.inVideo.videoWidth || 640;
+        const h = (results.image && results.image.height) || this.inVideo.videoHeight || 480;
+        if (!w || !h)
+            return;
+        this.ensureCanvasSizes(w, h);
+        // If background not available, keep raw frame already rendered by loop.
+        if (!(this.bg.complete && this.bg.naturalWidth > 0)) {
+            return;
         }
-        else {
-            // fallback: dark fill if image not loaded
-            ctx.fillStyle = "#0b1020";
-            ctx.fillRect(0, 0, w, h);
+        try {
+            this.srcCtx.clearRect(0, 0, w, h);
+            this.srcCtx.drawImage(results.image, 0, 0, w, h);
+            const srcData = this.srcCtx.getImageData(0, 0, w, h);
+            this.maskCtx.clearRect(0, 0, w, h);
+            this.maskCtx.drawImage(results.segmentationMask, 0, 0, w, h);
+            const maskData = this.maskCtx.getImageData(0, 0, w, h);
+            this.bgCtx.clearRect(0, 0, w, h);
+            this.bgCtx.drawImage(this.bg, 0, 0, w, h);
+            const bgData = this.bgCtx.getImageData(0, 0, w, h);
+            const mode = this.getMaskMode(maskData, w, h);
+            const out = this.ctx.createImageData(w, h);
+            const src = srcData.data;
+            const mask = maskData.data;
+            const bg = bgData.data;
+            const dst = out.data;
+            for (let i = 0; i < dst.length; i += 4) {
+                // Use alpha when available; otherwise fall back to luma from RGB mask.
+                const alpha = mask[i + 3];
+                const luma = (mask[i] + mask[i + 1] + mask[i + 2]) / 3;
+                let m = alpha > 8 ? (alpha / 255) : (luma / 255);
+                if (mode === "inverted")
+                    m = 1 - m;
+                if (m < 0)
+                    m = 0;
+                if (m > 1)
+                    m = 1;
+                const inv = 1 - m;
+                dst[i] = Math.round(src[i] * m + bg[i] * inv);
+                dst[i + 1] = Math.round(src[i + 1] * m + bg[i + 1] * inv);
+                dst[i + 2] = Math.round(src[i + 2] * m + bg[i + 2] * inv);
+                dst[i + 3] = 255;
+            }
+            this.ctx.putImageData(out, 0, 0);
         }
-        ctx.globalCompositeOperation = "source-over";
+        catch (e) {
+            Logger.error("Virtual background composition failed", e);
+        }
+    }
+    getMaskMode(maskData, w, h) {
+        const configured = APP_CONFIG.virtualBackground.maskMode;
+        if (configured === "normal" || configured === "inverted")
+            return configured;
+        if (this.resolvedMaskMode)
+            return this.resolvedMaskMode;
+        const centerPoints = [
+            [0.5, 0.5],
+            [0.45, 0.5],
+            [0.55, 0.5],
+            [0.5, 0.44],
+            [0.5, 0.56]
+        ];
+        const edgePoints = [
+            [0.08, 0.08],
+            [0.5, 0.08],
+            [0.92, 0.08],
+            [0.08, 0.5],
+            [0.92, 0.5],
+            [0.08, 0.92],
+            [0.5, 0.92],
+            [0.92, 0.92]
+        ];
+        const center = this.sampleMaskSignal(maskData.data, centerPoints, w, h);
+        const edge = this.sampleMaskSignal(maskData.data, edgePoints, w, h);
+        const alphaDiff = center.alpha - edge.alpha;
+        const lumaDiff = center.luma - edge.luma;
+        const useAlpha = Math.abs(alphaDiff) >= Math.abs(lumaDiff);
+        const diff = useAlpha ? alphaDiff : lumaDiff;
+        const minDiff = APP_CONFIG.virtualBackground.maskAutoMinDiff;
+        this.maskProbeFrames += 1;
+        if (Math.abs(diff) >= minDiff) {
+            const guess = diff >= 0 ? "normal" : "inverted";
+            this.maskVotes[guess] += 1;
+            if (this.maskVotes[guess] >= APP_CONFIG.virtualBackground.maskAutoConfirmFrames) {
+                this.resolvedMaskMode = guess;
+                Logger.user(`VB mask mode auto-selected: ${guess}`);
+                return this.resolvedMaskMode;
+            }
+            return guess;
+        }
+        if (this.maskProbeFrames >= APP_CONFIG.virtualBackground.maskAutoProbeFrames) {
+            this.resolvedMaskMode = this.maskVotes.inverted > this.maskVotes.normal ? "inverted" : "normal";
+            Logger.user(`VB mask mode auto-fallback: ${this.resolvedMaskMode}`);
+            return this.resolvedMaskMode;
+        }
+        return this.maskVotes.inverted > this.maskVotes.normal ? "inverted" : "normal";
+    }
+    sampleMaskSignal(rgba, points, w, h) {
+        if (!points.length)
+            return { alpha: 0, luma: 0 };
+        let alphaSum = 0;
+        let lumaSum = 0;
+        points.forEach(([nx, ny]) => {
+            const x = Math.max(0, Math.min(w - 1, Math.floor(nx * w)));
+            const y = Math.max(0, Math.min(h - 1, Math.floor(ny * h)));
+            const i = (y * w + x) * 4;
+            const r = rgba[i];
+            const g = rgba[i + 1];
+            const b = rgba[i + 2];
+            const a = rgba[i + 3];
+            alphaSum += a;
+            lumaSum += (r + g + b) / 3;
+        });
+        return {
+            alpha: alphaSum / points.length,
+            luma: lumaSum / points.length
+        };
     }
 }
 class ScreenShareManager {
@@ -956,7 +1198,10 @@ class ScreenShareManager {
         this.stream = null;
     }
     async start() {
-        this.stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        this.stream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: true
+        });
         return this.stream;
     }
     stop() {
@@ -964,6 +1209,9 @@ class ScreenShareManager {
             this.stream.getTracks().forEach(t => t.stop());
             this.stream = null;
         }
+    }
+    getStream() {
+        return this.stream;
     }
 }
 class NetworkQualityManager {
@@ -1062,17 +1310,17 @@ class NetworkQualityManager {
             if (s.type === "candidate-pair" && (anyS.selected || anyS.nominated) && typeof anyS.currentRoundTripTime === "number") {
                 rttMs = Math.max(rttMs, anyS.currentRoundTripTime * 1000);
             }
-            if (s.type === "remote-inbound-rtp" && (anyS.kind === "video" || anyS.mediaType === "video") && typeof anyS.roundTripTime === "number") {
+            const isMediaRtp = anyS.kind === "video" || anyS.mediaType === "video" || anyS.kind === "audio" || anyS.mediaType === "audio";
+            if (s.type === "remote-inbound-rtp" && isMediaRtp && typeof anyS.roundTripTime === "number") {
                 rttMs = Math.max(rttMs, anyS.roundTripTime * 1000);
             }
-            if ((s.type === "inbound-rtp" || s.type === "outbound-rtp") && (anyS.kind === "video" || anyS.mediaType === "video")) {
+            if ((s.type === "inbound-rtp" || s.type === "outbound-rtp" || s.type === "remote-inbound-rtp") && isMediaRtp) {
                 if (typeof anyS.jitter === "number") {
                     jitterMs = Math.max(jitterMs, anyS.jitter * 1000);
                 }
                 const recv = typeof anyS.packetsReceived === "number" ? anyS.packetsReceived : 0;
-                const sent = typeof anyS.packetsSent === "number" ? anyS.packetsSent : 0;
                 const lost = typeof anyS.packetsLost === "number" ? anyS.packetsLost : 0;
-                packetsTotal += recv + sent + lost;
+                packetsTotal += recv + lost;
                 packetsLost += lost;
                 const bytesReceived = typeof anyS.bytesReceived === "number" ? anyS.bytesReceived : 0;
                 const bytesSent = typeof anyS.bytesSent === "number" ? anyS.bytesSent : 0;
@@ -1959,15 +2207,35 @@ class RemoteFeedManager {
                     if (pc) {
                         this.observer?.onSubscriberPcReady?.(feedId, pc);
                     }
+                    const answerTracks = [
+                        { type: "audio", capture: false, recv: true },
+                        { type: "video", capture: false, recv: true }
+                    ];
+                    if (APP_CONFIG.mediaTelemetry.enablePeerTelemetry) {
+                        answerTracks.push({ type: "data" });
+                    }
                     remoteHandle.createAnswer({
                         jsep,
-                        tracks: [{ type: "audio", capture: false, recv: true }, { type: "video", capture: false, recv: true }],
+                        tracks: answerTracks,
                         success: (ans) => remoteHandle.send({ message: { request: "start", room: this.roomId }, jsep: ans }),
                         error: (e) => {
                             Logger.error("Remote answer error: " + JSON.stringify(e));
                             this.removeFeed(feedId, true, true);
                         }
                     });
+                }
+            },
+            ondata: (payload) => {
+                if (!payload || typeof payload !== "string")
+                    return;
+                try {
+                    const parsed = JSON.parse(payload);
+                    if (parsed?.type !== "vcx-peer-telemetry")
+                        return;
+                    this.observer?.onRemoteTelemetry?.(feedId, parsed);
+                }
+                catch (e) {
+                    Logger.error(`Remote feed ${feedId} telemetry parse failed`, e);
                 }
             },
             onlocaltrack: () => { },
@@ -2088,10 +2356,35 @@ class CallController {
         this.cameraStreamOrientation = null;
         this.publisherPc = null;
         this.subscriberPcs = new Map();
+        this.localVideoEnabled = true;
+        this.videoToggleBusy = false;
+        this.screenToggleBusy = false;
+        this.vbToggleBusy = false;
+        this.mediaStatsTimer = null;
+        this.metricsPrevAt = 0;
+        this.outboundPrev = { audio: 0, video: 0 };
+        this.inboundPrev = { audio: 0, video: 0 };
+        this.remoteInboundPrev = { audioPackets: 0, videoPackets: 0 };
+        this.remoteReceiveGrowthAt = { audio: 0, video: 0 };
+        this.localReceiveGrowthAt = { audio: 0, video: 0 };
+        this.peerTelemetryByFeed = new Map();
+        this.remoteVideoPlaybackAt = 0;
+        this.lastRemoteVideoTime = 0;
+        this.localAudioPlaybackAt = 0;
+        this.mixedAudioContext = null;
+        this.mixedAudioTrack = null;
         this.callId = null;
         this.gateway = new JanusGateway();
         this.media = new MediaManager();
         this.vbManager = new VirtualBackgroundManager();
+        this.vbManager.setSourceProvider(async () => {
+            try {
+                return await this.ensureCameraStream();
+            }
+            catch {
+                return null;
+            }
+        });
         this.connectionEngine = new ConnectionStatusEngine((status) => {
             this.bus.emit("connection-status", status);
         });
@@ -2104,6 +2397,7 @@ class CallController {
         }
         this.activeJoinCfg = cfg;
         this.isLeaving = false;
+        this.localVideoEnabled = true;
         this.suppressPublisherCleanupRetry = false;
         if (!opts?.internalRetry) {
             this.serverRetryAttempt = 0;
@@ -2153,6 +2447,13 @@ class CallController {
     }
     cleanupForRetry() {
         this.suppressRemoteFeedRetry = true;
+        this.stopMediaStatsLoop();
+        this.clearMixedAudioResources();
+        this.vbManager.disable();
+        this.vbEnabled = false;
+        this.screenManager.stop();
+        this.screenEnabled = false;
+        this.peerTelemetryByFeed.clear();
         this.remoteFeeds?.cleanupAll();
         this.remoteFeeds = null;
         this.plugin = null;
@@ -2163,6 +2464,10 @@ class CallController {
         this.selfId = null;
         this.publisherPc = null;
         this.subscriberPcs.clear();
+        this.localVideoEnabled = true;
+        this.videoToggleBusy = false;
+        this.screenToggleBusy = false;
+        this.vbToggleBusy = false;
         this.recording = false;
         this.currentRecordingId = null;
         this.currentRoomId = null;
@@ -2247,9 +2552,6 @@ class CallController {
         }, (msg, jsep) => this.onPublisherMessage(cfg, msg, jsep), (track, on) => {
             if (track && typeof track.kind === "string") {
                 this.connectionEngine.onLocalTrackSignal(track, !!on);
-            }
-            if (on && track.kind === "video") {
-                this.media.setLocalTrack(this.localVideo, track);
             }
         }, () => {
             if (this.isLeaving || this.suppressPublisherCleanupRetry)
@@ -2413,8 +2715,12 @@ class CallController {
                 onRemoteTrackSignal: (feedId, track, on) => {
                     this.connectionEngine.onRemoteTrackSignal(feedId, track, on);
                 },
+                onRemoteTelemetry: (feedId, payload) => {
+                    this.peerTelemetryByFeed.set(feedId, payload);
+                },
                 onRemoteFeedCleanup: (feedId) => {
                     this.subscriberPcs.delete(feedId);
+                    this.peerTelemetryByFeed.delete(feedId);
                     this.connectionEngine.unregisterSubscriber(feedId);
                     if (this.isLeaving || this.suppressRemoteFeedRetry) {
                         Logger.warn(`Remote feed ${feedId} cleanup ignored (controlled cleanup)`);
@@ -2437,7 +2743,9 @@ class CallController {
             this.publish();
             this.reconcile(cfg, data["publishers"]);
             this.bus.emit("joined", true);
+            this.bus.emit("video-mute-changed", !this.localVideoEnabled);
             this.startParticipantSync(cfg);
+            this.startMediaStatsLoop();
         }
         if (event === "event") {
             this.reconcile(cfg, data["publishers"]);
@@ -2562,8 +2870,16 @@ class CallController {
             return;
         this.roster.remove(feedId);
         this.subscriberPcs.delete(feedId);
+        this.peerTelemetryByFeed.delete(feedId);
         this.remoteFeeds?.removeFeed(feedId);
         this.publishParticipants(cfg);
+        const remoteCount = this.roster.snapshot(cfg.roomId).participantIds
+            .filter((id) => id !== this.selfId)
+            .length;
+        if (!this.isLeaving && this.joinedRoom && remoteCount === 0) {
+            this.bus.emit("call-ended", { reason: "remote-left" });
+            this.leave();
+        }
     }
     // =====================================
     // MEDIA
@@ -2706,10 +3022,14 @@ class CallController {
         // browser/Janus onlocaltrack callback is delayed or missing.
         this.connectionEngine.onLocalTrackSignal(videoTrack, true);
         this.media.setLocalTrack(this.localVideo, videoTrack);
-        return [
+        const tracks = [
             { type: "audio", capture: audioTrack, recv: false },
             { type: "video", capture: videoTrack, recv: false }
         ];
+        if (APP_CONFIG.mediaTelemetry.enablePeerTelemetry) {
+            tracks.push({ type: "data" });
+        }
+        return tracks;
     }
     // public publish() {
     //   this.plugin.createOffer({
@@ -2811,6 +3131,7 @@ class CallController {
                         request: "configure",
                         audio: true,
                         video: true,
+                        data: APP_CONFIG.mediaTelemetry.enablePeerTelemetry,
                         bitrate: videoCfg.bitrate_bps,
                         bitrate_cap: videoCfg.bitrate_cap
                     },
@@ -2839,6 +3160,81 @@ class CallController {
         m ? this.plugin.unmuteAudio() : this.plugin.muteAudio();
         this.bus.emit("mute-changed", !m);
     }
+    async setVideoEnabled(enabled) {
+        if (!this.plugin)
+            return this.localVideoEnabled;
+        if (this.videoToggleBusy)
+            return this.localVideoEnabled;
+        this.videoToggleBusy = true;
+        try {
+            if (enabled) {
+                let track;
+                if (this.vbEnabled) {
+                    const vbSourceTrack = this.vbManager.getSourceStream()?.getVideoTracks()[0] ?? this.cameraStream?.getVideoTracks()[0];
+                    if (vbSourceTrack)
+                        vbSourceTrack.enabled = true;
+                }
+                if (this.screenEnabled) {
+                    track = this.screenManager.getStream()?.getVideoTracks()[0];
+                }
+                else if (this.vbEnabled) {
+                    track = this.vbManager.getOutputStream()?.getVideoTracks()[0];
+                }
+                if (!track) {
+                    const cam = await this.ensureCameraStream();
+                    track = cam.getVideoTracks()[0];
+                }
+                if (track) {
+                    track.enabled = true;
+                    this.replaceVideoTrack(track);
+                }
+                try {
+                    if (typeof this.plugin.unmuteVideo === "function") {
+                        this.plugin.unmuteVideo();
+                    }
+                    else {
+                        this.plugin.send({ message: { request: "configure", video: true } });
+                    }
+                }
+                catch (e) {
+                    Logger.error("Video unmute signaling failed", e);
+                }
+                this.localVideoEnabled = true;
+            }
+            else {
+                try {
+                    if (typeof this.plugin.muteVideo === "function") {
+                        this.plugin.muteVideo();
+                    }
+                    else {
+                        this.plugin.send({ message: { request: "configure", video: false } });
+                    }
+                }
+                catch (e) {
+                    Logger.error("Video mute signaling failed", e);
+                }
+                const localTrack = this.screenEnabled
+                    ? this.screenManager.getStream()?.getVideoTracks()[0]
+                    : this.vbEnabled
+                        ? this.vbManager.getOutputStream()?.getVideoTracks()[0]
+                        : this.cameraStream?.getVideoTracks()[0];
+                if (localTrack) {
+                    localTrack.enabled = false;
+                    this.connectionEngine.onLocalTrackSignal(localTrack, false);
+                }
+                this.localVideoEnabled = false;
+            }
+        }
+        catch (e) {
+            Logger.error("Video toggle failed", e);
+            Logger.setStatus(this.getCameraMicErrorMessage(e));
+        }
+        finally {
+            this.videoToggleBusy = false;
+            this.bus.emit("video-mute-changed", !this.localVideoEnabled);
+        }
+        return this.localVideoEnabled;
+    }
     markRetrying() {
         this.connectionEngine.onReconnect();
     }
@@ -2849,7 +3245,7 @@ class CallController {
         };
     }
     stopVideo() {
-        this.plugin?.send({ message: { request: "unpublish" } });
+        void this.setVideoEnabled(false);
     }
     // =====================================
     // RECORDING
@@ -2869,11 +3265,14 @@ class CallController {
         if (this.recording)
             return;
         this.currentRecordingId = recordingId;
+        const recordingIdRandom = Math.floor(100000 + Math.random() * 900000);
         this.plugin.send({
             message: {
                 request: "enable_recording",
                 record: true,
-                room: this.currentRoomId
+                room: this.currentRoomId,
+                recordingId: recordingIdRandom,
+                participantId: this.activeJoinCfg?.participantId
             },
             success: () => {
                 this.recording = true;
@@ -2922,6 +3321,12 @@ class CallController {
         try {
             this.isLeaving = true;
             this.suppressRemoteFeedRetry = true;
+            this.stopMediaStatsLoop();
+            this.clearMixedAudioResources();
+            this.vbManager.disable();
+            this.vbEnabled = false;
+            this.screenManager.stop();
+            this.screenEnabled = false;
             this.clearRetryTimer();
             this.serverRetryAttempt = 0;
             this.peerRetryAttempt = 0;
@@ -2956,9 +3361,15 @@ class CallController {
             this.selfId = null;
             this.publisherPc = null;
             this.subscriberPcs.clear();
+            this.peerTelemetryByFeed.clear();
+            this.localVideoEnabled = true;
+            this.videoToggleBusy = false;
+            this.screenToggleBusy = false;
+            this.vbToggleBusy = false;
             this.roster.reset();
             this.bus.emit("recording-changed", false);
             this.bus.emit("joined", false);
+            this.bus.emit("video-mute-changed", false);
             this.connectionEngine.onLeft();
             this.media.clearLocal(this.localVideo);
             this.media.clearRemote(this.remoteVideo);
@@ -2973,28 +3384,43 @@ class CallController {
         }
     }
     async toggleScreenShare() {
-        if (!this.plugin)
+        if (!this.plugin || this.screenToggleBusy)
             return;
+        this.screenToggleBusy = true;
         try {
             if (!this.screenEnabled) {
                 const ss = await this.screenManager.start();
-                const track = ss.getVideoTracks()[0];
-                if (!track)
-                    return;
+                const screenTrack = ss.getVideoTracks()[0];
+                if (!screenTrack)
+                    throw new Error("Screen video track unavailable");
+                const cam = await this.ensureCameraStream();
+                const micTrack = cam.getAudioTracks()[0] ?? null;
+                const displayAudioTrack = ss.getAudioTracks()[0] ?? null;
+                const outgoingAudio = await this.resolveScreenShareAudioTrack(micTrack, displayAudioTrack);
+                if (outgoingAudio)
+                    this.syncPublishedAudioTrack(outgoingAudio);
                 this.screenEnabled = true;
-                this.replaceVideoTrack(track);
+                this.replaceVideoTrack(screenTrack);
                 Logger.setStatus("Screen share started");
                 this.bus.emit("screen-changed", true);
-                track.onended = () => { if (this.screenEnabled)
-                    void this.toggleScreenShare(); };
+                screenTrack.onended = () => {
+                    if (!this.isLeaving && this.screenEnabled)
+                        void this.toggleScreenShare();
+                };
             }
             else {
                 this.screenManager.stop();
+                this.clearMixedAudioResources();
                 this.screenEnabled = false;
                 const cam = await this.ensureCameraStream();
-                const track = cam.getVideoTracks()[0];
-                if (track)
-                    this.replaceVideoTrack(track);
+                const videoTrack = cam.getVideoTracks()[0];
+                if (videoTrack) {
+                    videoTrack.enabled = this.localVideoEnabled;
+                    this.replaceVideoTrack(videoTrack);
+                }
+                const micTrack = cam.getAudioTracks()[0];
+                if (micTrack)
+                    this.syncPublishedAudioTrack(micTrack);
                 Logger.setStatus("Screen share stopped");
                 this.bus.emit("screen-changed", false);
             }
@@ -3003,23 +3429,39 @@ class CallController {
             Logger.error("Screen share toggle failed", e);
             Logger.setStatus(this.getScreenShareErrorMessage(e));
         }
+        finally {
+            this.screenToggleBusy = false;
+        }
     }
     async toggleVirtualBackground() {
-        if (!this.plugin)
+        if (!this.plugin || this.vbToggleBusy)
             return;
         if (this.screenEnabled) {
             Logger.setStatus("Disable screen share before virtual background");
             return;
         }
+        this.vbToggleBusy = true;
         try {
             if (!this.vbEnabled) {
+                if (!this.localVideoEnabled) {
+                    await this.setVideoEnabled(true);
+                }
                 const cam = await this.ensureCameraStream();
+                const camVideoTrack = cam.getVideoTracks()[0];
+                if (camVideoTrack)
+                    camVideoTrack.enabled = true;
                 const processed = await this.vbManager.enable(cam);
                 const track = processed.getVideoTracks()[0];
                 if (!track)
-                    return;
+                    throw new Error("Virtual background output track unavailable");
+                track.enabled = true;
                 this.vbEnabled = true;
+                this.localVideoEnabled = true;
                 this.replaceVideoTrack(track);
+                this.bus.emit("video-mute-changed", false);
+                const micTrack = cam.getAudioTracks()[0];
+                if (micTrack)
+                    this.syncPublishedAudioTrack(micTrack);
                 this.bus.emit("vb-changed", true);
             }
             else {
@@ -3027,8 +3469,13 @@ class CallController {
                 this.vbEnabled = false;
                 const cam = await this.ensureCameraStream();
                 const track = cam.getVideoTracks()[0];
-                if (track)
+                if (track) {
+                    track.enabled = this.localVideoEnabled;
                     this.replaceVideoTrack(track);
+                }
+                const micTrack = cam.getAudioTracks()[0];
+                if (micTrack)
+                    this.syncPublishedAudioTrack(micTrack);
                 this.bus.emit("vb-changed", false);
             }
         }
@@ -3036,19 +3483,45 @@ class CallController {
             Logger.error("Virtual background toggle failed", e);
             Logger.setStatus(this.getCameraMicErrorMessage(e));
         }
+        finally {
+            this.vbToggleBusy = false;
+        }
     }
     async ensureCameraStream() {
         try {
             const desiredOrientation = this.getViewportOrientation();
-            const hasLiveVideo = !!this.cameraStream?.getVideoTracks().some(t => t.readyState === "live");
-            const hasLiveAudio = !!this.cameraStream?.getAudioTracks().some(t => t.readyState === "live");
-            const needsRecreate = !this.cameraStream ||
+            const currentStream = this.cameraStream;
+            const hasLiveVideo = !!currentStream?.getVideoTracks().some(t => t.readyState === "live");
+            const hasLiveAudio = !!currentStream?.getAudioTracks().some(t => t.readyState === "live");
+            const needsRecreate = !currentStream ||
                 !hasLiveVideo ||
                 !hasLiveAudio ||
                 (this.isIOSDevice() && this.cameraStreamOrientation !== desiredOrientation);
             if (needsRecreate) {
-                if (this.cameraStream) {
-                    this.cameraStream.getTracks().forEach(t => {
+                const videoConstraints = this.isIOSDevice()
+                    ? this.buildIOSVideoConstraints(desiredOrientation)
+                    : true;
+                const nextStream = await navigator.mediaDevices.getUserMedia({
+                    video: videoConstraints,
+                    audio: true
+                });
+                const previous = this.cameraStream;
+                this.cameraStream = nextStream;
+                this.cameraStreamOrientation = desiredOrientation;
+                const nextAudio = nextStream.getAudioTracks()[0];
+                if (nextAudio && (!this.screenEnabled || !this.mixedAudioTrack)) {
+                    this.syncPublishedAudioTrack(nextAudio);
+                }
+                if (previous && previous !== nextStream) {
+                    const vbSourceLive = !!this.vbManager
+                        .getSourceStream()
+                        ?.getVideoTracks()
+                        .some((t) => t.readyState === "live");
+                    previous.getTracks().forEach(t => {
+                        if (nextStream.getTracks().some(nt => nt.id === t.id))
+                            return;
+                        if (this.vbEnabled && vbSourceLive && t.kind === "video")
+                            return;
                         try {
                             t.stop();
                         }
@@ -3057,14 +3530,6 @@ class CallController {
                         }
                     });
                 }
-                const videoConstraints = this.isIOSDevice()
-                    ? this.buildIOSVideoConstraints(desiredOrientation)
-                    : true;
-                this.cameraStream = await navigator.mediaDevices.getUserMedia({
-                    video: videoConstraints,
-                    audio: true
-                });
-                this.cameraStreamOrientation = desiredOrientation;
             }
             if (!this.cameraStream) {
                 throw new Error("Camera stream unavailable after initialization");
@@ -3084,12 +3549,411 @@ class CallController {
             this.plugin.replaceTracks({
                 tracks: [{ type: "video", capture: track, recv: false }]
             });
+            this.connectionEngine.onLocalTrackSignal(track, track.enabled !== false);
             this.media.setLocalTrack(this.localVideo, track);
         }
         catch (e) {
             Logger.error("replaceVideoTrack failed", e);
             Logger.setStatus("Video track switch failed.");
         }
+    }
+    syncPublishedAudioTrack(track) {
+        if (!this.plugin)
+            return;
+        try {
+            this.plugin.replaceTracks({
+                tracks: [{ type: "audio", capture: track, recv: false }]
+            });
+        }
+        catch (e) {
+            Logger.error("replaceAudioTrack failed", e);
+        }
+    }
+    async resolveScreenShareAudioTrack(micTrack, displayAudioTrack) {
+        this.clearMixedAudioResources();
+        if (!micTrack && !displayAudioTrack)
+            return null;
+        if (!micTrack)
+            return displayAudioTrack;
+        if (!displayAudioTrack)
+            return micTrack;
+        try {
+            const ctx = new AudioContext();
+            const destination = ctx.createMediaStreamDestination();
+            const micSource = ctx.createMediaStreamSource(new MediaStream([micTrack]));
+            const displaySource = ctx.createMediaStreamSource(new MediaStream([displayAudioTrack]));
+            micSource.connect(destination);
+            displaySource.connect(destination);
+            const mixedTrack = destination.stream.getAudioTracks()[0] ?? null;
+            if (!mixedTrack) {
+                void ctx.close();
+                return micTrack;
+            }
+            this.mixedAudioContext = ctx;
+            this.mixedAudioTrack = mixedTrack;
+            return mixedTrack;
+        }
+        catch (e) {
+            Logger.error("Screen-share audio mixing failed; using microphone only", e);
+            return micTrack;
+        }
+    }
+    clearMixedAudioResources() {
+        if (this.mixedAudioTrack) {
+            try {
+                this.mixedAudioTrack.stop();
+            }
+            catch (e) {
+                Logger.error("Stopping mixed audio track failed", e);
+            }
+        }
+        this.mixedAudioTrack = null;
+        if (this.mixedAudioContext) {
+            this.mixedAudioContext.close().catch((e) => {
+                Logger.error("Closing mixed audio context failed", e);
+            });
+        }
+        this.mixedAudioContext = null;
+    }
+    startMediaStatsLoop() {
+        this.stopMediaStatsLoop();
+        this.metricsPrevAt = 0;
+        this.outboundPrev = { audio: 0, video: 0 };
+        this.inboundPrev = { audio: 0, video: 0 };
+        this.remoteInboundPrev = { audioPackets: 0, videoPackets: 0 };
+        this.remoteReceiveGrowthAt = { audio: 0, video: 0 };
+        this.localReceiveGrowthAt = { audio: 0, video: 0 };
+        this.remoteVideoPlaybackAt = 0;
+        this.lastRemoteVideoTime = 0;
+        this.localAudioPlaybackAt = 0;
+        this.mediaStatsTimer = window.setInterval(() => {
+            void this.sampleMediaStats();
+        }, APP_CONFIG.mediaTelemetry.sampleIntervalMs);
+        void this.sampleMediaStats();
+    }
+    stopMediaStatsLoop() {
+        if (this.mediaStatsTimer !== null) {
+            window.clearInterval(this.mediaStatsTimer);
+            this.mediaStatsTimer = null;
+        }
+        this.bus.emit("media-io", {
+            bytes: { audioSent: 0, audioReceived: 0, videoSent: 0, videoReceived: 0 },
+            quality: { localJitterMs: null, localLossPct: null, remoteJitterMs: null, remoteLossPct: null },
+            issues: [],
+            matrix: {
+                remoteReceivingYourVideo: "Unknown",
+                remoteReceivingYourAudio: "Unknown",
+                remoteAudioPlaybackStatus: "Unknown",
+                remoteVideoPlaybackStatus: "Unknown",
+                localReceivingYourVideo: "Unknown",
+                localReceivingYourAudio: "Unknown",
+                localAudioPlaybackStatus: "Unknown",
+                localVideoPlaybackStatus: "Unknown"
+            },
+            ts: Date.now()
+        });
+    }
+    async sampleMediaStats() {
+        const now = Date.now();
+        const publisher = this.publisherPc;
+        const subscribers = Array.from(this.subscriberPcs.values());
+        const remoteCount = this.roster.snapshot(this.currentRoomId ?? 0).participantIds
+            .filter((id) => id !== this.selfId)
+            .length;
+        if (!publisher && subscribers.length === 0) {
+            this.bus.emit("media-io", {
+                bytes: { audioSent: 0, audioReceived: 0, videoSent: 0, videoReceived: 0 },
+                quality: { localJitterMs: null, localLossPct: null, remoteJitterMs: null, remoteLossPct: null },
+                issues: [],
+                matrix: {
+                    remoteReceivingYourVideo: "Unknown",
+                    remoteReceivingYourAudio: "Unknown",
+                    remoteAudioPlaybackStatus: "Unknown",
+                    remoteVideoPlaybackStatus: "Unknown",
+                    localReceivingYourVideo: "Unknown",
+                    localReceivingYourAudio: "Unknown",
+                    localAudioPlaybackStatus: "Unknown",
+                    localVideoPlaybackStatus: "Unknown"
+                },
+                ts: now
+            });
+            return;
+        }
+        const publisherMetrics = publisher ? await this.collectPublisherMetrics(publisher) : {
+            audioBytesSent: 0,
+            videoBytesSent: 0,
+            remoteInboundAudioPacketsReceived: null,
+            remoteInboundVideoPacketsReceived: null,
+            localJitterMs: null,
+            localLossPct: null
+        };
+        const subscriberMetrics = await this.collectSubscriberMetrics(subscribers);
+        const prevAt = this.metricsPrevAt;
+        this.metricsPrevAt = now;
+        const audioSentDelta = Math.max(0, publisherMetrics.audioBytesSent - this.outboundPrev.audio);
+        const videoSentDelta = Math.max(0, publisherMetrics.videoBytesSent - this.outboundPrev.video);
+        const audioRecvDelta = Math.max(0, subscriberMetrics.audioBytesReceived - this.inboundPrev.audio);
+        const videoRecvDelta = Math.max(0, subscriberMetrics.videoBytesReceived - this.inboundPrev.video);
+        this.outboundPrev = { audio: publisherMetrics.audioBytesSent, video: publisherMetrics.videoBytesSent };
+        this.inboundPrev = { audio: subscriberMetrics.audioBytesReceived, video: subscriberMetrics.videoBytesReceived };
+        let remoteAudioReceiveStatus;
+        let remoteVideoReceiveStatus;
+        if (publisherMetrics.remoteInboundAudioPacketsReceived === null) {
+            if (publisher && audioSentDelta > 0)
+                this.remoteReceiveGrowthAt.audio = now;
+            remoteAudioReceiveStatus = publisher
+                ? (this.remoteReceiveGrowthAt.audio > 0 && now - this.remoteReceiveGrowthAt.audio <= APP_CONFIG.mediaTelemetry.stallWindowMs ? "Yes" : "No")
+                : "Unknown";
+        }
+        else {
+            const delta = publisherMetrics.remoteInboundAudioPacketsReceived - this.remoteInboundPrev.audioPackets;
+            if (delta > 0)
+                this.remoteReceiveGrowthAt.audio = now;
+            remoteAudioReceiveStatus =
+                this.remoteReceiveGrowthAt.audio > 0 && now - this.remoteReceiveGrowthAt.audio <= APP_CONFIG.mediaTelemetry.stallWindowMs
+                    ? "Yes"
+                    : "No";
+        }
+        if (publisherMetrics.remoteInboundVideoPacketsReceived === null) {
+            if (publisher && videoSentDelta > 0)
+                this.remoteReceiveGrowthAt.video = now;
+            remoteVideoReceiveStatus = publisher
+                ? (this.remoteReceiveGrowthAt.video > 0 && now - this.remoteReceiveGrowthAt.video <= APP_CONFIG.mediaTelemetry.stallWindowMs ? "Yes" : "No")
+                : "Unknown";
+        }
+        else {
+            const delta = publisherMetrics.remoteInboundVideoPacketsReceived - this.remoteInboundPrev.videoPackets;
+            if (delta > 0)
+                this.remoteReceiveGrowthAt.video = now;
+            remoteVideoReceiveStatus =
+                this.remoteReceiveGrowthAt.video > 0 && now - this.remoteReceiveGrowthAt.video <= APP_CONFIG.mediaTelemetry.stallWindowMs
+                    ? "Yes"
+                    : "No";
+        }
+        this.remoteInboundPrev = {
+            audioPackets: publisherMetrics.remoteInboundAudioPacketsReceived ?? this.remoteInboundPrev.audioPackets,
+            videoPackets: publisherMetrics.remoteInboundVideoPacketsReceived ?? this.remoteInboundPrev.videoPackets
+        };
+        if (videoRecvDelta > 0)
+            this.localReceiveGrowthAt.video = now;
+        if (audioRecvDelta > 0)
+            this.localReceiveGrowthAt.audio = now;
+        const localReceivingVideo = remoteCount > 0
+            ? (this.localReceiveGrowthAt.video > 0 && now - this.localReceiveGrowthAt.video <= APP_CONFIG.mediaTelemetry.stallWindowMs ? "Yes" : "No")
+            : "Unknown";
+        const localReceivingAudio = remoteCount > 0
+            ? (this.localReceiveGrowthAt.audio > 0 && now - this.localReceiveGrowthAt.audio <= APP_CONFIG.mediaTelemetry.stallWindowMs ? "Yes" : "No")
+            : "Unknown";
+        const localVideoPlaybackStatus = this.deriveLocalVideoPlaybackStatus(now);
+        const localAudioPlaybackStatus = this.deriveLocalAudioPlaybackStatus(now, audioRecvDelta, subscriberMetrics.hasAudioTrack);
+        const peerTelemetry = this.pickFreshPeerTelemetry(now);
+        const remoteAudioPlaybackStatus = peerTelemetry?.audioPlaybackStatus ?? "Unknown";
+        const remoteVideoPlaybackStatus = peerTelemetry?.videoPlaybackStatus ?? "Unknown";
+        const issues = [];
+        if (remoteAudioReceiveStatus === "No" && remoteCount > 0) {
+            issues.push("your audio not working");
+        }
+        if (localReceivingAudio === "No" && remoteCount > 0) {
+            issues.push("participant audio not working");
+        }
+        if (localReceivingVideo === "No" && remoteCount > 0) {
+            issues.push("participant video not working");
+        }
+        const snapshot = {
+            bytes: {
+                audioSent: publisherMetrics.audioBytesSent,
+                audioReceived: subscriberMetrics.audioBytesReceived,
+                videoSent: publisherMetrics.videoBytesSent,
+                videoReceived: subscriberMetrics.videoBytesReceived
+            },
+            quality: {
+                localJitterMs: publisherMetrics.localJitterMs,
+                localLossPct: publisherMetrics.localLossPct,
+                remoteJitterMs: subscriberMetrics.remoteJitterMs,
+                remoteLossPct: subscriberMetrics.remoteLossPct
+            },
+            issues,
+            matrix: {
+                remoteReceivingYourVideo: remoteVideoReceiveStatus,
+                remoteReceivingYourAudio: remoteAudioReceiveStatus,
+                remoteAudioPlaybackStatus,
+                remoteVideoPlaybackStatus,
+                localReceivingYourVideo: localReceivingVideo,
+                localReceivingYourAudio: localReceivingAudio,
+                localAudioPlaybackStatus,
+                localVideoPlaybackStatus
+            },
+            ts: now
+        };
+        this.bus.emit("media-io", snapshot);
+        if (prevAt > 0) {
+            this.sendPeerTelemetry({
+                type: "vcx-peer-telemetry",
+                ts: now,
+                audioPlaybackStatus: localAudioPlaybackStatus,
+                videoPlaybackStatus: localVideoPlaybackStatus
+            });
+        }
+    }
+    async collectPublisherMetrics(pc) {
+        try {
+            const report = await pc.getStats();
+            let audioBytesSent = 0;
+            let videoBytesSent = 0;
+            let remoteInboundAudioPacketsReceived = null;
+            let remoteInboundVideoPacketsReceived = null;
+            let localJitterMs = null;
+            let lost = 0;
+            let total = 0;
+            report.forEach((s) => {
+                const anyS = s;
+                if (s.type === "outbound-rtp" && !anyS.isRemote) {
+                    if (anyS.kind === "audio" || anyS.mediaType === "audio") {
+                        if (typeof anyS.bytesSent === "number")
+                            audioBytesSent += anyS.bytesSent;
+                    }
+                    if (anyS.kind === "video" || anyS.mediaType === "video") {
+                        if (typeof anyS.bytesSent === "number")
+                            videoBytesSent += anyS.bytesSent;
+                    }
+                }
+                if (s.type === "remote-inbound-rtp") {
+                    if (typeof anyS.jitter === "number") {
+                        const jitterMs = anyS.jitter * 1000;
+                        localJitterMs = localJitterMs === null ? jitterMs : Math.max(localJitterMs, jitterMs);
+                    }
+                    const packetsLost = typeof anyS.packetsLost === "number" ? anyS.packetsLost : 0;
+                    const packetsReceived = typeof anyS.packetsReceived === "number" ? anyS.packetsReceived : 0;
+                    lost += packetsLost;
+                    total += packetsLost + packetsReceived;
+                    if (anyS.kind === "audio" || anyS.mediaType === "audio") {
+                        if (typeof anyS.packetsReceived === "number") {
+                            remoteInboundAudioPacketsReceived = anyS.packetsReceived;
+                        }
+                    }
+                    if (anyS.kind === "video" || anyS.mediaType === "video") {
+                        if (typeof anyS.packetsReceived === "number") {
+                            remoteInboundVideoPacketsReceived = anyS.packetsReceived;
+                        }
+                    }
+                }
+            });
+            return {
+                audioBytesSent,
+                videoBytesSent,
+                remoteInboundAudioPacketsReceived,
+                remoteInboundVideoPacketsReceived,
+                localJitterMs,
+                localLossPct: total > 0 ? (lost / total) * 100 : null
+            };
+        }
+        catch (e) {
+            Logger.error("Publisher metrics collection failed", e);
+            return {
+                audioBytesSent: this.outboundPrev.audio,
+                videoBytesSent: this.outboundPrev.video,
+                remoteInboundAudioPacketsReceived: null,
+                remoteInboundVideoPacketsReceived: null,
+                localJitterMs: null,
+                localLossPct: null
+            };
+        }
+    }
+    async collectSubscriberMetrics(subscribers) {
+        let audioBytesReceived = 0;
+        let videoBytesReceived = 0;
+        let remoteJitterMs = null;
+        let lost = 0;
+        let total = 0;
+        let hasAudioTrack = false;
+        await Promise.all(subscribers.map(async (pc) => {
+            try {
+                const report = await pc.getStats();
+                report.forEach((s) => {
+                    const anyS = s;
+                    if (s.type === "inbound-rtp" && !anyS.isRemote) {
+                        if (anyS.kind === "audio" || anyS.mediaType === "audio") {
+                            hasAudioTrack = true;
+                            if (typeof anyS.bytesReceived === "number")
+                                audioBytesReceived += anyS.bytesReceived;
+                        }
+                        if (anyS.kind === "video" || anyS.mediaType === "video") {
+                            if (typeof anyS.bytesReceived === "number")
+                                videoBytesReceived += anyS.bytesReceived;
+                        }
+                        if (typeof anyS.jitter === "number") {
+                            const jitterMs = anyS.jitter * 1000;
+                            remoteJitterMs = remoteJitterMs === null ? jitterMs : Math.max(remoteJitterMs, jitterMs);
+                        }
+                        const packetsLost = typeof anyS.packetsLost === "number" ? anyS.packetsLost : 0;
+                        const packetsReceived = typeof anyS.packetsReceived === "number" ? anyS.packetsReceived : 0;
+                        lost += packetsLost;
+                        total += packetsLost + packetsReceived;
+                    }
+                });
+            }
+            catch (e) {
+                Logger.error("Subscriber metrics collection failed", e);
+            }
+        }));
+        return {
+            audioBytesReceived,
+            videoBytesReceived,
+            remoteJitterMs,
+            remoteLossPct: total > 0 ? (lost / total) * 100 : null,
+            hasAudioTrack
+        };
+    }
+    deriveLocalVideoPlaybackStatus(now) {
+        const ms = this.remoteVideo.srcObject;
+        const hasTrack = !!ms?.getVideoTracks().some(t => t.readyState === "live" && t.enabled !== false);
+        if (!hasTrack)
+            return "Unknown";
+        const currentTime = Number.isFinite(this.remoteVideo.currentTime) ? this.remoteVideo.currentTime : 0;
+        if (currentTime > this.lastRemoteVideoTime + 0.03) {
+            this.lastRemoteVideoTime = currentTime;
+            this.remoteVideoPlaybackAt = now;
+            return "Active";
+        }
+        if (this.remoteVideoPlaybackAt === 0 && currentTime > 0) {
+            this.remoteVideoPlaybackAt = now;
+            return "Active";
+        }
+        if (this.remoteVideoPlaybackAt > 0 && now - this.remoteVideoPlaybackAt <= APP_CONFIG.mediaTelemetry.stallWindowMs) {
+            return "Active";
+        }
+        return "Stalled";
+    }
+    deriveLocalAudioPlaybackStatus(now, audioRecvDelta, hasAudioTrack) {
+        if (!hasAudioTrack)
+            return "Unknown";
+        if (audioRecvDelta > 0) {
+            this.localAudioPlaybackAt = now;
+            return "Active";
+        }
+        if (this.localAudioPlaybackAt > 0 && now - this.localAudioPlaybackAt <= APP_CONFIG.mediaTelemetry.stallWindowMs) {
+            return "Active";
+        }
+        return "Stalled";
+    }
+    pickFreshPeerTelemetry(now) {
+        for (const payload of this.peerTelemetryByFeed.values()) {
+            if (now - payload.ts <= APP_CONFIG.mediaTelemetry.peerTelemetryFreshnessMs) {
+                return payload;
+            }
+        }
+        return null;
+    }
+    sendPeerTelemetry(payload) {
+        if (!APP_CONFIG.mediaTelemetry.enablePeerTelemetry)
+            return;
+        const channel = this.plugin?.data;
+        if (typeof channel !== "function")
+            return;
+        try {
+            channel.call(this.plugin, { text: JSON.stringify(payload) });
+        }
+        catch { }
     }
 }
 // import {Dom} from "./Dom";
@@ -3127,6 +3991,16 @@ class UIController {
         this.localQD = document.getElementById("localQualityDetails");
         this.remoteQD = document.getElementById("remoteQualityDetails");
         this.callMeta = document.getElementById("callMeta");
+        this.mediaIoBytes = document.getElementById("mediaIoBytes");
+        this.mediaIoIssues = document.getElementById("mediaIoIssues");
+        this.mRemoteRecvVideo = document.getElementById("mRemoteRecvVideo");
+        this.mRemoteRecvAudio = document.getElementById("mRemoteRecvAudio");
+        this.mRemoteAudioPlayback = document.getElementById("mRemoteAudioPlayback");
+        this.mRemoteVideoPlayback = document.getElementById("mRemoteVideoPlayback");
+        this.mLocalRecvVideo = document.getElementById("mLocalRecvVideo");
+        this.mLocalRecvAudio = document.getElementById("mLocalRecvAudio");
+        this.mLocalAudioPlayback = document.getElementById("mLocalAudioPlayback");
+        this.mLocalVideoPlayback = document.getElementById("mLocalVideoPlayback");
         this.audioMuted = false;
         this.videoMuted = false;
         this.ended = false;
@@ -3162,6 +4036,15 @@ class UIController {
                 muted
                     ? '<i class="fa-solid fa-microphone-slash"></i>'
                     : '<i class="fa-solid fa-microphone"></i>';
+        });
+        this.bus.on("video-mute-changed", muted => {
+            this.videoMuted = muted;
+            this.btnUnpublish.classList.toggle("danger", muted);
+            this.btnUnpublish.innerHTML =
+                muted
+                    ? '<i class="fa-solid fa-video-slash"></i>'
+                    : '<i class="fa-solid fa-video"></i>';
+            this.applyConnectionOverlays();
         });
         this.bus.on("screen-changed", on => {
             this.btnScreen.title = on ? "Stop Screen Share" : "Start Screen Share";
@@ -3206,6 +4089,13 @@ class UIController {
         this.bus.on("connection-status", (status) => {
             this.renderConnectionStatus(status);
         });
+        this.bus.on("media-io", (stats) => {
+            this.renderMediaIo(stats);
+        });
+        this.bus.on("call-ended", (payload) => {
+            Logger.user(`Call ended event received: ${payload?.reason || "unknown"}`);
+            this.setEndedState(true);
+        });
         this.wire();
         this.setupNetworkUI();
         this.setupParentBridge();
@@ -3223,16 +4113,18 @@ class UIController {
             this.bridge.emit({ type: "AUDIO_MUTED", muted: this.audioMuted });
         };
         // VIDEO
-        this.btnUnpublish.onclick = () => {
+        this.btnUnpublish.onclick = async () => {
             Logger.user("Video button clicked");
-            this.videoMuted = !this.videoMuted;
-            this.btnUnpublish.classList.toggle("danger", this.videoMuted);
-            if (this.videoMuted) {
-                this.controller.stopVideo();
+            if (this.btnUnpublish.disabled)
+                return;
+            this.btnUnpublish.disabled = true;
+            try {
+                const enabled = await this.controller.setVideoEnabled(this.videoMuted);
+                this.videoMuted = !enabled;
             }
-            else {
-                // republish
-                this.controller.publish();
+            finally {
+                if (!this.ended)
+                    this.btnUnpublish.disabled = false;
             }
             this.applyConnectionOverlays();
             this.bridge.emit({ type: "VIDEO_MUTED", muted: this.videoMuted });
@@ -3242,12 +4134,7 @@ class UIController {
             if (!this.ended) {
                 Logger.user("End button clicked");
                 this.controller.leave();
-                this.ended = true;
-                this.endedOverlay.style.display = "flex";
-                this.renderRemoteFallback();
-                this.btnLeave.innerHTML =
-                    '<i class="fa-solid fa-play"></i>';
-                this.btnLeave.title = "Start";
+                this.setEndedState(true);
                 this.bridge.emit({ type: "CALL_ENDED" });
             }
             else {
@@ -3256,10 +4143,30 @@ class UIController {
             }
         };
         this.btnReconnect.onclick = () => this.reconnect();
-        this.btnScreen.onclick =
-            () => this.controller.toggleScreenShare();
-        this.btnVB.onclick =
-            () => this.controller.toggleVirtualBackground();
+        this.btnScreen.onclick = async () => {
+            if (this.btnScreen.disabled)
+                return;
+            this.btnScreen.disabled = true;
+            try {
+                await this.controller.toggleScreenShare();
+            }
+            finally {
+                if (!this.ended)
+                    this.btnScreen.disabled = false;
+            }
+        };
+        this.btnVB.onclick = async () => {
+            if (this.btnVB.disabled)
+                return;
+            this.btnVB.disabled = true;
+            try {
+                await this.controller.toggleVirtualBackground();
+            }
+            finally {
+                if (!this.ended)
+                    this.btnVB.disabled = false;
+            }
+        };
         // ✅ RECORD BUTTON
         if (this.btnRecord) {
             this.btnRecord.onclick = () => {
@@ -3345,6 +4252,19 @@ class UIController {
             this.btnRecord.title = "Start Recording";
         }
     }
+    setEndedState(ended) {
+        this.ended = ended;
+        this.endedOverlay.style.display = ended ? "flex" : "none";
+        this.renderRemoteFallback();
+        if (ended) {
+            this.btnLeave.innerHTML = '<i class="fa-solid fa-play"></i>';
+            this.btnLeave.title = "Start";
+            this.btnLeave.disabled = false;
+            return;
+        }
+        this.btnLeave.innerHTML = '<i class="fa-solid fa-phone-slash"></i>';
+        this.btnLeave.title = "End";
+    }
     autoJoin() {
         const cfg = UrlConfig.buildJoinConfig();
         this.lastCfg = cfg;
@@ -3355,12 +4275,10 @@ class UIController {
         this.updateRecordUI();
         this.renderCallMeta(cfg);
         Logger.setStatus(`Joining... roomId=${cfg.roomId}, name=${cfg.display}${cfg.participantId ? `, participantId=${cfg.participantId}` : ""}`);
-        this.ended = false;
-        this.endedOverlay.style.display = "none";
-        this.renderRemoteFallback();
-        this.btnLeave.innerHTML =
-            '<i class="fa-solid fa-phone-slash"></i>';
-        this.btnLeave.title = "End";
+        this.audioMuted = false;
+        this.videoMuted = false;
+        this.setEndedState(false);
+        this.applyConnectionOverlays();
         this.controller.join(cfg);
         this.bridge.emit({ type: "CALL_STARTED" });
     }
@@ -3384,11 +4302,11 @@ class UIController {
         [
             this.btnMute,
             this.btnUnpublish,
-            this.btnLeave,
             this.btnReconnect,
             this.btnScreen,
             this.btnVB
         ].forEach(b => b && (b.disabled = !joined));
+        this.btnLeave.disabled = this.ended ? false : !joined;
         if (this.btnRecord) {
             this.btnRecord.disabled = !joined || !this.canRecord;
         }
@@ -3401,10 +4319,6 @@ class UIController {
         return "Local";
     }
     getRemoteBaseOverlayText() {
-        if (this.videoMuted)
-            return "video muted on other participant";
-        if (this.audioMuted)
-            return "audio muted on other participant";
         return "Remote";
     }
     applyConnectionOverlays() {
@@ -3555,6 +4469,44 @@ class UIController {
         const showFallback = !this.ended && !this.hasRemoteVideoTrack();
         this.remoteFallback.style.display = showFallback ? "flex" : "none";
     }
+    formatBytes(bytes) {
+        if (!Number.isFinite(bytes) || bytes <= 0)
+            return "0B";
+        if (bytes < 1024)
+            return `${Math.floor(bytes)}B`;
+        if (bytes < 1024 * 1024)
+            return `${(bytes / 1024).toFixed(1)}KB`;
+        return `${(bytes / (1024 * 1024)).toFixed(2)}MB`;
+    }
+    formatQuality(v) {
+        if (v === null || !Number.isFinite(v))
+            return "n/a";
+        return `${v.toFixed(1)}`;
+    }
+    renderMediaIo(stats) {
+        if (this.mediaIoBytes) {
+            this.mediaIoBytes.textContent =
+                `A(sent/recv): ${this.formatBytes(stats.bytes.audioSent)} / ${this.formatBytes(stats.bytes.audioReceived)} | ` +
+                    `V(sent/recv): ${this.formatBytes(stats.bytes.videoSent)} / ${this.formatBytes(stats.bytes.videoReceived)}`;
+        }
+        if (this.mediaIoIssues) {
+            this.mediaIoIssues.textContent = stats.issues.length > 0
+                ? stats.issues.join(" | ")
+                : "";
+        }
+        this.mRemoteRecvVideo.textContent = stats.matrix.remoteReceivingYourVideo;
+        this.mRemoteRecvAudio.textContent = stats.matrix.remoteReceivingYourAudio;
+        this.mRemoteAudioPlayback.textContent = stats.matrix.remoteAudioPlaybackStatus;
+        this.mRemoteVideoPlayback.textContent = stats.matrix.remoteVideoPlaybackStatus;
+        this.mLocalRecvVideo.textContent = stats.matrix.localReceivingYourVideo;
+        this.mLocalRecvAudio.textContent = stats.matrix.localReceivingYourAudio;
+        this.mLocalAudioPlayback.textContent = stats.matrix.localAudioPlaybackStatus;
+        this.mLocalVideoPlayback.textContent = stats.matrix.localVideoPlaybackStatus;
+        this.localQD.textContent =
+            `jitter=${this.formatQuality(stats.quality.localJitterMs)}ms loss=${this.formatQuality(stats.quality.localLossPct)}%`;
+        this.remoteQD.textContent =
+            `jitter=${this.formatQuality(stats.quality.remoteJitterMs)}ms loss=${this.formatQuality(stats.quality.remoteLossPct)}%`;
+    }
     setupNetworkUI() {
         const toggle = (el) => el.classList.toggle("show");
         this.localQ.onclick = () => toggle(this.localQD);
@@ -3580,6 +4532,7 @@ class UIController {
                     break;
                 case "STOP_CALL":
                     this.controller.leave();
+                    this.setEndedState(true);
                     break;
                 case "TOGGLE_AUDIO":
                     this.btnMute.click();
