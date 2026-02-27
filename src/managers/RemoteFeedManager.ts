@@ -151,15 +151,32 @@ class RemoteFeedManager {
           if(pc){
             this.observer?.onSubscriberPcReady?.(feedId, pc);
           }
+          const answerTracks = [
+            {type:"audio",capture:false,recv:true},
+            {type:"video",capture:false,recv:true}
+          ];
+          if (APP_CONFIG.mediaTelemetry.enablePeerTelemetry) {
+            answerTracks.push({type:"data"} as any);
+          }
           remoteHandle.createAnswer({
             jsep,
-            tracks:[{type:"audio",capture:false,recv:true},{type:"video",capture:false,recv:true}],
+            tracks: answerTracks,
             success:(ans:any)=>remoteHandle.send({ message:{ request:"start", room:this.roomId }, jsep:ans }),
             error:(e:any)=>{
               Logger.error("Remote answer error: "+JSON.stringify(e));
               this.removeFeed(feedId, true, true);
             }
           });
+        }
+      },
+      ondata: (payload: any) => {
+        if (!payload || typeof payload !== "string") return;
+        try {
+          const parsed = JSON.parse(payload);
+          if (parsed?.type !== "vcx-peer-telemetry") return;
+          this.observer?.onRemoteTelemetry?.(feedId, parsed as PeerPlaybackTelemetry);
+        } catch (e: any) {
+          Logger.error(`Remote feed ${feedId} telemetry parse failed`, e);
         }
       },
       onlocaltrack:()=>{},

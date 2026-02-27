@@ -111,17 +111,17 @@ class NetworkQualityManager {
       if (s.type === "candidate-pair" && (anyS.selected || anyS.nominated) && typeof anyS.currentRoundTripTime === "number") {
         rttMs = Math.max(rttMs, anyS.currentRoundTripTime * 1000);
       }
-      if (s.type === "remote-inbound-rtp" && (anyS.kind === "video" || anyS.mediaType === "video") && typeof anyS.roundTripTime === "number") {
+      const isMediaRtp = anyS.kind === "video" || anyS.mediaType === "video" || anyS.kind === "audio" || anyS.mediaType === "audio";
+      if (s.type === "remote-inbound-rtp" && isMediaRtp && typeof anyS.roundTripTime === "number") {
         rttMs = Math.max(rttMs, anyS.roundTripTime * 1000);
       }
-      if ((s.type === "inbound-rtp" || s.type === "outbound-rtp") && (anyS.kind === "video" || anyS.mediaType === "video")) {
+      if ((s.type === "inbound-rtp" || s.type === "outbound-rtp" || s.type === "remote-inbound-rtp") && isMediaRtp) {
         if (typeof anyS.jitter === "number") {
           jitterMs = Math.max(jitterMs, anyS.jitter * 1000);
         }
         const recv = typeof anyS.packetsReceived === "number" ? anyS.packetsReceived : 0;
-        const sent = typeof anyS.packetsSent === "number" ? anyS.packetsSent : 0;
         const lost = typeof anyS.packetsLost === "number" ? anyS.packetsLost : 0;
-        packetsTotal += recv + sent + lost;
+        packetsTotal += recv + lost;
         packetsLost += lost;
         const bytesReceived = typeof anyS.bytesReceived === "number" ? anyS.bytesReceived : 0;
         const bytesSent = typeof anyS.bytesSent === "number" ? anyS.bytesSent : 0;
