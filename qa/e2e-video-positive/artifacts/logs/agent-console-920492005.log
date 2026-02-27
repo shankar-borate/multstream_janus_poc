@@ -1,0 +1,50 @@
+Loading: https://beta.videocx.io/poc/mstream/index.html?roomId=920492005&name=AutoAgent-492005&participantId=920011&user_type=agent
+page loaded
+System: Getting ready... Preparing secure call setup.
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180497231}
+System: Preparing camera and microphone... This usually takes a few seconds.
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180497232, connectionOwner: SYSTEM}
+System: Connecting your call... Please stay on this screen.
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180497314, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180497334, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180497334, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180497395, connectionOwner: SYSTEM}
+VCX_ROSTER_PARTICIPANTS=1
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180497398, connectionOwner: SYSTEM}
+VCX_JOINED=true
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180497399, connectionOwner: SYSTEM}
+VCX_ROSTER_PARTICIPANTS=1
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180497418, connectionOwner: SYSTEM}
+System: Waiting for the other participant... Keep this screen open while they join.
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180500397, connectionOwner: SYSTEM}
+VCX_PARTICIPANTS=1
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180500580, connectionOwner: SYSTEM}
+VCX_CONNECTIVITY= {ice: new, signaling: have-local-offer, connection: new, gathering: new, ts: 1772180500599}
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180500600, connectionOwner: SYSTEM}
+VCX_GATHERING=gathering
+VCX_CONNECTIVITY= {ice: new, signaling: have-local-offer, connection: new, gathering: gathering, ts: 1772180500605}
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180500606, connectionOwner: SYSTEM}
+VCX_ROSTER_PARTICIPANTS=2
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180500638, connectionOwner: SYSTEM}
+System: Checking network quality... This helps us keep video stable.
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180500639, connectionOwner: SYSTEM}
+VCX_ICE=checking
+VCX_CONNECTIVITY= {ice: checking, signaling: have-local-offer, connection: new, gathering: gathering, ts: 1772180500648}
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180500650, connectionOwner: SYSTEM}
+VCX_SIGNALING=stable
+VCX_CONNECTIVITY= {ice: checking, signaling: stable, connection: new, gathering: gathering, ts: 1772180500654}
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180500655, connectionOwner: SYSTEM}
+VCX_CONNECTION=connecting
+VCX_CONNECTIVITY= {ice: checking, signaling: stable, connection: connecting, gathering: gathering, ts: 1772180500656}
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180500656, connectionOwner: SYSTEM}
+VCX_ICE=connected
+VCX_CONNECTIVITY= {ice: connected, signaling: stable, connection: connecting, gathering: gathering, ts: 1772180500665}
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180500666, connectionOwner: SYSTEM}
+System: Connecting your call... Please stay on this screen.
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180500667, connectionOwner: SYSTEM}
+VCX_GATHERING=complete
+VCX_CONNECTIVITY= {ice: connected, signaling: stable, connection: connecting, gathering: complete, ts: 1772180500668}
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180500668, connectionOwner: SYSTEM}
+VCX_CONNECTION=connected
+VCX_CONNECTIVITY= {ice: connected, signaling: stable, connection: connected, gathering: complete, ts: 1772180500718}
+VCX_DEBUG {callId: 78dcdda8-de93-4f24-8d56-61e2b8c22a0e, roomId: 920492005, participantId: 920011, timestamp: 1772180500718, connectionOwner: SYSTEM}

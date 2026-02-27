@@ -1,0 +1,14 @@
+{
+  "name": "vcx-e2e-video-positive",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Isolated Playwright E2E harness for one positive VCX video session",
+  "scripts": {
+    "test": "playwright test",
+    "test:positive": "playwright test tests/positive-video-session.spec.js",
+    "report:summary": "node scripts/write-run-summary.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.53.0"
+  }
+}

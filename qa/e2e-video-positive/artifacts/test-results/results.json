@@ -1,0 +1,121 @@
+{
+  "config": {
+    "configFile": "D:\\softwares\\nginx-1.26.3\\html\\multstream_janus_poc\\qa\\e2e-video-positive\\playwright.config.js",
+    "rootDir": "D:/softwares/nginx-1.26.3/html/multstream_janus_poc/qa/e2e-video-positive/tests",
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "D:/softwares/nginx-1.26.3/html/multstream_janus_poc/qa/e2e-video-positive/artifacts/test-results/raw",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "",
+        "name": "",
+        "testDir": "D:/softwares/nginx-1.26.3/html/multstream_janus_poc/qa/e2e-video-positive/tests",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 180000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "list",
+        null
+      ],
+      [
+        "html",
+        {
+          "outputFolder": "D:\\softwares\\nginx-1.26.3\\html\\multstream_janus_poc\\qa\\e2e-video-positive\\artifacts\\playwright-report",
+          "open": "never"
+        }
+      ],
+      [
+        "json",
+        {
+          "outputFile": "D:\\softwares\\nginx-1.26.3\\html\\multstream_janus_poc\\qa\\e2e-video-positive\\artifacts\\test-results\\results.json"
+        }
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "runAgents": "none",
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.58.2",
+    "workers": 8,
+    "webServer": null
+  },
+  "suites": [
+    {
+      "title": "positive-video-session.spec.js",
+      "file": "positive-video-session.spec.js",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "positive video call session between agent and customer",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 180000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 11367,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-02-27T08:21:31.939Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "722462597bb04a2d620d-504fe792dab985c5dc74",
+          "file": "positive-video-session.spec.js",
+          "line": 149,
+          "column": 1
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-02-27T08:21:29.395Z",
+    "duration": 14041.573,
+    "expected": 1,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}

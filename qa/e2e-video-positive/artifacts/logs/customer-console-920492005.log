@@ -1,0 +1,19 @@
+Loading: https://beta.videocx.io/poc/mstream/index.html?roomId=920492005&name=AutoCustomer-492005&participantId=920022&user_type=customer
+page loaded
+System: Getting ready... Preparing secure call setup.
+VCX_DEBUG {callId: e8509f6d-3bf8-41ff-aa53-94df3dbdd945, roomId: 920492005, participantId: 920022, timestamp: 1772180498915}
+System: Preparing camera and microphone... This usually takes a few seconds.
+VCX_DEBUG {callId: e8509f6d-3bf8-41ff-aa53-94df3dbdd945, roomId: 920492005, participantId: 920022, timestamp: 1772180498917, connectionOwner: SYSTEM}
+System: Connecting your call... Please stay on this screen.
+VCX_DEBUG {callId: e8509f6d-3bf8-41ff-aa53-94df3dbdd945, roomId: 920492005, participantId: 920022, timestamp: 1772180498996, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: e8509f6d-3bf8-41ff-aa53-94df3dbdd945, roomId: 920492005, participantId: 920022, timestamp: 1772180499017, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: e8509f6d-3bf8-41ff-aa53-94df3dbdd945, roomId: 920492005, participantId: 920022, timestamp: 1772180499018, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: e8509f6d-3bf8-41ff-aa53-94df3dbdd945, roomId: 920492005, participantId: 920022, timestamp: 1772180499067, connectionOwner: SYSTEM}
+VCX_ROSTER_PARTICIPANTS=1
+VCX_DEBUG {callId: e8509f6d-3bf8-41ff-aa53-94df3dbdd945, roomId: 920492005, participantId: 920022, timestamp: 1772180499072, connectionOwner: SYSTEM}
+VCX_JOINED=true
+VCX_DEBUG {callId: e8509f6d-3bf8-41ff-aa53-94df3dbdd945, roomId: 920492005, participantId: 920022, timestamp: 1772180499074, connectionOwner: SYSTEM}
+VCX_ROSTER_PARTICIPANTS=2
+VCX_DEBUG {callId: e8509f6d-3bf8-41ff-aa53-94df3dbdd945, roomId: 920492005, participantId: 920022, timestamp: 1772180499098, connectionOwner: SYSTEM}
+VCX_ROSTER_PARTICIPANTS=2
+VCX_DEBUG {callId: e8509f6d-3bf8-41ff-aa53-94df3dbdd945, roomId: 920492005, participantId: 920022, timestamp: 1772180500734, connectionOwner: SYSTEM}

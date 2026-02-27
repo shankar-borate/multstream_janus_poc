@@ -1,0 +1,27 @@
+{
+  "baseUrl": "https://beta.videocx.io/poc/mstream/call.html",
+  "roomIdPrefix": "920",
+  "participants": [
+    {
+      "name": "AutoAgent-492005",
+      "participantId": 920011,
+      "userType": "agent"
+    },
+    {
+      "name": "AutoCustomer-492005",
+      "participantId": 920022,
+      "userType": "customer"
+    }
+  ],
+  "expectations": {
+    "joinSignal": "VCX_JOINED=true",
+    "minParticipants": 2
+  },
+  "timeouts": {
+    "joinReadyMs": 90000,
+    "joinSignalMs": 120000,
+    "participantRenderMs": 120000
+  },
+  "roomId": "920492005",
+  "runId": "positive-492005"
+}

@@ -1,0 +1,30 @@
+Loading: https://beta.videocx.io/poc/mstream/index.html?roomId=920040026&name=AutoCustomer-040026&participantId=920022&user_type=customer
+page loaded
+System: Getting ready... Preparing secure call setup.
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178046310}
+System: Preparing camera and microphone... This usually takes a few seconds.
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178046313, connectionOwner: SYSTEM}
+System: Connecting your call... Please stay on this screen.
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178046411, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178046444, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178046444, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178046504, connectionOwner: SYSTEM}
+VCX_ROSTER_PARTICIPANTS=2
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178046507, connectionOwner: SYSTEM}
+VCX_JOINED=true
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178046507, connectionOwner: SYSTEM}
+%cUser(AutoCustomer-040026): Camera access failed color:#fb7185;font-weight:bold
+NotFoundError: Requested device not found
+%cUser(AutoCustomer-040026): Camera or microphone not found. Connect your devices, then retry. color:#fb7185;font-weight:bold
+NotFoundError: Requested device not found
+System: Camera or microphone not found. Connect your devices, then retry. Fix camera/mic issue and reconnect the call.
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178046523, connectionOwner: SYSTEM}
+VCX_ROSTER_PARTICIPANTS=2
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178046525, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178046525, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178046608, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178047309, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178048308, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178049308, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178050308, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: cf514830-760d-4926-855d-f1017df8dbc2, roomId: 920040026, participantId: 920022, timestamp: 1772178051308, connectionOwner: SYSTEM}

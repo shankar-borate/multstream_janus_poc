@@ -1,0 +1,30 @@
+Loading: https://beta.videocx.io/poc/mstream/index.html?roomId=920967531&name=AutoCustomer-967531&participantId=920022&user_type=customer
+page loaded
+System: Getting ready... Preparing secure call setup.
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175973915}
+System: Preparing camera and microphone... This usually takes a few seconds.
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175973916, connectionOwner: SYSTEM}
+System: Connecting your call... Please stay on this screen.
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175974007, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175974020, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175974021, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175974046, connectionOwner: SYSTEM}
+VCX_ROSTER_PARTICIPANTS=2
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175974051, connectionOwner: SYSTEM}
+VCX_JOINED=true
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175974052, connectionOwner: SYSTEM}
+%cUser(AutoCustomer-967531): Camera access failed color:#fb7185;font-weight:bold
+NotFoundError: Requested device not found
+%cUser(AutoCustomer-967531): Camera or microphone not found. Connect your devices, then retry. color:#fb7185;font-weight:bold
+NotFoundError: Requested device not found
+System: Camera or microphone not found. Connect your devices, then retry. Fix camera/mic issue and reconnect the call.
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175974065, connectionOwner: SYSTEM}
+VCX_ROSTER_PARTICIPANTS=2
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175974070, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175974071, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175974119, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175974913, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175975912, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175976911, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175977912, connectionOwner: SYSTEM}
+VCX_DEBUG {callId: 831f1bcd-35a3-49e7-b9bb-8e24d7101319, roomId: 920967531, participantId: 920022, timestamp: 1772175978912, connectionOwner: SYSTEM}
