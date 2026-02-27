@@ -131,17 +131,10 @@ const APP_CONFIG = {
     maxFramerateCap: 30
   },
   call: {
-    reconnectDelayMs: 800,
-    participantSyncIntervalMs: 8000,
+    reconnectDelayMs: 1000,
+    participantSyncIntervalMs: 5000,
     participantSyncCooldownMs: 2500,
-    participantSyncRequestTimeoutMs: 7000,
     remoteFeedRetryDelayMs: 1200,
-    remoteFeedRetryMaxDelayMs: 12000,
-    remoteFeedRetryJitterMs: 350,
-    remoteFeedRetryMaxAttempts: 5,
-    remoteFeedRetryCooldownMs: 30000,
-    remoteFeedAttachTimeoutMs: 8000,
-    remoteFeedStartTimeoutMs: 12000,
     retry: {
       serverMaxAttempts: 3,
       serverDelayMs: 3000,
@@ -150,8 +143,7 @@ const APP_CONFIG = {
     }
   },
   ui: {
-    remoteFallbackRefreshMs: 2500,
-    remoteVideoStallThresholdMs: 4000
+    remoteFallbackRefreshMs: 2500
   },
   recording: {
     folderPath: "/opt/efs-janus-app/dev/VideoRecDownloads",
@@ -159,7 +151,6 @@ const APP_CONFIG = {
   },
   networkQuality: {
     sampleIntervalMs: 3000,
-    useSimulatedFallback: false,
     simulated: {
       rttBaseMs: 30,
       rttSpreadMs: 200,
