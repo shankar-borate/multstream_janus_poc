@@ -111,9 +111,9 @@ const APP_CONFIG = {
         }
     },
     vcx: {
-        imsBaseUrl: "https://localhost.beta.videocx.io",
+        imsBaseUrl: "https://beta.videocx.io",
         clientId: "101",
-        defaultJanusServer: "wss://localhost.beta.videocx.io/mstream_janus",
+        defaultJanusServer: "wss://beta.videocx.io/mstream_janus",
         defaultDisplayName: "Guest"
     },
     videoroom: {
@@ -1198,10 +1198,17 @@ class ScreenShareManager {
         this.stream = null;
     }
     async start() {
-        this.stream = await navigator.mediaDevices.getDisplayMedia({
-            video: true,
+        // Get screen share stream
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+            video: true
+        });
+        // Get audio stream
+        const mic = await navigator.mediaDevices.getUserMedia({
             audio: true
         });
+        // combine streams
+        mic.getAudioTracks().forEach(track => stream.addTrack(track));
+        this.stream = stream;
         return this.stream;
     }
     stop() {
@@ -2363,6 +2370,7 @@ class CallController {
         this.mediaStatsTimer = null;
         this.metricsPrevAt = 0;
         this.outboundPrev = { audio: 0, video: 0 };
+        this.outboundAudioPacketsPrev = 0;
         this.inboundPrev = { audio: 0, video: 0 };
         this.remoteInboundPrev = { audioPackets: 0, videoPackets: 0 };
         this.remoteReceiveGrowthAt = { audio: 0, video: 0 };
@@ -3188,6 +3196,7 @@ class CallController {
                     track.enabled = true;
                     this.replaceVideoTrack(track);
                 }
+                await this.ensureOutgoingAudio({ camera: this.cameraStream });
                 try {
                     if (typeof this.plugin.unmuteVideo === "function") {
                         this.plugin.unmuteVideo();
@@ -3400,6 +3409,7 @@ class CallController {
                 if (outgoingAudio)
                     this.syncPublishedAudioTrack(outgoingAudio);
                 this.screenEnabled = true;
+                await this.ensureOutgoingAudio({ camera: cam, screen: ss });
                 this.replaceVideoTrack(screenTrack);
                 Logger.setStatus("Screen share started");
                 this.bus.emit("screen-changed", true);
@@ -3413,6 +3423,7 @@ class CallController {
                 this.clearMixedAudioResources();
                 this.screenEnabled = false;
                 const cam = await this.ensureCameraStream();
+                await this.ensureOutgoingAudio({ camera: cam });
                 const videoTrack = cam.getVideoTracks()[0];
                 if (videoTrack) {
                     videoTrack.enabled = this.localVideoEnabled;
@@ -3457,6 +3468,7 @@ class CallController {
                 track.enabled = true;
                 this.vbEnabled = true;
                 this.localVideoEnabled = true;
+                await this.ensureOutgoingAudio({ camera: cam });
                 this.replaceVideoTrack(track);
                 this.bus.emit("video-mute-changed", false);
                 const micTrack = cam.getAudioTracks()[0];
@@ -3468,6 +3480,7 @@ class CallController {
                 this.vbManager.disable();
                 this.vbEnabled = false;
                 const cam = await this.ensureCameraStream();
+                await this.ensureOutgoingAudio({ camera: cam });
                 const track = cam.getVideoTracks()[0];
                 if (track) {
                     track.enabled = this.localVideoEnabled;
@@ -3551,10 +3564,61 @@ class CallController {
             });
             this.connectionEngine.onLocalTrackSignal(track, track.enabled !== false);
             this.media.setLocalTrack(this.localVideo, track);
+            this.syncPreferredAudioTrack();
         }
         catch (e) {
             Logger.error("replaceVideoTrack failed", e);
             Logger.setStatus("Video track switch failed.");
+        }
+    }
+    getPreferredAudioTrack() {
+        if (this.screenEnabled && this.mixedAudioTrack && this.mixedAudioTrack.readyState === "live") {
+            return this.mixedAudioTrack;
+        }
+        const mic = this.cameraStream?.getAudioTracks().find((t) => t.readyState === "live") ?? null;
+        return mic;
+    }
+    syncPreferredAudioTrack() {
+        if (!this.plugin)
+            return;
+        let preferred = this.getPreferredAudioTrack();
+        if (!preferred && this.screenEnabled) {
+            this.clearMixedAudioResources();
+            preferred = this.getPreferredAudioTrack();
+        }
+        if (!preferred)
+            return;
+        preferred.enabled = true;
+        this.syncPublishedAudioTrack(preferred);
+    }
+    async ensureOutgoingAudio(opts) {
+        if (!this.plugin)
+            return;
+        const camera = opts?.camera ?? await this.ensureCameraStream();
+        if (this.screenEnabled) {
+            const screen = opts?.screen ?? this.screenManager.getStream();
+            const micTrack = camera.getAudioTracks()[0] ?? null;
+            const displayAudioTrack = screen?.getAudioTracks()[0] ?? null;
+            const outgoing = await this.resolveScreenShareAudioTrack(micTrack, displayAudioTrack);
+            if (outgoing) {
+                outgoing.enabled = true;
+                this.syncPublishedAudioTrack(outgoing);
+            }
+            else {
+                Logger.warn("No outgoing audio track available during screen share.");
+            }
+            return;
+        }
+        if (this.mixedAudioTrack) {
+            this.clearMixedAudioResources();
+        }
+        const micTrack = camera.getAudioTracks()[0] ?? null;
+        if (micTrack) {
+            micTrack.enabled = true;
+            this.syncPublishedAudioTrack(micTrack);
+        }
+        else {
+            Logger.warn("No microphone track available for outgoing audio.");
         }
     }
     syncPublishedAudioTrack(track) {
@@ -3619,6 +3683,7 @@ class CallController {
         this.stopMediaStatsLoop();
         this.metricsPrevAt = 0;
         this.outboundPrev = { audio: 0, video: 0 };
+        this.outboundAudioPacketsPrev = 0;
         this.inboundPrev = { audio: 0, video: 0 };
         this.remoteInboundPrev = { audioPackets: 0, videoPackets: 0 };
         this.remoteReceiveGrowthAt = { audio: 0, video: 0 };
@@ -3660,6 +3725,9 @@ class CallController {
         const remoteCount = this.roster.snapshot(this.currentRoomId ?? 0).participantIds
             .filter((id) => id !== this.selfId)
             .length;
+        const remoteMs = this.remoteVideo.srcObject;
+        const hasLiveRemoteTrack = !!remoteMs?.getTracks().some((t) => t.readyState === "live");
+        const remotePresent = remoteCount > 0 || subscribers.length > 0 || hasLiveRemoteTrack;
         if (!publisher && subscribers.length === 0) {
             this.bus.emit("media-io", {
                 bytes: { audioSent: 0, audioReceived: 0, videoSent: 0, videoReceived: 0 },
@@ -3681,6 +3749,7 @@ class CallController {
         }
         const publisherMetrics = publisher ? await this.collectPublisherMetrics(publisher) : {
             audioBytesSent: 0,
+            audioPacketsSent: 0,
             videoBytesSent: 0,
             remoteInboundAudioPacketsReceived: null,
             remoteInboundVideoPacketsReceived: null,
@@ -3691,44 +3760,64 @@ class CallController {
         const prevAt = this.metricsPrevAt;
         this.metricsPrevAt = now;
         const audioSentDelta = Math.max(0, publisherMetrics.audioBytesSent - this.outboundPrev.audio);
+        const audioPacketsSentDelta = Math.max(0, publisherMetrics.audioPacketsSent - this.outboundAudioPacketsPrev);
         const videoSentDelta = Math.max(0, publisherMetrics.videoBytesSent - this.outboundPrev.video);
         const audioRecvDelta = Math.max(0, subscriberMetrics.audioBytesReceived - this.inboundPrev.audio);
         const videoRecvDelta = Math.max(0, subscriberMetrics.videoBytesReceived - this.inboundPrev.video);
         this.outboundPrev = { audio: publisherMetrics.audioBytesSent, video: publisherMetrics.videoBytesSent };
+        this.outboundAudioPacketsPrev = publisherMetrics.audioPacketsSent;
         this.inboundPrev = { audio: subscriberMetrics.audioBytesReceived, video: subscriberMetrics.videoBytesReceived };
-        let remoteAudioReceiveStatus;
-        let remoteVideoReceiveStatus;
-        if (publisherMetrics.remoteInboundAudioPacketsReceived === null) {
-            if (publisher && audioSentDelta > 0)
-                this.remoteReceiveGrowthAt.audio = now;
-            remoteAudioReceiveStatus = publisher
-                ? (this.remoteReceiveGrowthAt.audio > 0 && now - this.remoteReceiveGrowthAt.audio <= APP_CONFIG.mediaTelemetry.stallWindowMs ? "Yes" : "No")
-                : "Unknown";
+        const localOutgoingAudioTrack = this.getPreferredAudioTrack();
+        const localOutgoingAudioActive = !!localOutgoingAudioTrack &&
+            localOutgoingAudioTrack.readyState === "live" &&
+            localOutgoingAudioTrack.enabled !== false &&
+            !(typeof this.plugin?.isAudioMuted === "function" && this.plugin.isAudioMuted());
+        let remoteAudioReceiveStatus = "Unknown";
+        let remoteVideoReceiveStatus = "Unknown";
+        if (remotePresent) {
+            if (publisherMetrics.remoteInboundAudioPacketsReceived === null) {
+                if (publisher && (audioSentDelta > 0 || audioPacketsSentDelta > 0))
+                    this.remoteReceiveGrowthAt.audio = now;
+                if (!publisher) {
+                    remoteAudioReceiveStatus = "Unknown";
+                }
+                else if (this.remoteReceiveGrowthAt.audio > 0 && now - this.remoteReceiveGrowthAt.audio <= APP_CONFIG.mediaTelemetry.stallWindowMs) {
+                    remoteAudioReceiveStatus = "Yes";
+                }
+                else {
+                    // Without remote-inbound stats we cannot reliably prove "No" while track is active.
+                    remoteAudioReceiveStatus = localOutgoingAudioActive ? "Unknown" : "No";
+                }
+            }
+            else {
+                const delta = publisherMetrics.remoteInboundAudioPacketsReceived - this.remoteInboundPrev.audioPackets;
+                if (delta > 0)
+                    this.remoteReceiveGrowthAt.audio = now;
+                remoteAudioReceiveStatus =
+                    this.remoteReceiveGrowthAt.audio > 0 && now - this.remoteReceiveGrowthAt.audio <= APP_CONFIG.mediaTelemetry.stallWindowMs
+                        ? "Yes"
+                        : "No";
+            }
+            if (publisherMetrics.remoteInboundVideoPacketsReceived === null) {
+                if (publisher && videoSentDelta > 0)
+                    this.remoteReceiveGrowthAt.video = now;
+                remoteVideoReceiveStatus = publisher
+                    ? (this.remoteReceiveGrowthAt.video > 0 && now - this.remoteReceiveGrowthAt.video <= APP_CONFIG.mediaTelemetry.stallWindowMs ? "Yes" : "No")
+                    : "Unknown";
+            }
+            else {
+                const delta = publisherMetrics.remoteInboundVideoPacketsReceived - this.remoteInboundPrev.videoPackets;
+                if (delta > 0)
+                    this.remoteReceiveGrowthAt.video = now;
+                remoteVideoReceiveStatus =
+                    this.remoteReceiveGrowthAt.video > 0 && now - this.remoteReceiveGrowthAt.video <= APP_CONFIG.mediaTelemetry.stallWindowMs
+                        ? "Yes"
+                        : "No";
+            }
         }
         else {
-            const delta = publisherMetrics.remoteInboundAudioPacketsReceived - this.remoteInboundPrev.audioPackets;
-            if (delta > 0)
-                this.remoteReceiveGrowthAt.audio = now;
-            remoteAudioReceiveStatus =
-                this.remoteReceiveGrowthAt.audio > 0 && now - this.remoteReceiveGrowthAt.audio <= APP_CONFIG.mediaTelemetry.stallWindowMs
-                    ? "Yes"
-                    : "No";
-        }
-        if (publisherMetrics.remoteInboundVideoPacketsReceived === null) {
-            if (publisher && videoSentDelta > 0)
-                this.remoteReceiveGrowthAt.video = now;
-            remoteVideoReceiveStatus = publisher
-                ? (this.remoteReceiveGrowthAt.video > 0 && now - this.remoteReceiveGrowthAt.video <= APP_CONFIG.mediaTelemetry.stallWindowMs ? "Yes" : "No")
-                : "Unknown";
-        }
-        else {
-            const delta = publisherMetrics.remoteInboundVideoPacketsReceived - this.remoteInboundPrev.videoPackets;
-            if (delta > 0)
-                this.remoteReceiveGrowthAt.video = now;
-            remoteVideoReceiveStatus =
-                this.remoteReceiveGrowthAt.video > 0 && now - this.remoteReceiveGrowthAt.video <= APP_CONFIG.mediaTelemetry.stallWindowMs
-                    ? "Yes"
-                    : "No";
+            this.remoteReceiveGrowthAt.audio = 0;
+            this.remoteReceiveGrowthAt.video = 0;
         }
         this.remoteInboundPrev = {
             audioPackets: publisherMetrics.remoteInboundAudioPacketsReceived ?? this.remoteInboundPrev.audioPackets,
@@ -3738,10 +3827,10 @@ class CallController {
             this.localReceiveGrowthAt.video = now;
         if (audioRecvDelta > 0)
             this.localReceiveGrowthAt.audio = now;
-        const localReceivingVideo = remoteCount > 0
+        const localReceivingVideo = remotePresent
             ? (this.localReceiveGrowthAt.video > 0 && now - this.localReceiveGrowthAt.video <= APP_CONFIG.mediaTelemetry.stallWindowMs ? "Yes" : "No")
             : "Unknown";
-        const localReceivingAudio = remoteCount > 0
+        const localReceivingAudio = remotePresent
             ? (this.localReceiveGrowthAt.audio > 0 && now - this.localReceiveGrowthAt.audio <= APP_CONFIG.mediaTelemetry.stallWindowMs ? "Yes" : "No")
             : "Unknown";
         const localVideoPlaybackStatus = this.deriveLocalVideoPlaybackStatus(now);
@@ -3750,13 +3839,13 @@ class CallController {
         const remoteAudioPlaybackStatus = peerTelemetry?.audioPlaybackStatus ?? "Unknown";
         const remoteVideoPlaybackStatus = peerTelemetry?.videoPlaybackStatus ?? "Unknown";
         const issues = [];
-        if (remoteAudioReceiveStatus === "No" && remoteCount > 0) {
+        if (remoteAudioReceiveStatus === "No" && remotePresent && localOutgoingAudioActive) {
             issues.push("your audio not working");
         }
-        if (localReceivingAudio === "No" && remoteCount > 0) {
+        if (localReceivingAudio === "No" && remotePresent) {
             issues.push("participant audio not working");
         }
-        if (localReceivingVideo === "No" && remoteCount > 0) {
+        if (localReceivingVideo === "No" && remotePresent) {
             issues.push("participant video not working");
         }
         const snapshot = {
@@ -3799,6 +3888,7 @@ class CallController {
         try {
             const report = await pc.getStats();
             let audioBytesSent = 0;
+            let audioPacketsSent = 0;
             let videoBytesSent = 0;
             let remoteInboundAudioPacketsReceived = null;
             let remoteInboundVideoPacketsReceived = null;
@@ -3811,6 +3901,8 @@ class CallController {
                     if (anyS.kind === "audio" || anyS.mediaType === "audio") {
                         if (typeof anyS.bytesSent === "number")
                             audioBytesSent += anyS.bytesSent;
+                        if (typeof anyS.packetsSent === "number")
+                            audioPacketsSent += anyS.packetsSent;
                     }
                     if (anyS.kind === "video" || anyS.mediaType === "video") {
                         if (typeof anyS.bytesSent === "number")
@@ -3840,6 +3932,7 @@ class CallController {
             });
             return {
                 audioBytesSent,
+                audioPacketsSent,
                 videoBytesSent,
                 remoteInboundAudioPacketsReceived,
                 remoteInboundVideoPacketsReceived,
@@ -3851,6 +3944,7 @@ class CallController {
             Logger.error("Publisher metrics collection failed", e);
             return {
                 audioBytesSent: this.outboundPrev.audio,
+                audioPacketsSent: this.outboundAudioPacketsPrev,
                 videoBytesSent: this.outboundPrev.video,
                 remoteInboundAudioPacketsReceived: null,
                 remoteInboundVideoPacketsReceived: null,
