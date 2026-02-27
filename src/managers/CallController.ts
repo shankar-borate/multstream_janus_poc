@@ -43,23 +43,6 @@ class CallController {
   private cameraStreamOrientation: "portrait" | "landscape" | null = null;
   private publisherPc: RTCPeerConnection | null = null;
   private subscriberPcs = new Map<number, RTCPeerConnection>();
-  private localVideoEnabled = true;
-  private videoToggleBusy = false;
-  private screenToggleBusy = false;
-  private vbToggleBusy = false;
-  private mediaStatsTimer: number | null = null;
-  private metricsPrevAt = 0;
-  private outboundPrev = { audio: 0, video: 0 };
-  private inboundPrev = { audio: 0, video: 0 };
-  private remoteInboundPrev = { audioPackets: 0, videoPackets: 0 };
-  private remoteReceiveGrowthAt = { audio: 0, video: 0 };
-  private localReceiveGrowthAt = { audio: 0, video: 0 };
-  private peerTelemetryByFeed = new Map<number, PeerPlaybackTelemetry>();
-  private remoteVideoPlaybackAt = 0;
-  private lastRemoteVideoTime = 0;
-  private localAudioPlaybackAt = 0;
-  private mixedAudioContext: AudioContext | null = null;
-  private mixedAudioTrack: MediaStreamTrack | null = null;
   private callId: string | null = null;
 
   constructor(
@@ -70,13 +53,6 @@ class CallController {
     this.gateway = new JanusGateway();
     this.media = new MediaManager();
     this.vbManager = new VirtualBackgroundManager();
-    this.vbManager.setSourceProvider(async () => {
-      try {
-        return await this.ensureCameraStream();
-      } catch {
-        return null;
-      }
-    });
     this.connectionEngine = new ConnectionStatusEngine((status: ConnectionStatusView) => {
       this.bus.emit("connection-status", status);
     });
@@ -90,7 +66,6 @@ class CallController {
     }
     this.activeJoinCfg = cfg;
     this.isLeaving = false;
-    this.localVideoEnabled = true;
     this.suppressPublisherCleanupRetry = false;
     if (!opts?.internalRetry) {
       this.serverRetryAttempt = 0;
@@ -150,13 +125,6 @@ class CallController {
 
   private cleanupForRetry() {
     this.suppressRemoteFeedRetry = true;
-    this.stopMediaStatsLoop();
-    this.clearMixedAudioResources();
-    this.vbManager.disable();
-    this.vbEnabled = false;
-    this.screenManager.stop();
-    this.screenEnabled = false;
-    this.peerTelemetryByFeed.clear();
     this.remoteFeeds?.cleanupAll();
     this.remoteFeeds = null;
     this.plugin = null;
@@ -167,10 +135,6 @@ class CallController {
     this.selfId = null;
     this.publisherPc = null;
     this.subscriberPcs.clear();
-    this.localVideoEnabled = true;
-    this.videoToggleBusy = false;
-    this.screenToggleBusy = false;
-    this.vbToggleBusy = false;
     this.recording = false;
     this.currentRecordingId = null;
     this.currentRoomId = null;
@@ -267,6 +231,9 @@ class CallController {
       (track: any, on: any) => {
         if (track && typeof track.kind === "string") {
           this.connectionEngine.onLocalTrackSignal(track, !!on);
+        }
+        if (on && track.kind === "video") {
+          this.media.setLocalTrack(this.localVideo, track);
         }
       },
       () => {
@@ -456,12 +423,8 @@ class CallController {
           onRemoteTrackSignal: (feedId: number, track: MediaStreamTrack, on: boolean) => {
             this.connectionEngine.onRemoteTrackSignal(feedId, track, on);
           },
-          onRemoteTelemetry: (feedId: number, payload: PeerPlaybackTelemetry) => {
-            this.peerTelemetryByFeed.set(feedId, payload);
-          },
           onRemoteFeedCleanup: (feedId: number) => {
             this.subscriberPcs.delete(feedId);
-            this.peerTelemetryByFeed.delete(feedId);
             this.connectionEngine.unregisterSubscriber(feedId);
             if (this.isLeaving || this.suppressRemoteFeedRetry) {
               Logger.warn(`Remote feed ${feedId} cleanup ignored (controlled cleanup)`);
@@ -486,9 +449,7 @@ class CallController {
       this.publish();
       this.reconcile(cfg, data["publishers"]);
       this.bus.emit("joined", true);
-      this.bus.emit("video-mute-changed", !this.localVideoEnabled);
       this.startParticipantSync(cfg);
-      this.startMediaStatsLoop();
     }
 
     if (event === "event") {
@@ -621,16 +582,8 @@ class CallController {
     if (feedId === this.selfId) return;
     this.roster.remove(feedId);
     this.subscriberPcs.delete(feedId);
-    this.peerTelemetryByFeed.delete(feedId);
     this.remoteFeeds?.removeFeed(feedId);
     this.publishParticipants(cfg);
-    const remoteCount = this.roster.snapshot(cfg.roomId).participantIds
-      .filter((id: number) => id !== this.selfId)
-      .length;
-    if (!this.isLeaving && this.joinedRoom && remoteCount === 0) {
-      this.bus.emit("call-ended", { reason: "remote-left" });
-      this.leave();
-    }
   }
 
   // =====================================
@@ -794,14 +747,10 @@ class CallController {
     this.connectionEngine.onLocalTrackSignal(videoTrack, true);
     this.media.setLocalTrack(this.localVideo, videoTrack);
 
-    const tracks: any[] = [
+    return [
       { type: "audio", capture: audioTrack, recv: false },
       { type: "video", capture: videoTrack, recv: false }
     ];
-    if (APP_CONFIG.mediaTelemetry.enablePeerTelemetry) {
-      tracks.push({ type: "data" });
-    }
-    return tracks;
   }
 
   // public publish() {
@@ -916,7 +865,6 @@ class CallController {
             request: "configure",
             audio: true,
             video: true,
-            data: APP_CONFIG.mediaTelemetry.enablePeerTelemetry,
             bitrate: videoCfg.bitrate_bps,
             bitrate_cap: videoCfg.bitrate_cap
           },
@@ -950,71 +898,6 @@ class CallController {
     this.bus.emit("mute-changed", !m);
   }
 
-  async setVideoEnabled(enabled: boolean): Promise<boolean> {
-    if (!this.plugin) return this.localVideoEnabled;
-    if (this.videoToggleBusy) return this.localVideoEnabled;
-    this.videoToggleBusy = true;
-    try {
-      if (enabled) {
-        let track: MediaStreamTrack | undefined;
-        if (this.vbEnabled) {
-          const vbSourceTrack = this.vbManager.getSourceStream()?.getVideoTracks()[0] ?? this.cameraStream?.getVideoTracks()[0];
-          if (vbSourceTrack) vbSourceTrack.enabled = true;
-        }
-        if (this.screenEnabled) {
-          track = this.screenManager.getStream()?.getVideoTracks()[0];
-        } else if (this.vbEnabled) {
-          track = this.vbManager.getOutputStream()?.getVideoTracks()[0];
-        }
-        if (!track) {
-          const cam = await this.ensureCameraStream();
-          track = cam.getVideoTracks()[0];
-        }
-        if (track) {
-          track.enabled = true;
-          this.replaceVideoTrack(track);
-        }
-        try {
-          if (typeof this.plugin.unmuteVideo === "function") {
-            this.plugin.unmuteVideo();
-          } else {
-            this.plugin.send({ message: { request: "configure", video: true } });
-          }
-        } catch (e: any) {
-          Logger.error("Video unmute signaling failed", e);
-        }
-        this.localVideoEnabled = true;
-      } else {
-        try {
-          if (typeof this.plugin.muteVideo === "function") {
-            this.plugin.muteVideo();
-          } else {
-            this.plugin.send({ message: { request: "configure", video: false } });
-          }
-        } catch (e: any) {
-          Logger.error("Video mute signaling failed", e);
-        }
-        const localTrack = this.screenEnabled
-          ? this.screenManager.getStream()?.getVideoTracks()[0]
-          : this.vbEnabled
-            ? this.vbManager.getOutputStream()?.getVideoTracks()[0]
-            : this.cameraStream?.getVideoTracks()[0];
-        if (localTrack) {
-          localTrack.enabled = false;
-          this.connectionEngine.onLocalTrackSignal(localTrack, false);
-        }
-        this.localVideoEnabled = false;
-      }
-    } catch (e: any) {
-      Logger.error("Video toggle failed", e);
-      Logger.setStatus(this.getCameraMicErrorMessage(e));
-    } finally {
-      this.videoToggleBusy = false;
-      this.bus.emit("video-mute-changed", !this.localVideoEnabled);
-    }
-    return this.localVideoEnabled;
-  }
-
   markRetrying() {
     this.connectionEngine.onReconnect();
   }
@@ -1027,7 +910,7 @@ class CallController {
   }
 
   stopVideo() {
-    void this.setVideoEnabled(false);
+    this.plugin?.send({ message: { request: "unpublish" } });
   }
 
   // =====================================
@@ -1110,12 +993,6 @@ class CallController {
     try {
       this.isLeaving = true;
       this.suppressRemoteFeedRetry = true;
-      this.stopMediaStatsLoop();
-      this.clearMixedAudioResources();
-      this.vbManager.disable();
-      this.vbEnabled = false;
-      this.screenManager.stop();
-      this.screenEnabled = false;
       this.clearRetryTimer();
       this.serverRetryAttempt = 0;
       this.peerRetryAttempt = 0;
@@ -1153,16 +1030,10 @@ class CallController {
       this.selfId = null;
       this.publisherPc = null;
       this.subscriberPcs.clear();
-      this.peerTelemetryByFeed.clear();
-      this.localVideoEnabled = true;
-      this.videoToggleBusy = false;
-      this.screenToggleBusy = false;
-      this.vbToggleBusy = false;
       this.roster.reset();
 
       this.bus.emit("recording-changed", false);
       this.bus.emit("joined", false);
-      this.bus.emit("video-mute-changed", false);
       this.connectionEngine.onLeft();
 
       this.media.clearLocal(this.localVideo);
@@ -1179,135 +1050,75 @@ class CallController {
     }
   }
 
-  async toggleScreenShare() {
-    if (!this.plugin || this.screenToggleBusy) return;
-    this.screenToggleBusy = true;
+    async toggleScreenShare(){
+    if(!this.plugin) return;
     try {
-      if (!this.screenEnabled) {
+      if(!this.screenEnabled){
         const ss = await this.screenManager.start();
-        const screenTrack = ss.getVideoTracks()[0];
-        if (!screenTrack) throw new Error("Screen video track unavailable");
-
-        const cam = await this.ensureCameraStream();
-        const micTrack = cam.getAudioTracks()[0] ?? null;
-        const displayAudioTrack = ss.getAudioTracks()[0] ?? null;
-        const outgoingAudio = await this.resolveScreenShareAudioTrack(micTrack, displayAudioTrack);
-        if (outgoingAudio) this.syncPublishedAudioTrack(outgoingAudio);
-
+        const track = ss.getVideoTracks()[0];
+        if(!track) return;
         this.screenEnabled = true;
-        this.replaceVideoTrack(screenTrack);
+        this.replaceVideoTrack(track);
         Logger.setStatus("Screen share started");
         this.bus.emit("screen-changed", true);
-        screenTrack.onended = () => {
-          if (!this.isLeaving && this.screenEnabled) void this.toggleScreenShare();
-        };
+        track.onended = ()=>{ if(this.screenEnabled) void this.toggleScreenShare(); };
       } else {
         this.screenManager.stop();
-        this.clearMixedAudioResources();
         this.screenEnabled = false;
         const cam = await this.ensureCameraStream();
-        const videoTrack = cam.getVideoTracks()[0];
-        if (videoTrack) {
-          videoTrack.enabled = this.localVideoEnabled;
-          this.replaceVideoTrack(videoTrack);
-        }
-        const micTrack = cam.getAudioTracks()[0];
-        if (micTrack) this.syncPublishedAudioTrack(micTrack);
+        const track = cam.getVideoTracks()[0];
+        if(track) this.replaceVideoTrack(track);
         Logger.setStatus("Screen share stopped");
         this.bus.emit("screen-changed", false);
       }
     } catch (e: any) {
       Logger.error("Screen share toggle failed", e);
       Logger.setStatus(this.getScreenShareErrorMessage(e));
-    } finally {
-      this.screenToggleBusy = false;
     }
   }
 
-  async toggleVirtualBackground() {
-    if (!this.plugin || this.vbToggleBusy) return;
-    if (this.screenEnabled) {
+  async toggleVirtualBackground(){
+    if(!this.plugin) return;
+    if(this.screenEnabled){
       Logger.setStatus("Disable screen share before virtual background");
       return;
     }
-    this.vbToggleBusy = true;
     try {
-      if (!this.vbEnabled) {
-        if (!this.localVideoEnabled) {
-          await this.setVideoEnabled(true);
-        }
+      if(!this.vbEnabled){
         const cam = await this.ensureCameraStream();
-        const camVideoTrack = cam.getVideoTracks()[0];
-        if (camVideoTrack) camVideoTrack.enabled = true;
         const processed = await this.vbManager.enable(cam);
         const track = processed.getVideoTracks()[0];
-        if (!track) throw new Error("Virtual background output track unavailable");
-        track.enabled = true;
+        if(!track) return;
         this.vbEnabled = true;
-        this.localVideoEnabled = true;
         this.replaceVideoTrack(track);
-        this.bus.emit("video-mute-changed", false);
-        const micTrack = cam.getAudioTracks()[0];
-        if (micTrack) this.syncPublishedAudioTrack(micTrack);
         this.bus.emit("vb-changed", true);
       } else {
         this.vbManager.disable();
         this.vbEnabled = false;
         const cam = await this.ensureCameraStream();
         const track = cam.getVideoTracks()[0];
-        if (track) {
-          track.enabled = this.localVideoEnabled;
-          this.replaceVideoTrack(track);
-        }
-        const micTrack = cam.getAudioTracks()[0];
-        if (micTrack) this.syncPublishedAudioTrack(micTrack);
+        if(track) this.replaceVideoTrack(track);
         this.bus.emit("vb-changed", false);
       }
     } catch (e: any) {
       Logger.error("Virtual background toggle failed", e);
       Logger.setStatus(this.getCameraMicErrorMessage(e));
-    } finally {
-      this.vbToggleBusy = false;
     }
   }
-
-  private async ensureCameraStream(): Promise<MediaStream> {
+  private async ensureCameraStream(): Promise<MediaStream>{
     try {
       const desiredOrientation = this.getViewportOrientation();
-      const currentStream = this.cameraStream;
-      const hasLiveVideo = !!currentStream?.getVideoTracks().some(t => t.readyState === "live");
-      const hasLiveAudio = !!currentStream?.getAudioTracks().some(t => t.readyState === "live");
+      const hasLiveVideo = !!this.cameraStream?.getVideoTracks().some(t => t.readyState === "live");
+      const hasLiveAudio = !!this.cameraStream?.getAudioTracks().some(t => t.readyState === "live");
       const needsRecreate =
-        !currentStream ||
+        !this.cameraStream ||
         !hasLiveVideo ||
         !hasLiveAudio ||
         (this.isIOSDevice() && this.cameraStreamOrientation !== desiredOrientation);
 
       if (needsRecreate) {
-        const videoConstraints = this.isIOSDevice()
-          ? this.buildIOSVideoConstraints(desiredOrientation)
-          : true;
-        const nextStream = await navigator.mediaDevices.getUserMedia({
-          video: videoConstraints,
-          audio: true
-        });
-        const previous = this.cameraStream;
-        this.cameraStream = nextStream;
-        this.cameraStreamOrientation = desiredOrientation;
-
-        const nextAudio = nextStream.getAudioTracks()[0];
-        if (nextAudio && (!this.screenEnabled || !this.mixedAudioTrack)) {
-          this.syncPublishedAudioTrack(nextAudio);
-        }
-
-        if (previous && previous !== nextStream) {
-          const vbSourceLive = !!this.vbManager
-            .getSourceStream()
-            ?.getVideoTracks()
-            .some((t: MediaStreamTrack) => t.readyState === "live");
-          previous.getTracks().forEach(t => {
-            if (nextStream.getTracks().some(nt => nt.id === t.id)) return;
-            if (this.vbEnabled && vbSourceLive && t.kind === "video") return;
+        if (this.cameraStream) {
+          this.cameraStream.getTracks().forEach(t => {
             try {
               t.stop();
             } catch (stopErr: any) {
@@ -1315,8 +1126,17 @@ class CallController {
             }
           });
         }
-      }
 
+        const videoConstraints = this.isIOSDevice()
+          ? this.buildIOSVideoConstraints(desiredOrientation)
+          : true;
+
+        this.cameraStream = await navigator.mediaDevices.getUserMedia({
+          video: videoConstraints,
+          audio: true
+        });
+        this.cameraStreamOrientation = desiredOrientation;
+      }
       if (!this.cameraStream) {
         throw new Error("Camera stream unavailable after initialization");
       }
@@ -1327,429 +1147,16 @@ class CallController {
       throw e;
     }
   }
-
-  private replaceVideoTrack(track: MediaStreamTrack) {
-    if (!this.plugin) return;
+   private replaceVideoTrack(track: MediaStreamTrack){
+    if(!this.plugin) return;
     try {
       this.plugin.replaceTracks({
-        tracks: [{ type: "video", capture: track, recv: false }]
+        tracks:[{ type:"video", capture:track, recv:false }]
       });
-      this.connectionEngine.onLocalTrackSignal(track, track.enabled !== false);
       this.media.setLocalTrack(this.localVideo, track);
     } catch (e: any) {
       Logger.error("replaceVideoTrack failed", e);
       Logger.setStatus("Video track switch failed.");
     }
-  }
-
-  private syncPublishedAudioTrack(track: MediaStreamTrack) {
-    if (!this.plugin) return;
-    try {
-      this.plugin.replaceTracks({
-        tracks: [{ type: "audio", capture: track, recv: false }]
-      });
-    } catch (e: any) {
-      Logger.error("replaceAudioTrack failed", e);
-    }
-  }
-
-  private async resolveScreenShareAudioTrack(
-    micTrack: MediaStreamTrack | null,
-    displayAudioTrack: MediaStreamTrack | null
-  ): Promise<MediaStreamTrack | null> {
-    this.clearMixedAudioResources();
-    if (!micTrack && !displayAudioTrack) return null;
-    if (!micTrack) return displayAudioTrack;
-    if (!displayAudioTrack) return micTrack;
-
-    try {
-      const ctx = new AudioContext();
-      const destination = ctx.createMediaStreamDestination();
-      const micSource = ctx.createMediaStreamSource(new MediaStream([micTrack]));
-      const displaySource = ctx.createMediaStreamSource(new MediaStream([displayAudioTrack]));
-      micSource.connect(destination);
-      displaySource.connect(destination);
-      const mixedTrack = destination.stream.getAudioTracks()[0] ?? null;
-      if (!mixedTrack) {
-        void ctx.close();
-        return micTrack;
-      }
-      this.mixedAudioContext = ctx;
-      this.mixedAudioTrack = mixedTrack;
-      return mixedTrack;
-    } catch (e: any) {
-      Logger.error("Screen-share audio mixing failed; using microphone only", e);
-      return micTrack;
-    }
-  }
-
-  private clearMixedAudioResources() {
-    if (this.mixedAudioTrack) {
-      try {
-        this.mixedAudioTrack.stop();
-      } catch (e: any) {
-        Logger.error("Stopping mixed audio track failed", e);
-      }
-    }
-    this.mixedAudioTrack = null;
-    if (this.mixedAudioContext) {
-      this.mixedAudioContext.close().catch((e: any) => {
-        Logger.error("Closing mixed audio context failed", e);
-      });
-    }
-    this.mixedAudioContext = null;
-  }
-
-  private startMediaStatsLoop() {
-    this.stopMediaStatsLoop();
-    this.metricsPrevAt = 0;
-    this.outboundPrev = { audio: 0, video: 0 };
-    this.inboundPrev = { audio: 0, video: 0 };
-    this.remoteInboundPrev = { audioPackets: 0, videoPackets: 0 };
-    this.remoteReceiveGrowthAt = { audio: 0, video: 0 };
-    this.localReceiveGrowthAt = { audio: 0, video: 0 };
-    this.remoteVideoPlaybackAt = 0;
-    this.lastRemoteVideoTime = 0;
-    this.localAudioPlaybackAt = 0;
-
-    this.mediaStatsTimer = window.setInterval(() => {
-      void this.sampleMediaStats();
-    }, APP_CONFIG.mediaTelemetry.sampleIntervalMs);
-    void this.sampleMediaStats();
-  }
-
-  private stopMediaStatsLoop() {
-    if (this.mediaStatsTimer !== null) {
-      window.clearInterval(this.mediaStatsTimer);
-      this.mediaStatsTimer = null;
-    }
-    this.bus.emit<MediaIoSnapshot>("media-io", {
-      bytes: { audioSent: 0, audioReceived: 0, videoSent: 0, videoReceived: 0 },
-      quality: { localJitterMs: null, localLossPct: null, remoteJitterMs: null, remoteLossPct: null },
-      issues: [],
-      matrix: {
-        remoteReceivingYourVideo: "Unknown",
-        remoteReceivingYourAudio: "Unknown",
-        remoteAudioPlaybackStatus: "Unknown",
-        remoteVideoPlaybackStatus: "Unknown",
-        localReceivingYourVideo: "Unknown",
-        localReceivingYourAudio: "Unknown",
-        localAudioPlaybackStatus: "Unknown",
-        localVideoPlaybackStatus: "Unknown"
-      },
-      ts: Date.now()
-    });
-  }
-
-  private async sampleMediaStats() {
-    const now = Date.now();
-    const publisher = this.publisherPc;
-    const subscribers = Array.from(this.subscriberPcs.values());
-    const remoteCount = this.roster.snapshot(this.currentRoomId ?? 0).participantIds
-      .filter((id: number) => id !== this.selfId)
-      .length;
-    if (!publisher && subscribers.length === 0) {
-      this.bus.emit<MediaIoSnapshot>("media-io", {
-        bytes: { audioSent: 0, audioReceived: 0, videoSent: 0, videoReceived: 0 },
-        quality: { localJitterMs: null, localLossPct: null, remoteJitterMs: null, remoteLossPct: null },
-        issues: [],
-        matrix: {
-          remoteReceivingYourVideo: "Unknown",
-          remoteReceivingYourAudio: "Unknown",
-          remoteAudioPlaybackStatus: "Unknown",
-          remoteVideoPlaybackStatus: "Unknown",
-          localReceivingYourVideo: "Unknown",
-          localReceivingYourAudio: "Unknown",
-          localAudioPlaybackStatus: "Unknown",
-          localVideoPlaybackStatus: "Unknown"
-        },
-        ts: now
-      });
-      return;
-    }
-
-    const publisherMetrics = publisher ? await this.collectPublisherMetrics(publisher) : {
-      audioBytesSent: 0,
-      videoBytesSent: 0,
-      remoteInboundAudioPacketsReceived: null as number | null,
-      remoteInboundVideoPacketsReceived: null as number | null,
-      localJitterMs: null as number | null,
-      localLossPct: null as number | null
-    };
-    const subscriberMetrics = await this.collectSubscriberMetrics(subscribers);
-
-    const prevAt = this.metricsPrevAt;
-    this.metricsPrevAt = now;
-    const audioSentDelta = Math.max(0, publisherMetrics.audioBytesSent - this.outboundPrev.audio);
-    const videoSentDelta = Math.max(0, publisherMetrics.videoBytesSent - this.outboundPrev.video);
-    const audioRecvDelta = Math.max(0, subscriberMetrics.audioBytesReceived - this.inboundPrev.audio);
-    const videoRecvDelta = Math.max(0, subscriberMetrics.videoBytesReceived - this.inboundPrev.video);
-    this.outboundPrev = { audio: publisherMetrics.audioBytesSent, video: publisherMetrics.videoBytesSent };
-    this.inboundPrev = { audio: subscriberMetrics.audioBytesReceived, video: subscriberMetrics.videoBytesReceived };
-
-    let remoteAudioReceiveStatus: YesNoUnknown;
-    let remoteVideoReceiveStatus: YesNoUnknown;
-    if (publisherMetrics.remoteInboundAudioPacketsReceived === null) {
-      if (publisher && audioSentDelta > 0) this.remoteReceiveGrowthAt.audio = now;
-      remoteAudioReceiveStatus = publisher
-        ? (this.remoteReceiveGrowthAt.audio > 0 && now - this.remoteReceiveGrowthAt.audio <= APP_CONFIG.mediaTelemetry.stallWindowMs ? "Yes" : "No")
-        : "Unknown";
-    } else {
-      const delta = publisherMetrics.remoteInboundAudioPacketsReceived - this.remoteInboundPrev.audioPackets;
-      if (delta > 0) this.remoteReceiveGrowthAt.audio = now;
-      remoteAudioReceiveStatus =
-        this.remoteReceiveGrowthAt.audio > 0 && now - this.remoteReceiveGrowthAt.audio <= APP_CONFIG.mediaTelemetry.stallWindowMs
-          ? "Yes"
-          : "No";
-    }
-    if (publisherMetrics.remoteInboundVideoPacketsReceived === null) {
-      if (publisher && videoSentDelta > 0) this.remoteReceiveGrowthAt.video = now;
-      remoteVideoReceiveStatus = publisher
-        ? (this.remoteReceiveGrowthAt.video > 0 && now - this.remoteReceiveGrowthAt.video <= APP_CONFIG.mediaTelemetry.stallWindowMs ? "Yes" : "No")
-        : "Unknown";
-    } else {
-      const delta = publisherMetrics.remoteInboundVideoPacketsReceived - this.remoteInboundPrev.videoPackets;
-      if (delta > 0) this.remoteReceiveGrowthAt.video = now;
-      remoteVideoReceiveStatus =
-        this.remoteReceiveGrowthAt.video > 0 && now - this.remoteReceiveGrowthAt.video <= APP_CONFIG.mediaTelemetry.stallWindowMs
-          ? "Yes"
-          : "No";
-    }
-    this.remoteInboundPrev = {
-      audioPackets: publisherMetrics.remoteInboundAudioPacketsReceived ?? this.remoteInboundPrev.audioPackets,
-      videoPackets: publisherMetrics.remoteInboundVideoPacketsReceived ?? this.remoteInboundPrev.videoPackets
-    };
-
-    if (videoRecvDelta > 0) this.localReceiveGrowthAt.video = now;
-    if (audioRecvDelta > 0) this.localReceiveGrowthAt.audio = now;
-    const localReceivingVideo: YesNoUnknown = remoteCount > 0
-      ? (this.localReceiveGrowthAt.video > 0 && now - this.localReceiveGrowthAt.video <= APP_CONFIG.mediaTelemetry.stallWindowMs ? "Yes" : "No")
-      : "Unknown";
-    const localReceivingAudio: YesNoUnknown = remoteCount > 0
-      ? (this.localReceiveGrowthAt.audio > 0 && now - this.localReceiveGrowthAt.audio <= APP_CONFIG.mediaTelemetry.stallWindowMs ? "Yes" : "No")
-      : "Unknown";
-    const localVideoPlaybackStatus = this.deriveLocalVideoPlaybackStatus(now);
-    const localAudioPlaybackStatus = this.deriveLocalAudioPlaybackStatus(now, audioRecvDelta, subscriberMetrics.hasAudioTrack);
-    const peerTelemetry = this.pickFreshPeerTelemetry(now);
-    const remoteAudioPlaybackStatus = peerTelemetry?.audioPlaybackStatus ?? "Unknown";
-    const remoteVideoPlaybackStatus = peerTelemetry?.videoPlaybackStatus ?? "Unknown";
-
-    const issues: string[] = [];
-    if (remoteAudioReceiveStatus === "No" && remoteCount > 0) {
-      issues.push("your audio not working");
-    }
-    if (localReceivingAudio === "No" && remoteCount > 0) {
-      issues.push("participant audio not working");
-    }
-    if (localReceivingVideo === "No" && remoteCount > 0) {
-      issues.push("participant video not working");
-    }
-
-    const snapshot: MediaIoSnapshot = {
-      bytes: {
-        audioSent: publisherMetrics.audioBytesSent,
-        audioReceived: subscriberMetrics.audioBytesReceived,
-        videoSent: publisherMetrics.videoBytesSent,
-        videoReceived: subscriberMetrics.videoBytesReceived
-      },
-      quality: {
-        localJitterMs: publisherMetrics.localJitterMs,
-        localLossPct: publisherMetrics.localLossPct,
-        remoteJitterMs: subscriberMetrics.remoteJitterMs,
-        remoteLossPct: subscriberMetrics.remoteLossPct
-      },
-      issues,
-      matrix: {
-        remoteReceivingYourVideo: remoteVideoReceiveStatus,
-        remoteReceivingYourAudio: remoteAudioReceiveStatus,
-        remoteAudioPlaybackStatus,
-        remoteVideoPlaybackStatus,
-        localReceivingYourVideo: localReceivingVideo,
-        localReceivingYourAudio: localReceivingAudio,
-        localAudioPlaybackStatus,
-        localVideoPlaybackStatus
-      },
-      ts: now
-    };
-    this.bus.emit("media-io", snapshot);
-    if (prevAt > 0) {
-      this.sendPeerTelemetry({
-        type: "vcx-peer-telemetry",
-        ts: now,
-        audioPlaybackStatus: localAudioPlaybackStatus,
-        videoPlaybackStatus: localVideoPlaybackStatus
-      });
-    }
-  }
-
-  private async collectPublisherMetrics(pc: RTCPeerConnection): Promise<{
-    audioBytesSent: number;
-    videoBytesSent: number;
-    remoteInboundAudioPacketsReceived: number | null;
-    remoteInboundVideoPacketsReceived: number | null;
-    localJitterMs: number | null;
-    localLossPct: number | null;
-  }> {
-    try {
-      const report = await pc.getStats();
-      let audioBytesSent = 0;
-      let videoBytesSent = 0;
-      let remoteInboundAudioPacketsReceived: number | null = null;
-      let remoteInboundVideoPacketsReceived: number | null = null;
-      let localJitterMs: number | null = null;
-      let lost = 0;
-      let total = 0;
-
-      report.forEach((s: RTCStats) => {
-        const anyS = s as any;
-        if (s.type === "outbound-rtp" && !anyS.isRemote) {
-          if (anyS.kind === "audio" || anyS.mediaType === "audio") {
-            if (typeof anyS.bytesSent === "number") audioBytesSent += anyS.bytesSent;
-          }
-          if (anyS.kind === "video" || anyS.mediaType === "video") {
-            if (typeof anyS.bytesSent === "number") videoBytesSent += anyS.bytesSent;
-          }
-        }
-        if (s.type === "remote-inbound-rtp") {
-          if (typeof anyS.jitter === "number") {
-            const jitterMs = anyS.jitter * 1000;
-            localJitterMs = localJitterMs === null ? jitterMs : Math.max(localJitterMs, jitterMs);
-          }
-          const packetsLost = typeof anyS.packetsLost === "number" ? anyS.packetsLost : 0;
-          const packetsReceived = typeof anyS.packetsReceived === "number" ? anyS.packetsReceived : 0;
-          lost += packetsLost;
-          total += packetsLost + packetsReceived;
-          if (anyS.kind === "audio" || anyS.mediaType === "audio") {
-            if (typeof anyS.packetsReceived === "number") {
-              remoteInboundAudioPacketsReceived = anyS.packetsReceived;
-            }
-          }
-          if (anyS.kind === "video" || anyS.mediaType === "video") {
-            if (typeof anyS.packetsReceived === "number") {
-              remoteInboundVideoPacketsReceived = anyS.packetsReceived;
-            }
-          }
-        }
-      });
-      return {
-        audioBytesSent,
-        videoBytesSent,
-        remoteInboundAudioPacketsReceived,
-        remoteInboundVideoPacketsReceived,
-        localJitterMs,
-        localLossPct: total > 0 ? (lost / total) * 100 : null
-      };
-    } catch (e: any) {
-      Logger.error("Publisher metrics collection failed", e);
-      return {
-        audioBytesSent: this.outboundPrev.audio,
-        videoBytesSent: this.outboundPrev.video,
-        remoteInboundAudioPacketsReceived: null,
-        remoteInboundVideoPacketsReceived: null,
-        localJitterMs: null,
-        localLossPct: null
-      };
-    }
-  }
-
-  private async collectSubscriberMetrics(subscribers: RTCPeerConnection[]): Promise<{
-    audioBytesReceived: number;
-    videoBytesReceived: number;
-    remoteJitterMs: number | null;
-    remoteLossPct: number | null;
-    hasAudioTrack: boolean;
-  }> {
-    let audioBytesReceived = 0;
-    let videoBytesReceived = 0;
-    let remoteJitterMs: number | null = null;
-    let lost = 0;
-    let total = 0;
-    let hasAudioTrack = false;
-
-    await Promise.all(subscribers.map(async (pc: RTCPeerConnection) => {
-      try {
-        const report = await pc.getStats();
-        report.forEach((s: RTCStats) => {
-          const anyS = s as any;
-          if (s.type === "inbound-rtp" && !anyS.isRemote) {
-            if (anyS.kind === "audio" || anyS.mediaType === "audio") {
-              hasAudioTrack = true;
-              if (typeof anyS.bytesReceived === "number") audioBytesReceived += anyS.bytesReceived;
-            }
-            if (anyS.kind === "video" || anyS.mediaType === "video") {
-              if (typeof anyS.bytesReceived === "number") videoBytesReceived += anyS.bytesReceived;
-            }
-            if (typeof anyS.jitter === "number") {
-              const jitterMs = anyS.jitter * 1000;
-              remoteJitterMs = remoteJitterMs === null ? jitterMs : Math.max(remoteJitterMs, jitterMs);
-            }
-            const packetsLost = typeof anyS.packetsLost === "number" ? anyS.packetsLost : 0;
-            const packetsReceived = typeof anyS.packetsReceived === "number" ? anyS.packetsReceived : 0;
-            lost += packetsLost;
-            total += packetsLost + packetsReceived;
-          }
-        });
-      } catch (e: any) {
-        Logger.error("Subscriber metrics collection failed", e);
-      }
-    }));
-
-    return {
-      audioBytesReceived,
-      videoBytesReceived,
-      remoteJitterMs,
-      remoteLossPct: total > 0 ? (lost / total) * 100 : null,
-      hasAudioTrack
-    };
-  }
-
-  private deriveLocalVideoPlaybackStatus(now: number): PlaybackState {
-    const ms = this.remoteVideo.srcObject as MediaStream | null;
-    const hasTrack = !!ms?.getVideoTracks().some(t => t.readyState === "live" && t.enabled !== false);
-    if (!hasTrack) return "Unknown";
-    const currentTime = Number.isFinite(this.remoteVideo.currentTime) ? this.remoteVideo.currentTime : 0;
-    if (currentTime > this.lastRemoteVideoTime + 0.03) {
-      this.lastRemoteVideoTime = currentTime;
-      this.remoteVideoPlaybackAt = now;
-      return "Active";
-    }
-    if (this.remoteVideoPlaybackAt === 0 && currentTime > 0) {
-      this.remoteVideoPlaybackAt = now;
-      return "Active";
-    }
-    if (this.remoteVideoPlaybackAt > 0 && now - this.remoteVideoPlaybackAt <= APP_CONFIG.mediaTelemetry.stallWindowMs) {
-      return "Active";
-    }
-    return "Stalled";
-  }
-
-  private deriveLocalAudioPlaybackStatus(now: number, audioRecvDelta: number, hasAudioTrack: boolean): PlaybackState {
-    if (!hasAudioTrack) return "Unknown";
-    if (audioRecvDelta > 0) {
-      this.localAudioPlaybackAt = now;
-      return "Active";
-    }
-    if (this.localAudioPlaybackAt > 0 && now - this.localAudioPlaybackAt <= APP_CONFIG.mediaTelemetry.stallWindowMs) {
-      return "Active";
-    }
-    return "Stalled";
-  }
-
-  private pickFreshPeerTelemetry(now: number): PeerPlaybackTelemetry | null {
-    for (const payload of this.peerTelemetryByFeed.values()) {
-      if (now - payload.ts <= APP_CONFIG.mediaTelemetry.peerTelemetryFreshnessMs) {
-        return payload;
-      }
-    }
-    return null;
-  }
-
-  private sendPeerTelemetry(payload: PeerPlaybackTelemetry) {
-    if (!APP_CONFIG.mediaTelemetry.enablePeerTelemetry) return;
-    const channel = this.plugin?.data;
-    if (typeof channel !== "function") return;
-    try {
-      channel.call(this.plugin, { text: JSON.stringify(payload) });
-    } catch {}
   }
 }

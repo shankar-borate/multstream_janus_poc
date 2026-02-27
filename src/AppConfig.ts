@@ -134,14 +134,7 @@ const APP_CONFIG = {
     reconnectDelayMs: 1000,
     participantSyncIntervalMs: 5000,
     participantSyncCooldownMs: 2500,
-    participantSyncRequestTimeoutMs: 4500,
     remoteFeedRetryDelayMs: 1200,
-    remoteFeedRetryMaxAttempts: 5,
-    remoteFeedRetryCooldownMs: 15000,
-    remoteFeedRetryMaxDelayMs: 7000,
-    remoteFeedRetryJitterMs: 400,
-    remoteFeedAttachTimeoutMs: 10000,
-    remoteFeedStartTimeoutMs: 12000,
     retry: {
       serverMaxAttempts: 3,
       serverDelayMs: 3000,
@@ -150,14 +143,7 @@ const APP_CONFIG = {
     }
   },
   ui: {
-    remoteFallbackRefreshMs: 2500,
-    remoteVideoStallThresholdMs: 4000
-  },
-  virtualBackground: {
-    maskMode: "auto" as "auto" | "normal" | "inverted",
-    maskAutoConfirmFrames: 4,
-    maskAutoProbeFrames: 15,
-    maskAutoMinDiff: 10
+    remoteFallbackRefreshMs: 2500
   },
   recording: {
     folderPath: "/opt/efs-janus-app/dev/VideoRecDownloads",
@@ -165,7 +151,6 @@ const APP_CONFIG = {
   },
   networkQuality: {
     sampleIntervalMs: 3000,
-    useSimulatedFallback: false,
     simulated: {
       rttBaseMs: 30,
       rttSpreadMs: 200,
@@ -181,12 +166,6 @@ const APP_CONFIG = {
       lossGoodPct: 2,
       bitrateGoodKbps: 400
     }
-  },
-  mediaTelemetry: {
-    sampleIntervalMs: 1000,
-    stallWindowMs: 3500,
-    peerTelemetryFreshnessMs: 6000,
-    enablePeerTelemetry: true
   },
   connectionStatus: {
     tickIntervalMs: 1000,

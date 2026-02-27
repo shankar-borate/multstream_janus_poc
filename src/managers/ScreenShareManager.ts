@@ -2,10 +2,7 @@ class ScreenShareManager {
   private stream: MediaStream | null = null;
 
   async start(): Promise<MediaStream>{
-    this.stream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: true
-    });
+    this.stream = await navigator.mediaDevices.getDisplayMedia({ video:true, audio:false });
     return this.stream;
   }
 
@@ -14,9 +11,5 @@ class ScreenShareManager {
       this.stream.getTracks().forEach(t=>t.stop());
       this.stream = null;
     }
-  }
-
-  getStream(): MediaStream | null {
-    return this.stream;
   }
 }

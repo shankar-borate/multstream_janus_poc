@@ -23,12 +23,6 @@
     .ctrl-btn.purple{ background:#7c3aed; }
     .ctrl-btn:disabled{ opacity:.45; cursor:not-allowed; }
     .reconnect { position:absolute; left:18px; bottom:60px; padding:10px 14px; border-radius:6px; border:0; background:#f97316; color:white; font-weight:600; box-shadow:0 6px 18px rgba(0,0,0,.12); z-index:30; }
-    .media-io-panel{position:absolute;left:130px;bottom:60px;z-index:30;display:flex;flex-direction:column;gap:4px;padding:8px 10px;border-radius:8px;background:rgba(255,255,255,.95);border:1px solid rgba(148,163,184,.4);box-shadow:0 8px 18px rgba(15,23,42,.14);font:600 11px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;color:#0f172a;max-width:min(66vw,760px)}
-    .media-io-bytes{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .media-io-issues{color:#b91c1c;min-height:14px}
-    .status-matrix{position:absolute;left:18px;bottom:98px;z-index:30;display:grid;grid-template-columns:auto auto;column-gap:10px;row-gap:4px;padding:8px 10px;border-radius:8px;background:rgba(255,255,255,.95);border:1px solid rgba(148,163,184,.4);box-shadow:0 8px 18px rgba(15,23,42,.14);font:600 11px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;color:#0f172a;max-width:min(92vw,860px)}
-    .status-matrix .label{color:#334155}
-    .status-matrix .value{color:#0f172a}
     .call-meta{position:absolute;left:18px;bottom:18px;z-index:12;display:inline-flex;align-items:center;padding:6px 10px;border-radius:10px;background:rgba(255,255,255,.96);color:#111827;border:1px solid rgba(15,23,42,.12);box-shadow:0 8px 18px rgba(15,23,42,.12);font:600 12px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;white-space:nowrap;max-width:calc(100vw - 36px);overflow:hidden;text-overflow:ellipsis}
     @media (max-width: 768px){
       .call-meta{
@@ -42,23 +36,17 @@
         max-width:calc(100vw - 20px)
       }
       .reconnect{left:10px;bottom:calc(126px + env(safe-area-inset-bottom))}
-      .media-io-panel{left:10px;bottom:calc(166px + env(safe-area-inset-bottom));max-width:calc(100vw - 20px)}
-      .status-matrix{left:10px;bottom:calc(236px + env(safe-area-inset-bottom));max-width:calc(100vw - 20px)}
     }
     @media (max-width: 900px), (max-height: 560px){
       .remote-wrap{padding:12px 12px 24px}
       #remoteVideo{max-width:min(96vw,900px);max-height:min(62vh,380px);transform:translateY(-30px)}
       .local-pip{width:224px;height:140px;right:8px;bottom:calc(126px + env(safe-area-inset-bottom))}
       .reconnect{left:8px;bottom:calc(126px + env(safe-area-inset-bottom))}
-      .media-io-panel{left:8px;bottom:calc(166px + env(safe-area-inset-bottom));max-width:calc(100vw - 16px)}
-      .status-matrix{left:8px;bottom:calc(236px + env(safe-area-inset-bottom));max-width:calc(100vw - 16px)}
     }
     @media (max-height: 500px){
       #remoteVideo{transform:translateY(-34px)}
       .local-pip{width:210px;height:130px;right:8px;bottom:calc(136px + env(safe-area-inset-bottom))}
       .reconnect{left:8px;bottom:calc(136px + env(safe-area-inset-bottom))}
-      .media-io-panel{left:8px;bottom:calc(176px + env(safe-area-inset-bottom));max-width:calc(100vw - 16px)}
-      .status-matrix{left:8px;bottom:calc(246px + env(safe-area-inset-bottom));max-width:calc(100vw - 16px)}
       .call-meta{left:8px;bottom:calc(8px + env(safe-area-inset-bottom));max-width:calc(100vw - 16px)}
     }
     .status{position:absolute;top:14px;left:50%;transform:translateX(-50%);width:min(84vw,860px);background:rgba(255,255,255,.94);color:#111827;border:1px solid rgba(148,163,184,.38);border-radius:12px;padding:12px 14px;box-shadow:0 12px 24px rgba(15,23,42,.14);backdrop-filter:blur(6px);z-index:20;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;text-align:center}
@@ -100,20 +88,6 @@
   </div>
 
   <button id="btnReconnect" class="reconnect" disabled>Re-Connect</button>
-  <div id="mediaIoPanel" class="media-io-panel">
-    <div id="mediaIoBytes" class="media-io-bytes">A(sent/recv): 0 / 0 | V(sent/recv): 0 / 0</div>
-    <div id="mediaIoIssues" class="media-io-issues"></div>
-  </div>
-  <div id="statusMatrix" class="status-matrix">
-    <div class="label">Remote receiving your video</div><div id="mRemoteRecvVideo" class="value">Unknown</div>
-    <div class="label">Remote receiving your audio</div><div id="mRemoteRecvAudio" class="value">Unknown</div>
-    <div class="label">Remote audio playback status</div><div id="mRemoteAudioPlayback" class="value">Unknown</div>
-    <div class="label">Remote video playback status</div><div id="mRemoteVideoPlayback" class="value">Unknown</div>
-    <div class="label">Local receiving your video</div><div id="mLocalRecvVideo" class="value">Unknown</div>
-    <div class="label">Local receiving your audio</div><div id="mLocalRecvAudio" class="value">Unknown</div>
-    <div class="label">Local audio playback status</div><div id="mLocalAudioPlayback" class="value">Unknown</div>
-    <div class="label">Local video playback status</div><div id="mLocalVideoPlayback" class="value">Unknown</div>
-  </div>
   <div id="callMeta" class="call-meta">RoomId: - | Name: -</div>
 
   <div class="status">

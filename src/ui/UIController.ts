@@ -42,16 +42,6 @@ class UIController {
   private localQD = document.getElementById("localQualityDetails") as HTMLDivElement;
   private remoteQD = document.getElementById("remoteQualityDetails") as HTMLDivElement;
   private callMeta = document.getElementById("callMeta") as HTMLDivElement;
-  private mediaIoBytes = document.getElementById("mediaIoBytes") as HTMLDivElement;
-  private mediaIoIssues = document.getElementById("mediaIoIssues") as HTMLDivElement;
-  private mRemoteRecvVideo = document.getElementById("mRemoteRecvVideo") as HTMLDivElement;
-  private mRemoteRecvAudio = document.getElementById("mRemoteRecvAudio") as HTMLDivElement;
-  private mRemoteAudioPlayback = document.getElementById("mRemoteAudioPlayback") as HTMLDivElement;
-  private mRemoteVideoPlayback = document.getElementById("mRemoteVideoPlayback") as HTMLDivElement;
-  private mLocalRecvVideo = document.getElementById("mLocalRecvVideo") as HTMLDivElement;
-  private mLocalRecvAudio = document.getElementById("mLocalRecvAudio") as HTMLDivElement;
-  private mLocalAudioPlayback = document.getElementById("mLocalAudioPlayback") as HTMLDivElement;
-  private mLocalVideoPlayback = document.getElementById("mLocalVideoPlayback") as HTMLDivElement;
 
   private audioMuted = false;
   private videoMuted = false;
@@ -100,15 +90,6 @@ class UIController {
           ? '<i class="fa-solid fa-microphone-slash"></i>'
           : '<i class="fa-solid fa-microphone"></i>';
     });
-    this.bus.on<boolean>("video-mute-changed", muted => {
-      this.videoMuted = muted;
-      this.btnUnpublish.classList.toggle("danger", muted);
-      this.btnUnpublish.innerHTML =
-        muted
-          ? '<i class="fa-solid fa-video-slash"></i>'
-          : '<i class="fa-solid fa-video"></i>';
-      this.applyConnectionOverlays();
-    });
 
     this.bus.on<boolean>("screen-changed", on => {
       this.btnScreen.title = on ? "Stop Screen Share" : "Start Screen Share";
@@ -155,13 +136,6 @@ class UIController {
     this.bus.on<ConnectionStatusView>("connection-status", (status) => {
       this.renderConnectionStatus(status);
     });
-    this.bus.on<MediaIoSnapshot>("media-io", (stats) => {
-      this.renderMediaIo(stats);
-    });
-    this.bus.on<any>("call-ended", (payload) => {
-      Logger.user(`Call ended event received: ${payload?.reason || "unknown"}`);
-      this.setEndedState(true);
-    });
 
     this.wire();
     this.setupNetworkUI();
@@ -185,15 +159,17 @@ class UIController {
     };
 
     // VIDEO
-    this.btnUnpublish.onclick = async () => {
+    this.btnUnpublish.onclick = () => {
       Logger.user("Video button clicked");
-      if (this.btnUnpublish.disabled) return;
-      this.btnUnpublish.disabled = true;
-      try {
-        const enabled = await this.controller.setVideoEnabled(this.videoMuted);
-        this.videoMuted = !enabled;
-      } finally {
-        if (!this.ended) this.btnUnpublish.disabled = false;
+
+      this.videoMuted = !this.videoMuted;
+      this.btnUnpublish.classList.toggle("danger", this.videoMuted);
+
+      if (this.videoMuted) {
+        this.controller.stopVideo();
+      } else {
+        // republish
+        this.controller.publish();
       }
       this.applyConnectionOverlays();
 
@@ -206,7 +182,14 @@ class UIController {
       if (!this.ended) {
         Logger.user("End button clicked");
         this.controller.leave();
-        this.setEndedState(true);
+
+        this.ended = true;
+        this.endedOverlay.style.display = "flex";
+        this.renderRemoteFallback();
+
+        this.btnLeave.innerHTML =
+          '<i class="fa-solid fa-play"></i>';
+        this.btnLeave.title = "Start";
 
         this.bridge.emit({ type: "CALL_ENDED" });
       } else {
@@ -217,25 +200,11 @@ class UIController {
 
     this.btnReconnect.onclick = () => this.reconnect();
 
-    this.btnScreen.onclick = async () => {
-      if (this.btnScreen.disabled) return;
-      this.btnScreen.disabled = true;
-      try {
-        await this.controller.toggleScreenShare();
-      } finally {
-        if (!this.ended) this.btnScreen.disabled = false;
-      }
-    };
+    this.btnScreen.onclick =
+      () => this.controller.toggleScreenShare();
 
-    this.btnVB.onclick = async () => {
-      if (this.btnVB.disabled) return;
-      this.btnVB.disabled = true;
-      try {
-        await this.controller.toggleVirtualBackground();
-      } finally {
-        if (!this.ended) this.btnVB.disabled = false;
-      }
-    };
+    this.btnVB.onclick =
+      () => this.controller.toggleVirtualBackground();
 
     // ✅ RECORD BUTTON
     if (this.btnRecord) {
@@ -328,20 +297,6 @@ class UIController {
     }
   }
 
-  private setEndedState(ended: boolean) {
-    this.ended = ended;
-    this.endedOverlay.style.display = ended ? "flex" : "none";
-    this.renderRemoteFallback();
-    if (ended) {
-      this.btnLeave.innerHTML = '<i class="fa-solid fa-play"></i>';
-      this.btnLeave.title = "Start";
-      this.btnLeave.disabled = false;
-      return;
-    }
-    this.btnLeave.innerHTML = '<i class="fa-solid fa-phone-slash"></i>';
-    this.btnLeave.title = "End";
-  }
-
   private autoJoin() {
     const cfg = UrlConfig.buildJoinConfig();
     this.lastCfg = cfg;
@@ -354,10 +309,13 @@ class UIController {
 
     Logger.setStatus(`Joining... roomId=${cfg.roomId}, name=${cfg.display}${cfg.participantId ? `, participantId=${cfg.participantId}` : ""}`);
 
-    this.audioMuted = false;
-    this.videoMuted = false;
-    this.setEndedState(false);
-    this.applyConnectionOverlays();
+    this.ended = false;
+    this.endedOverlay.style.display = "none";
+    this.renderRemoteFallback();
+
+    this.btnLeave.innerHTML =
+      '<i class="fa-solid fa-phone-slash"></i>';
+    this.btnLeave.title = "End";
 
     this.controller.join(cfg);
     this.bridge.emit({ type: "CALL_STARTED" });
@@ -385,12 +343,11 @@ class UIController {
     [
       this.btnMute,
       this.btnUnpublish,
+      this.btnLeave,
       this.btnReconnect,
       this.btnScreen,
       this.btnVB
     ].forEach(b => b && (b.disabled = !joined));
-
-    this.btnLeave.disabled = this.ended ? false : !joined;
 
     if (this.btnRecord) {
       this.btnRecord.disabled = !joined || !this.canRecord;
@@ -404,6 +361,8 @@ class UIController {
   }
 
   private getRemoteBaseOverlayText(): string {
+    if (this.videoMuted) return "video muted on other participant";
+    if (this.audioMuted) return "audio muted on other participant";
     return "Remote";
   }
 
@@ -574,45 +533,6 @@ class UIController {
     this.remoteFallback.style.display = showFallback ? "flex" : "none";
   }
 
-  private formatBytes(bytes: number): string {
-    if (!Number.isFinite(bytes) || bytes <= 0) return "0B";
-    if (bytes < 1024) return `${Math.floor(bytes)}B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(2)}MB`;
-  }
-
-  private formatQuality(v: number | null): string {
-    if (v === null || !Number.isFinite(v)) return "n/a";
-    return `${v.toFixed(1)}`;
-  }
-
-  private renderMediaIo(stats: MediaIoSnapshot) {
-    if (this.mediaIoBytes) {
-      this.mediaIoBytes.textContent =
-        `A(sent/recv): ${this.formatBytes(stats.bytes.audioSent)} / ${this.formatBytes(stats.bytes.audioReceived)} | ` +
-        `V(sent/recv): ${this.formatBytes(stats.bytes.videoSent)} / ${this.formatBytes(stats.bytes.videoReceived)}`;
-    }
-    if (this.mediaIoIssues) {
-      this.mediaIoIssues.textContent = stats.issues.length > 0
-        ? stats.issues.join(" | ")
-        : "";
-    }
-
-    this.mRemoteRecvVideo.textContent = stats.matrix.remoteReceivingYourVideo;
-    this.mRemoteRecvAudio.textContent = stats.matrix.remoteReceivingYourAudio;
-    this.mRemoteAudioPlayback.textContent = stats.matrix.remoteAudioPlaybackStatus;
-    this.mRemoteVideoPlayback.textContent = stats.matrix.remoteVideoPlaybackStatus;
-    this.mLocalRecvVideo.textContent = stats.matrix.localReceivingYourVideo;
-    this.mLocalRecvAudio.textContent = stats.matrix.localReceivingYourAudio;
-    this.mLocalAudioPlayback.textContent = stats.matrix.localAudioPlaybackStatus;
-    this.mLocalVideoPlayback.textContent = stats.matrix.localVideoPlaybackStatus;
-
-    this.localQD.textContent =
-      `jitter=${this.formatQuality(stats.quality.localJitterMs)}ms loss=${this.formatQuality(stats.quality.localLossPct)}%`;
-    this.remoteQD.textContent =
-      `jitter=${this.formatQuality(stats.quality.remoteJitterMs)}ms loss=${this.formatQuality(stats.quality.remoteLossPct)}%`;
-  }
-
   private setupNetworkUI() {
     const toggle = (el: HTMLElement) =>
       el.classList.toggle("show");
@@ -645,7 +565,6 @@ class UIController {
 
         case "STOP_CALL":
           this.controller.leave();
-          this.setEndedState(true);
           break;
 
         case "TOGGLE_AUDIO":
