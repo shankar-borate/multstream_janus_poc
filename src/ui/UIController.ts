@@ -96,10 +96,14 @@ class UIController {
     });
 
     this.bus.on<boolean>("mute-changed", muted => {
+      this.audioMuted = muted;
+      this.btnMute.classList.toggle("danger", muted);
       this.btnMute.innerHTML =
         muted
           ? '<i class="fa-solid fa-microphone-slash"></i>'
           : '<i class="fa-solid fa-microphone"></i>';
+      this.applyConnectionOverlays();
+      this.bridge.emit({ type: "AUDIO_MUTED", muted });
     });
     this.bus.on<boolean>("video-mute-changed", muted => {
       this.videoMuted = muted;
@@ -175,14 +179,8 @@ class UIController {
 
     // AUDIO
     this.btnMute.onclick = () => {
-      Logger.user("Audio button clicked → toggle mute");
+      Logger.user("Audio button clicked -> toggle mute");
       this.controller.toggleMute();
-
-      this.audioMuted = !this.audioMuted;
-      this.btnMute.classList.toggle("danger", this.audioMuted);
-      this.applyConnectionOverlays();
-
-      this.bridge.emit({ type: "AUDIO_MUTED", muted: this.audioMuted });
     };
 
     // VIDEO
