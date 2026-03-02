@@ -634,13 +634,6 @@ class CallController {
     this.peerTelemetryByFeed.delete(feedId);
     this.remoteFeeds?.removeFeed(feedId);
     this.publishParticipants(cfg);
-    const remoteCount = this.roster.snapshot(cfg.roomId).participantIds
-      .filter((id: number) => id !== this.selfId)
-      .length;
-    if (!this.isLeaving && this.joinedRoom && remoteCount === 0) {
-      this.bus.emit("call-ended", { reason: "remote-left" });
-      this.leave();
-    }
   }
 
   // =====================================
