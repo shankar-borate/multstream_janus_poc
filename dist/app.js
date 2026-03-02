@@ -126,7 +126,10 @@ const APP_CONFIG = {
         minBitrateBps: 32000,
         maxBitrateBps: 1500000,
         minFramerate: 5,
-        maxFramerateCap: 30
+        maxFramerateCap: 30,
+        // Ordered by preference. Default: try VP9 first, then fallback to VP8.
+        videoCodecPreferenceOrder: ["vp9", "vp8"],
+        enableVideoCodecFallback: true
     },
     call: {
         reconnectDelayMs: 1000,
@@ -207,6 +210,236 @@ const APP_CONFIG = {
         disconnectedRetryMs: 4000
     }
 };
+class ErrorCodes {
+}
+ErrorCodes.JANUS_ROOM_NOT_FOUND = 426;
+ErrorCodes.JANUS_UNAUTHORIZED = 433;
+ErrorCodes.JANUS_FORBIDDEN = 428;
+ErrorCodes.JANUS_PARTICIPANT_ID_COLLISION = 436;
+class ErrorMessages {
+    static domElementNotFound(id) {
+        return `[DOM] Element not found: #${id}`;
+    }
+    static janusErrorStatus(err) {
+        return "Janus error: " + JSON.stringify(err);
+    }
+    static janusSessionCreateError(err) {
+        return "Janus session create error: " + JSON.stringify(err);
+    }
+    static janusAttachErrorStatus(err) {
+        return "Attach error: " + JSON.stringify(err);
+    }
+    static janusAttachErrorLog(err) {
+        return "Attach error: " + JSON.stringify(err);
+    }
+    static connectionStatusStatsError(message) {
+        return `[connection-status] ${message}`;
+    }
+    static remoteFeedRetryBlocked(feedId, blockedUntilIso) {
+        return `Remote feed ${feedId} retry blocked until ${blockedUntilIso}`;
+    }
+    static remoteFeedRetriesExhausted(feedId, maxAttempts, reason) {
+        return `Remote feed ${feedId} retries exhausted after ${maxAttempts} attempts. Cooldown started. reason=${reason}`;
+    }
+    static remoteFeedRetryScheduled(feedId, attempt, maxAttempts, delayMs, reason) {
+        return `Remote feed ${feedId} retry scheduled (${attempt}/${maxAttempts}, delay=${delayMs}ms): ${reason}`;
+    }
+    static remoteFeedAddSkippedCooldown(feedId) {
+        return `Remote feed ${feedId} add skipped during cooldown`;
+    }
+    static remoteFeedAttachSkippedNotReady(feedId) {
+        return `Remote feed ${feedId} attach skipped: Janus session not ready`;
+    }
+    static remoteFeedAttachTimedOut(feedId) {
+        return `Remote feed ${feedId} attach timed out`;
+    }
+    static remoteFeedDidNotStartInTime(feedId) {
+        return `Remote feed ${feedId} did not start media in time`;
+    }
+    static remoteFeedAttachErrorReason(err) {
+        return `attach error: ${JSON.stringify(err)}`;
+    }
+    static remoteFeedPluginError(feedId, data) {
+        return `Remote feed ${feedId} plugin error: ${JSON.stringify(data)}`;
+    }
+    static remoteFeedHangup(feedId, reason) {
+        return `Remote feed ${feedId} hangup: ${reason}`;
+    }
+    static remoteFeedTelemetryParseFailed(feedId) {
+        return `Remote feed ${feedId} telemetry parse failed`;
+    }
+    static remoteFeedDetachFailed(feedId) {
+        return `Remote feed ${feedId} detach failed`;
+    }
+    static callServerRetrying(attempt, maxAttempts) {
+        return `Video server call failed. Retrying (${attempt}/${maxAttempts})...`;
+    }
+    static callPeerRetrying(attempt, maxAttempts) {
+        return `TURN/peer connection failed. Retrying (${attempt}/${maxAttempts})...`;
+    }
+    static callRetryExhausted(kind, callId, roomId, reason) {
+        return `[retry] ${kind} retries exhausted. callId=${callId} roomId=${roomId} reason=${reason}`;
+    }
+    static callRetryScheduled(kind, attempt, maxAttempts, callId, roomId, reason) {
+        return `[retry] ${kind} scheduled (${attempt}/${maxAttempts}). callId=${callId} roomId=${roomId} reason=${reason}`;
+    }
+    static callJoinError(raw) {
+        return "Join error: " + String(raw);
+    }
+    static callJoinFailed(callId, roomId, requestId) {
+        return `[join] failed callId=${callId} roomId=${roomId} requestId=${requestId}`;
+    }
+    static callParticipantIdCollision(callId, roomId, participantId, errorCode, detail) {
+        return `[join] participant id collision callId=${callId} roomId=${roomId} participantId=${participantId} code=${errorCode} detail=${detail}`;
+    }
+    static callUnauthorizedJoin(callId, roomId, errorCode, detail) {
+        return `[join] unauthorized callId=${callId} roomId=${roomId} code=${errorCode} detail=${detail}`;
+    }
+    static callRoomMissingAfterCreate(errorCode) {
+        return `Room missing after create attempt (code=${errorCode})`;
+    }
+    static callPublisherJoinError(errorCode, detail) {
+        return `Publisher join error code=${errorCode} detail=${detail}`;
+    }
+    static callRoomJoinFailedAfterCreateAttempt(errorCode) {
+        return `Room join failed with ${errorCode} after create attempt`;
+    }
+    static callPublisherHangup(reason) {
+        return `Publisher hangup: ${reason}`;
+    }
+    static callPublisherPluginError(data) {
+        return `Publisher plugin error: ${JSON.stringify(data)}`;
+    }
+    static callListParticipantsTimeout(requestSeq, roomId) {
+        return `listparticipants timeout (request=${requestSeq}, room=${roomId})`;
+    }
+    static callListParticipantsError(requestSeq, err) {
+        return `listparticipants error (request=${requestSeq}): ${JSON.stringify(err)}`;
+    }
+    static callRemoteFeedRetryExhausted(callId, roomId, feedId, attempts) {
+        return `[remote-feed] retry exhausted callId=${callId} roomId=${roomId} feedId=${feedId} attempts=${attempts}`;
+    }
+    static callRecordingLog(message) {
+        return `[recording] ${message}`;
+    }
+    static callRecordingStartFailed(attempt) {
+        return `[recording] start failed (attempt ${attempt})`;
+    }
+    static callRecordingStopFailed(attempt) {
+        return `[recording] stop failed (attempt ${attempt})`;
+    }
+    static callRecordingStarted(roomRecordingId) {
+        return `Recording started (room): ${roomRecordingId}`;
+    }
+    static callLeaveErrorStatus(message) {
+        return "Leave error: " + message;
+    }
+    static callOfferErrorReason(err) {
+        return "Offer error: " + JSON.stringify(err);
+    }
+    static callRetryStatus(kind, attempt, maxAttempts) {
+        return kind === "server"
+            ? ErrorMessages.callServerRetrying(attempt, maxAttempts)
+            : ErrorMessages.callPeerRetrying(attempt, maxAttempts);
+    }
+    static callRetryLimitStatus(kind) {
+        return kind === "server"
+            ? ErrorMessages.CALL_SERVER_RETRY_LIMIT_REACHED
+            : ErrorMessages.CALL_PEER_RETRY_LIMIT_REACHED;
+    }
+}
+ErrorMessages.URL_ROOM_ID_ALERT = "This call link is missing a room ID, so we can't join yet. Please open the full link again or add ?roomId=1234 to the URL.";
+ErrorMessages.URL_ROOM_ID_MISSING = "Missing required query param: roomId";
+ErrorMessages.URL_ROOM_ID_INVALID = "Invalid query param: roomId must be a number";
+ErrorMessages.URL_PARTICIPANT_ID_INVALID = "Invalid query param: participantId must be a positive number";
+ErrorMessages.EVENT_BUS_HANDLER_FAILED_PREFIX = "EventBus handler failed for event=";
+ErrorMessages.PARENT_BRIDGE_POST_MESSAGE_FAILED = "ParentBridge postMessage failed";
+ErrorMessages.JANUS_INITIALIZED = "Janus initialized";
+ErrorMessages.JANUS_CREATING_SESSION = "Creating Janus session...";
+ErrorMessages.JANUS_NOT_READY_STATUS = "Janus not ready";
+ErrorMessages.JANUS_NOT_READY_ERROR = "Janus not ready";
+ErrorMessages.JANUS_PUBLISHER_DETACH_FAILED = "Publisher detach failed during destroy";
+ErrorMessages.JANUS_DESTROY_FAILED = "Janus destroy failed";
+ErrorMessages.MEDIA_LOCAL_VIDEO_PLAY_FAILED = "Local video play failed";
+ErrorMessages.MEDIA_STOP_REPLACED_REMOTE_TRACK_FAILED = "Stopping replaced remote track failed";
+ErrorMessages.MEDIA_REMOTE_VIDEO_PLAY_FAILED = "Remote video play failed";
+ErrorMessages.NETWORK_QUALITY_STATS_SAMPLING_FAILED = "[network-quality] stats sampling failed";
+ErrorMessages.NETWORK_QUALITY_DETAILS_ERROR = "src=webrtc-stats error";
+ErrorMessages.REMOTE_ATTACH_ERROR_PREFIX = "Remote attach error: ";
+ErrorMessages.REMOTE_ANSWER_ERROR_PREFIX = "Remote answer error: ";
+ErrorMessages.REMOTE_ATTACH_TIMEOUT_REASON = "attach timeout";
+ErrorMessages.REMOTE_HANGUP_REASON_UNKNOWN = "unknown";
+ErrorMessages.VB_NO_CANVAS_2D = "No canvas 2d";
+ErrorMessages.VB_NO_SOURCE_CANVAS_2D = "No source canvas 2d";
+ErrorMessages.VB_NO_MASK_CANVAS_2D = "No mask canvas 2d";
+ErrorMessages.VB_NO_BACKGROUND_CANVAS_2D = "No background canvas 2d";
+ErrorMessages.VB_SOURCE_TRACK_UNAVAILABLE = "Virtual background source video track unavailable";
+ErrorMessages.VB_INPUT_VIDEO_PLAY_FAILED = "Virtual background input video play failed";
+ErrorMessages.VB_SOURCE_RECOVERY_FAILED = "Virtual background source recovery failed";
+ErrorMessages.VB_SEGMENTATION_FRAME_FAILED = "Virtual background segmentation frame failed";
+ErrorMessages.VB_LOOP_FAILED = "Virtual background loop failed";
+ErrorMessages.VB_COMPOSITION_FAILED = "Virtual background composition failed";
+ErrorMessages.VB_ENABLED = "Virtual background enabled";
+ErrorMessages.VB_DISABLED = "Virtual background disabled";
+ErrorMessages.CALL_SERVER_RETRY_LIMIT_REACHED = "Video server call failed. Retry limit reached.";
+ErrorMessages.CALL_PEER_RETRY_LIMIT_REACHED = "TURN/peer connection failed. Retry limit reached.";
+ErrorMessages.CALL_PLUGIN_ATTACHED_CHECKING_ROOM = "Plugin attached. Checking room...";
+ErrorMessages.CALL_PUBLISHER_CLEANUP_RECOVERING = "Publisher cleanup. Recovering media connection...";
+ErrorMessages.CALL_ROOM_EXISTS_JOINING = "Room exists. Joining...";
+ErrorMessages.CALL_ROOM_NOT_FOUND_CREATING = "Room not found. Creating...";
+ErrorMessages.CALL_ROOM_CREATED_JOINING = "Room created. Joining...";
+ErrorMessages.CALL_PARTICIPANT_ID_IN_USE = "Participant ID already in use. Use a unique Participant ID and reconnect.";
+ErrorMessages.CALL_PARTICIPANT_ID_IN_USE_SECONDARY = "Open call with a unique participant ID.";
+ErrorMessages.CALL_AUTHORIZATION_FAILED = "Authorization failed for call join. Please refresh and re-authenticate.";
+ErrorMessages.CALL_AUTHORIZATION_FAILED_SECONDARY = "Retry after authentication.";
+ErrorMessages.CALL_JOINED_PUBLISHING = "Joined. Publishing...";
+ErrorMessages.CALL_REMOTE_VIDEO_UNSTABLE = "Remote video is unstable. Ask participant to reconnect.";
+ErrorMessages.CALL_PUBLISH_IGNORED_PLUGIN_NOT_READY = "Publish ignored: plugin not ready";
+ErrorMessages.CALL_OFFER_ERROR_RECOVERING = "Offer error. Recovering media path...";
+ErrorMessages.CALL_OFFER_ERROR_CONSOLE_TAG = "VCX_OFFER_ERROR";
+ErrorMessages.CALL_VIDEO_UNMUTE_SIGNALING_FAILED = "Video unmute signaling failed";
+ErrorMessages.CALL_VIDEO_MUTE_SIGNALING_FAILED = "Video mute signaling failed";
+ErrorMessages.CALL_VIDEO_TOGGLE_FAILED = "Video toggle failed";
+ErrorMessages.CALL_RECORDING_FAILED_ENDING = "Recording failed twice. Ending call.";
+ErrorMessages.CALL_RECORDING_STOPPED = "Recording stopped";
+ErrorMessages.CALL_RECORDING_START_RETRYING = "Recording start failed. Retrying...";
+ErrorMessages.CALL_RECORDING_STOP_RETRYING = "Recording stop failed. Retrying...";
+ErrorMessages.CALL_RECORDING_STOP_ON_LEAVE_FAILED = "[recording] stop on leave failed";
+ErrorMessages.CALL_LEAVE_SIGNALING_FAILED = "Leave signaling failed";
+ErrorMessages.CALL_LEFT = "Left";
+ErrorMessages.CALL_LEAVE_ERROR = "Leave error";
+ErrorMessages.CALL_SCREEN_SHARE_STARTED = "Screen share started";
+ErrorMessages.CALL_SCREEN_SHARE_STOPPED = "Screen share stopped";
+ErrorMessages.CALL_DISABLE_SCREEN_BEFORE_VB = "Disable screen share before virtual background";
+ErrorMessages.CALL_SCREEN_SHARE_TOGGLE_FAILED = "Screen share toggle failed";
+ErrorMessages.CALL_VB_TOGGLE_FAILED = "Virtual background toggle failed";
+ErrorMessages.CALL_STOP_STALE_CAMERA_TRACK_FAILED = "Stopping stale camera track failed";
+ErrorMessages.CALL_CAMERA_ACCESS_FAILED = "Camera access failed";
+ErrorMessages.CALL_REPLACE_VIDEO_TRACK_FAILED = "replaceVideoTrack failed";
+ErrorMessages.CALL_VIDEO_TRACK_SWITCH_FAILED = "Video track switch failed.";
+ErrorMessages.CALL_REPLACE_AUDIO_TRACK_FAILED = "replaceAudioTrack failed";
+ErrorMessages.CALL_SCREEN_AUDIO_MIXING_FAILED = "Screen-share audio mixing failed; using microphone only";
+ErrorMessages.CALL_STOP_MIXED_AUDIO_TRACK_FAILED = "Stopping mixed audio track failed";
+ErrorMessages.CALL_CLOSE_MIXED_AUDIO_CONTEXT_FAILED = "Closing mixed audio context failed";
+ErrorMessages.CALL_PUBLISHER_METRICS_FAILED = "Publisher metrics collection failed";
+ErrorMessages.CALL_SUBSCRIBER_METRICS_FAILED = "Subscriber metrics collection failed";
+ErrorMessages.CALL_MEDIA_SETUP_SET_PARAMETERS_ERROR = "VCX_SET_PARAMETERS_ERROR";
+ErrorMessages.CALL_MEDIA_SETUP_SET_PARAMETERS_HOOK_ERROR = "VCX_SET_PARAMETERS_HOOK_ERROR";
+ErrorMessages.CALL_CONNECTIVITY_HOOK_ERROR = "VCX_CONNECTIVITY hook error";
+ErrorMessages.CALL_FIX_CAMERA_MIC_AND_RECONNECT = "Fix camera/mic issue and reconnect the call.";
+ErrorMessages.CALL_SCREEN_VIDEO_TRACK_UNAVAILABLE = "Screen video track unavailable";
+ErrorMessages.CALL_CAMERA_MIC_TRACK_UNAVAILABLE = "Camera or microphone track unavailable";
+ErrorMessages.CALL_VB_OUTPUT_TRACK_UNAVAILABLE = "Virtual background output track unavailable";
+ErrorMessages.CALL_CAMERA_STREAM_UNAVAILABLE_AFTER_INIT = "Camera stream unavailable after initialization";
+ErrorMessages.MEDIA_PERMISSION_BLOCKED = "Camera/Mic access blocked. Allow permissions in browser settings, then retry.";
+ErrorMessages.MEDIA_DEVICE_MISSING = "Camera or microphone not found. Connect your devices, then retry.";
+ErrorMessages.MEDIA_DEVICE_BUSY = "Camera/Mic is busy in another app. Close other apps using them, then retry.";
+ErrorMessages.MEDIA_CONSTRAINT_UNSUPPORTED = "Camera/Mic settings are unsupported. Reconnect device or reset browser media settings.";
+ErrorMessages.MEDIA_CAMERA_MIC_GENERIC = "Unable to start camera/microphone. Check devices and browser permissions, then retry.";
+ErrorMessages.MEDIA_SCREEN_BLOCKED_OR_CANCELED = "Screen share was blocked or canceled. Select a window/screen and allow access.";
+ErrorMessages.MEDIA_SCREEN_CANCELED = "Screen share was canceled. Please try sharing again.";
+ErrorMessages.MEDIA_SCREEN_UNAVAILABLE_BUSY = "Screen share is unavailable right now. Close blocking apps and retry.";
+ErrorMessages.MEDIA_SCREEN_FAILED = "Screen share failed. Please try again.";
 class Logger {
     constructor(statusEl, infoEl) {
         this.statusEl = statusEl;
@@ -333,7 +566,7 @@ class EventBus {
             h(payload);
         }
         catch (e) {
-            Logger.error(`EventBus handler failed for event=${event}`, e);
+            Logger.error(`${ErrorMessages.EVENT_BUS_HANDLER_FAILED_PREFIX}${event}`, e);
         } });
     }
 }
@@ -363,20 +596,20 @@ class UrlConfig {
     static buildJoinConfig() {
         const roomIdRaw = this.getString("roomId", "");
         if (!roomIdRaw) {
-            alert("This call link is missing a room ID, so we can't join yet. Please open the full link again or add ?roomId=1234 to the URL.");
-            throw new Error("Missing required query param: roomId");
+            alert(ErrorMessages.URL_ROOM_ID_ALERT);
+            throw new Error(ErrorMessages.URL_ROOM_ID_MISSING);
         }
         const roomId = parseInt(roomIdRaw, 10);
         if (!Number.isFinite(roomId)) {
-            alert("This call link is missing a room ID, so we can't join yet. Please open the full link again or add ?roomId=1234 to the URL.");
-            throw new Error("Invalid query param: roomId must be a number");
+            alert(ErrorMessages.URL_ROOM_ID_ALERT);
+            throw new Error(ErrorMessages.URL_ROOM_ID_INVALID);
         }
         const participantIdRaw = this.getString("participantId", "");
         let participantId = undefined;
         if (participantIdRaw) {
             const parsedParticipantId = parseInt(participantIdRaw, 10);
             if (!Number.isFinite(parsedParticipantId) || parsedParticipantId <= 0) {
-                throw new Error("Invalid query param: participantId must be a positive number");
+                throw new Error(ErrorMessages.URL_PARTICIPANT_ID_INVALID);
             }
             participantId = parsedParticipantId;
         }
@@ -586,7 +819,7 @@ class ParentBridge {
             }
         }
         catch (e) {
-            Logger.error("ParentBridge postMessage failed", e);
+            Logger.error(ErrorMessages.PARENT_BRIDGE_POST_MESSAGE_FAILED, e);
         }
     }
     onCommand(cb) {
@@ -747,6 +980,171 @@ class HttpError extends Error {
         this.name = "HttpError";
     }
 }
+class JoinErrorUtils {
+    static parseErrorCode(errorCodeRaw) {
+        const code = Number(errorCodeRaw);
+        return Number.isFinite(code) ? code : null;
+    }
+    static extractErrorText(data) {
+        return String(data?.error || data?.error_reason || data?.reason || "").trim();
+    }
+    static isParticipantIdCollisionError(errorCode, errorText) {
+        const lower = errorText.toLowerCase();
+        if (errorCode === ErrorCodes.JANUS_PARTICIPANT_ID_COLLISION)
+            return true;
+        return lower.includes("id") &&
+            (lower.includes("exists") || lower.includes("exist") || lower.includes("already") || lower.includes("taken"));
+    }
+    static isUnauthorizedJoinError(errorCode, errorText) {
+        const lower = errorText.toLowerCase();
+        return lower.includes("unauthor") ||
+            lower.includes("forbidden") ||
+            errorCode === ErrorCodes.JANUS_UNAUTHORIZED ||
+            errorCode === ErrorCodes.JANUS_FORBIDDEN;
+    }
+    static isRoomMissingError(errorText) {
+        const lower = errorText.toLowerCase();
+        return lower.includes("no such room") || lower.includes("room not found");
+    }
+}
+class MediaErrorUtils {
+    static getErrorName(err) {
+        const anyErr = err;
+        return String(anyErr?.name || anyErr?.error?.name || "").trim();
+    }
+    static getErrorMessage(err) {
+        const anyErr = err;
+        return String(anyErr?.message || anyErr?.error?.message || "").trim();
+    }
+    static isMediaPermissionError(err) {
+        const name = this.getErrorName(err).toLowerCase();
+        const msg = this.getErrorMessage(err).toLowerCase();
+        return name === "notallowederror" ||
+            name === "permissiondeniederror" ||
+            name === "securityerror" ||
+            /permission|denied|not allowed/.test(msg);
+    }
+    static isMediaDeviceMissingError(err) {
+        const name = this.getErrorName(err).toLowerCase();
+        const msg = this.getErrorMessage(err).toLowerCase();
+        return name === "notfounderror" ||
+            name === "devicesnotfounderror" ||
+            /requested device not found|notfound/.test(msg);
+    }
+    static isMediaBusyError(err) {
+        const name = this.getErrorName(err).toLowerCase();
+        const msg = this.getErrorMessage(err).toLowerCase();
+        return name === "notreadableerror" ||
+            name === "trackstarterror" ||
+            /device in use|device is busy|could not start video source/.test(msg);
+    }
+    static isMediaConstraintError(err) {
+        const name = this.getErrorName(err).toLowerCase();
+        const msg = this.getErrorMessage(err).toLowerCase();
+        return name === "overconstrainederror" ||
+            name === "constraintnotsatisfiederror" ||
+            /overconstrained|constraint/.test(msg);
+    }
+    static getCameraMicErrorMessage(err) {
+        if (this.isMediaPermissionError(err)) {
+            return ErrorMessages.MEDIA_PERMISSION_BLOCKED;
+        }
+        if (this.isMediaDeviceMissingError(err)) {
+            return ErrorMessages.MEDIA_DEVICE_MISSING;
+        }
+        if (this.isMediaBusyError(err)) {
+            return ErrorMessages.MEDIA_DEVICE_BUSY;
+        }
+        if (this.isMediaConstraintError(err)) {
+            return ErrorMessages.MEDIA_CONSTRAINT_UNSUPPORTED;
+        }
+        return ErrorMessages.MEDIA_CAMERA_MIC_GENERIC;
+    }
+    static getScreenShareErrorMessage(err) {
+        if (this.isMediaPermissionError(err)) {
+            return ErrorMessages.MEDIA_SCREEN_BLOCKED_OR_CANCELED;
+        }
+        if (this.getErrorName(err).toLowerCase() === "aborterror") {
+            return ErrorMessages.MEDIA_SCREEN_CANCELED;
+        }
+        if (this.isMediaBusyError(err)) {
+            return ErrorMessages.MEDIA_SCREEN_UNAVAILABLE_BUSY;
+        }
+        return ErrorMessages.MEDIA_SCREEN_FAILED;
+    }
+    static classifyPublishError(err) {
+        if (this.isMediaPermissionError(err) ||
+            this.isMediaDeviceMissingError(err) ||
+            this.isMediaBusyError(err) ||
+            this.isMediaConstraintError(err)) {
+            return {
+                userMessage: this.getCameraMicErrorMessage(err),
+                retryable: false
+            };
+        }
+        return {
+            userMessage: ErrorMessages.CALL_OFFER_ERROR_RECOVERING,
+            retryable: true
+        };
+    }
+}
+class CodecSupportUtil {
+    static normalizeCodec(raw) {
+        const normalized = String(raw ?? "").trim().toLowerCase();
+        if (normalized === "vp8" || normalized === "vp9")
+            return normalized;
+        return null;
+    }
+    static getConfiguredVideoCodecOrder() {
+        const configured = Array.isArray(APP_CONFIG.media.videoCodecPreferenceOrder)
+            ? APP_CONFIG.media.videoCodecPreferenceOrder
+            : ["vp9", "vp8"];
+        const order = [];
+        configured.forEach((codec) => {
+            const normalized = this.normalizeCodec(codec);
+            if (!normalized)
+                return;
+            if (order.includes(normalized))
+                return;
+            order.push(normalized);
+        });
+        if (order.length === 0) {
+            order.push("vp9", "vp8");
+        }
+        else if (APP_CONFIG.media.enableVideoCodecFallback && !order.includes("vp8")) {
+            order.push("vp8");
+        }
+        return order;
+    }
+    static getRoomVideoCodecList() {
+        return this.getConfiguredVideoCodecOrder().join(",");
+    }
+    static getBrowserSupportedVideoCodecs() {
+        const supported = new Set();
+        try {
+            const caps = typeof RTCRtpSender !== "undefined" && typeof RTCRtpSender.getCapabilities === "function"
+                ? RTCRtpSender.getCapabilities("video")
+                : null;
+            caps?.codecs?.forEach((codec) => {
+                const mimeType = String(codec?.mimeType || "").toLowerCase();
+                if (mimeType.endsWith("/vp9"))
+                    supported.add("vp9");
+                if (mimeType.endsWith("/vp8"))
+                    supported.add("vp8");
+            });
+        }
+        catch { }
+        return supported;
+    }
+    static getPublishCodecAttemptOrder() {
+        const preferred = this.getConfiguredVideoCodecOrder();
+        const supported = this.getBrowserSupportedVideoCodecs();
+        if (supported.size === 0)
+            return preferred;
+        const allowed = preferred.filter(codec => supported.has(codec));
+        return allowed.length > 0 ? allowed : preferred;
+    }
+}
 class ParticipantRoster {
     constructor() {
         this.ids = new Set();
@@ -775,7 +1173,7 @@ class MediaManager {
         video.play().catch((e) => {
             if (e?.name === "AbortError")
                 return;
-            Logger.error("Local video play failed", e);
+            Logger.error(ErrorMessages.MEDIA_LOCAL_VIDEO_PLAY_FAILED, e);
         });
     }
     setRemoteTrack(video, track) {
@@ -788,7 +1186,7 @@ class MediaManager {
                     t.stop();
                 }
                 catch (e) {
-                    Logger.error("Stopping replaced remote track failed", e);
+                    Logger.error(ErrorMessages.MEDIA_STOP_REPLACED_REMOTE_TRACK_FAILED, e);
                 }
             }
         });
@@ -805,7 +1203,7 @@ class MediaManager {
             // Normal when track/srcObject is reloaded during renegotiation.
             if (e?.name === "AbortError")
                 return;
-            Logger.error("Remote video play failed", e);
+            Logger.error(ErrorMessages.MEDIA_REMOTE_VIDEO_PLAY_FAILED, e);
         })
             .finally(() => {
             this.remotePlayPromise = null;
@@ -858,22 +1256,22 @@ class VirtualBackgroundManager {
         this.canvas = document.createElement("canvas");
         const c = this.canvas.getContext("2d");
         if (!c)
-            throw new Error("No canvas 2d");
+            throw new Error(ErrorMessages.VB_NO_CANVAS_2D);
         this.ctx = c;
         this.srcCanvas = document.createElement("canvas");
         const sc = this.srcCanvas.getContext("2d");
         if (!sc)
-            throw new Error("No source canvas 2d");
+            throw new Error(ErrorMessages.VB_NO_SOURCE_CANVAS_2D);
         this.srcCtx = sc;
         this.maskCanvas = document.createElement("canvas");
         const mc = this.maskCanvas.getContext("2d");
         if (!mc)
-            throw new Error("No mask canvas 2d");
+            throw new Error(ErrorMessages.VB_NO_MASK_CANVAS_2D);
         this.maskCtx = mc;
         this.bgCanvas = document.createElement("canvas");
         const bc = this.bgCanvas.getContext("2d");
         if (!bc)
-            throw new Error("No background canvas 2d");
+            throw new Error(ErrorMessages.VB_NO_BACKGROUND_CANVAS_2D);
         this.bgCtx = bc;
         this.inVideo = document.createElement("video");
         this.inVideo.autoplay = true;
@@ -939,7 +1337,7 @@ class VirtualBackgroundManager {
         const cloned = this.cloneVideoOnlyStream(stream);
         const track = cloned.getVideoTracks()[0];
         if (!track) {
-            throw new Error("Virtual background source video track unavailable");
+            throw new Error(ErrorMessages.VB_SOURCE_TRACK_UNAVAILABLE);
         }
         this.releaseSourceStream();
         this.srcStream = cloned;
@@ -950,7 +1348,7 @@ class VirtualBackgroundManager {
         await this.inVideo.play().catch((e) => {
             if (e?.name === "AbortError")
                 return;
-            Logger.error("Virtual background input video play failed", e);
+            Logger.error(ErrorMessages.VB_INPUT_VIDEO_PLAY_FAILED, e);
         });
     }
     ensureSegmentation() {
@@ -976,7 +1374,7 @@ class VirtualBackgroundManager {
         this.loop();
         this.outStream = this.canvas.captureStream(24);
         Logger.user("Virtual background enabled");
-        Logger.setStatus("Virtual background enabled");
+        Logger.setStatus(ErrorMessages.VB_ENABLED);
         return this.outStream;
     }
     disable() {
@@ -985,7 +1383,7 @@ class VirtualBackgroundManager {
         this.outStream = null;
         this.releaseSourceStream();
         Logger.user("Virtual background disabled");
-        Logger.setStatus("Virtual background disabled");
+        Logger.setStatus(ErrorMessages.VB_DISABLED);
     }
     getSourceStream() { return this.srcStream; }
     getOutputStream() { return this.outStream; }
@@ -1005,7 +1403,7 @@ class VirtualBackgroundManager {
             Logger.user("Virtual background source recovered");
         }
         catch (e) {
-            Logger.error("Virtual background source recovery failed", e);
+            Logger.error(ErrorMessages.VB_SOURCE_RECOVERY_FAILED, e);
         }
     }
     async loop() {
@@ -1034,7 +1432,7 @@ class VirtualBackgroundManager {
                             this.segInFlight = true;
                             void this.seg.send({ image: this.inVideo })
                                 .catch((e) => {
-                                Logger.error("Virtual background segmentation frame failed", e);
+                                Logger.error(ErrorMessages.VB_SEGMENTATION_FRAME_FAILED, e);
                             })
                                 .finally(() => {
                                 this.segInFlight = false;
@@ -1043,7 +1441,7 @@ class VirtualBackgroundManager {
                     }
                 }
                 catch (e) {
-                    Logger.error("Virtual background loop failed", e);
+                    Logger.error(ErrorMessages.VB_LOOP_FAILED, e);
                 }
             }
             else {
@@ -1120,7 +1518,7 @@ class VirtualBackgroundManager {
             this.ctx.putImageData(out, 0, 0);
         }
         catch (e) {
-            Logger.error("Virtual background composition failed", e);
+            Logger.error(ErrorMessages.VB_COMPOSITION_FAILED, e);
         }
     }
     getMaskMode(maskData, w, h) {
@@ -1269,8 +1667,8 @@ class NetworkQualityManager {
                 cb("Low", "Low", "src=webrtc-stats unavailable");
             }
             catch (e) {
-                Logger.error("[network-quality] stats sampling failed", e);
-                cb("Low", "Low", "src=webrtc-stats error");
+                Logger.error(ErrorMessages.NETWORK_QUALITY_STATS_SAMPLING_FAILED, e);
+                cb("Low", "Low", ErrorMessages.NETWORK_QUALITY_DETAILS_ERROR);
             }
             finally {
                 this.sampleBusy = false;
@@ -1969,7 +2367,7 @@ class ConnectionStatusEngine {
         if (now - this.lastStatsErrorLogAt < 5000)
             return;
         this.lastStatsErrorLogAt = now;
-        Logger.error(`[connection-status] ${message}`, err);
+        Logger.error(ErrorMessages.connectionStatusStatsError(message), err);
     }
 }
 class JanusGateway {
@@ -1982,7 +2380,7 @@ class JanusGateway {
         Janus.init({
             debug: APP_CONFIG.janus.initDebug,
             callback: () => {
-                Logger.setStatus("Janus initialized");
+                Logger.setStatus(ErrorMessages.JANUS_INITIALIZED);
                 Logger.user("Janus.init done");
             }
         });
@@ -1992,7 +2390,7 @@ class JanusGateway {
      * IMPORTANT: pass iceServers from IMS payload.PC_CONFIG.iceServers
      */
     createSession(server, iceServers, ok, destroyed, onError) {
-        Logger.setStatus("Creating Janus session...");
+        Logger.setStatus(ErrorMessages.JANUS_CREATING_SESSION);
         Logger.user(`Creating Janus session: ${server}`);
         this.janus = new Janus({
             server,
@@ -2001,8 +2399,8 @@ class JanusGateway {
             iceServers: iceServers ?? [],
             success: ok,
             error: (e) => {
-                Logger.setStatus("Janus error: " + JSON.stringify(e));
-                Logger.error("Janus session create error: " + JSON.stringify(e));
+                Logger.setStatus(ErrorMessages.janusErrorStatus(e));
+                Logger.error(ErrorMessages.janusSessionCreateError(e));
                 onError?.(e);
             },
             destroyed: () => {
@@ -2013,9 +2411,9 @@ class JanusGateway {
     }
     attachPublisher(onAttached, onMessage, onLocalTrack, onCleanup, onError) {
         if (!this.janus) {
-            Logger.setStatus("Janus not ready");
+            Logger.setStatus(ErrorMessages.JANUS_NOT_READY_STATUS);
             Logger.user("attachPublisher called but Janus session is null");
-            onError?.(new Error("Janus not ready"));
+            onError?.(new Error(ErrorMessages.JANUS_NOT_READY_ERROR));
             return;
         }
         Logger.user("Attaching videoroom publisher plugin...");
@@ -2028,8 +2426,8 @@ class JanusGateway {
                 onAttached(h);
             },
             error: (e) => {
-                Logger.setStatus("Attach error: " + JSON.stringify(e));
-                Logger.error("Attach error: " + JSON.stringify(e));
+                Logger.setStatus(ErrorMessages.janusAttachErrorStatus(e));
+                Logger.error(ErrorMessages.janusAttachErrorLog(e));
                 onError?.(e);
             },
             onmessage: (msg, jsep) => {
@@ -2056,14 +2454,14 @@ class JanusGateway {
             this.publisher?.detach?.();
         }
         catch (e) {
-            Logger.error("Publisher detach failed during destroy", e);
+            Logger.error(ErrorMessages.JANUS_PUBLISHER_DETACH_FAILED, e);
         }
         this.publisher = null;
         try {
             this.janus?.destroy?.();
         }
         catch (e) {
-            Logger.error("Janus destroy failed", e);
+            Logger.error(ErrorMessages.JANUS_DESTROY_FAILED, e);
         }
         this.janus = null;
     }
@@ -2117,7 +2515,7 @@ class RemoteFeedManager {
         const now = Date.now();
         const blockedUntil = this.retryBlockedUntil.get(feedId) ?? 0;
         if (blockedUntil > now) {
-            Logger.warn(`Remote feed ${feedId} retry blocked until ${new Date(blockedUntil).toISOString()}`);
+            Logger.warn(ErrorMessages.remoteFeedRetryBlocked(feedId, new Date(blockedUntil).toISOString()));
             return;
         }
         const maxAttempts = APP_CONFIG.call.remoteFeedRetryMaxAttempts;
@@ -2127,7 +2525,7 @@ class RemoteFeedManager {
             const cooldownUntil = now + APP_CONFIG.call.remoteFeedRetryCooldownMs;
             this.retryAttempts.set(feedId, 0);
             this.retryBlockedUntil.set(feedId, cooldownUntil);
-            Logger.error(`Remote feed ${feedId} retries exhausted after ${maxAttempts} attempts. Cooldown started. reason=${reason}`);
+            Logger.error(ErrorMessages.remoteFeedRetriesExhausted(feedId, maxAttempts, reason));
             this.observer?.onRemoteFeedRetryExhausted?.(feedId, maxAttempts);
             return;
         }
@@ -2137,7 +2535,7 @@ class RemoteFeedManager {
         const backoffDelay = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, Math.max(0, attempt - 1)));
         const jitter = Math.floor(Math.random() * Math.max(1, jitterMaxMs));
         const delayMs = backoffDelay + jitter;
-        Logger.warn(`Remote feed ${feedId} retry scheduled (${attempt}/${maxAttempts}, delay=${delayMs}ms): ${reason}`);
+        Logger.warn(ErrorMessages.remoteFeedRetryScheduled(feedId, attempt, maxAttempts, delayMs, reason));
         const t = window.setTimeout(() => {
             this.retryTimers.delete(feedId);
             this.addFeed(feedId);
@@ -2149,14 +2547,14 @@ class RemoteFeedManager {
             return;
         const blockedUntil = this.retryBlockedUntil.get(feedId) ?? 0;
         if (blockedUntil > Date.now()) {
-            Logger.warn(`Remote feed ${feedId} add skipped during cooldown`);
+            Logger.warn(ErrorMessages.remoteFeedAddSkippedCooldown(feedId));
             return;
         }
         if (blockedUntil !== 0) {
             this.retryBlockedUntil.delete(feedId);
         }
         if (!this.janus) {
-            Logger.error(`Remote feed ${feedId} attach skipped: Janus session not ready`);
+            Logger.error(ErrorMessages.remoteFeedAttachSkippedNotReady(feedId));
             return;
         }
         this.clearRetryTimer(feedId);
@@ -2167,8 +2565,8 @@ class RemoteFeedManager {
                 return;
             this.pendingFeedAttach.delete(feedId);
             this.clearAttachTimer(feedId);
-            Logger.error(`Remote feed ${feedId} attach timed out`);
-            this.scheduleReattach(feedId, "attach timeout");
+            Logger.error(ErrorMessages.remoteFeedAttachTimedOut(feedId));
+            this.scheduleReattach(feedId, ErrorMessages.REMOTE_ATTACH_TIMEOUT_REASON);
         }, APP_CONFIG.call.remoteFeedAttachTimeoutMs);
         this.pendingAttachTimers.set(feedId, attachTimer);
         let remoteHandle = null;
@@ -2185,7 +2583,7 @@ class RemoteFeedManager {
                 const startTimer = window.setTimeout(() => {
                     if (!this.feeds.has(feedId))
                         return;
-                    Logger.error(`Remote feed ${feedId} did not start media in time`);
+                    Logger.error(ErrorMessages.remoteFeedDidNotStartInTime(feedId));
                     this.removeFeed(feedId, true, true);
                 }, APP_CONFIG.call.remoteFeedStartTimeoutMs);
                 this.feedStartTimers.set(feedId, startTimer);
@@ -2194,16 +2592,16 @@ class RemoteFeedManager {
             error: (e) => {
                 this.pendingFeedAttach.delete(feedId);
                 this.clearAttachTimer(feedId);
-                Logger.error("Remote attach error: " + JSON.stringify(e));
-                this.scheduleReattach(feedId, `attach error: ${JSON.stringify(e)}`);
+                Logger.error(ErrorMessages.REMOTE_ATTACH_ERROR_PREFIX + JSON.stringify(e));
+                this.scheduleReattach(feedId, ErrorMessages.remoteFeedAttachErrorReason(e));
             },
             onmessage: (msg, jsep) => {
                 const data = msg?.plugindata?.data;
                 if (data?.error || data?.error_code) {
-                    Logger.error(`Remote feed ${feedId} plugin error: ${JSON.stringify(data)}`);
+                    Logger.error(ErrorMessages.remoteFeedPluginError(feedId, data));
                 }
                 if (msg?.janus === "hangup") {
-                    Logger.error(`Remote feed ${feedId} hangup: ${msg?.reason || "unknown"}`);
+                    Logger.error(ErrorMessages.remoteFeedHangup(feedId, msg?.reason || ErrorMessages.REMOTE_HANGUP_REASON_UNKNOWN));
                     this.removeFeed(feedId, true, true);
                     return;
                 }
@@ -2226,7 +2624,7 @@ class RemoteFeedManager {
                         tracks: answerTracks,
                         success: (ans) => remoteHandle.send({ message: { request: "start", room: this.roomId }, jsep: ans }),
                         error: (e) => {
-                            Logger.error("Remote answer error: " + JSON.stringify(e));
+                            Logger.error(ErrorMessages.REMOTE_ANSWER_ERROR_PREFIX + JSON.stringify(e));
                             this.removeFeed(feedId, true, true);
                         }
                     });
@@ -2242,7 +2640,7 @@ class RemoteFeedManager {
                     this.observer?.onRemoteTelemetry?.(feedId, parsed);
                 }
                 catch (e) {
-                    Logger.error(`Remote feed ${feedId} telemetry parse failed`, e);
+                    Logger.error(ErrorMessages.remoteFeedTelemetryParseFailed(feedId), e);
                 }
             },
             onlocaltrack: () => { },
@@ -2295,7 +2693,7 @@ class RemoteFeedManager {
                     h.detach();
                 }
                 catch (e) {
-                    Logger.error(`Remote feed ${id} detach failed`, e);
+                    Logger.error(ErrorMessages.remoteFeedDetachFailed(id), e);
                 }
             }
             this.feeds.delete(id);
@@ -2343,7 +2741,7 @@ class CallController {
         this.screenEnabled = false;
         this.vbEnabled = false;
         this.screenManager = new ScreenShareManager();
-        // ✅ CLEAN recording state
+        // âœ… CLEAN recording state
         this.recording = false;
         this.currentRecordingId = null;
         this.currentRoomId = null;
@@ -2437,8 +2835,8 @@ class CallController {
         }
         catch (e) {
             const requestId = String(e?.requestId || "n/a");
-            Logger.error(`[join] failed callId=${this.callId} roomId=${cfg.roomId} requestId=${requestId}`, e);
-            this.scheduleServerRetry("Join error: " + (e?.message || e));
+            Logger.error(ErrorMessages.callJoinFailed(this.callId ?? "n/a", cfg.roomId, requestId), e);
+            this.scheduleServerRetry(ErrorMessages.callJoinError(e?.message || e));
         }
     }
     clearRetryTimer() {
@@ -2516,24 +2914,19 @@ class CallController {
         }
         if (attempt > maxAttempts) {
             this.connectionEngine.onFailed();
-            if (kind === "server") {
-                Logger.setStatus("Video server call failed. Retry limit reached.");
-            }
-            else {
-                Logger.setStatus("TURN/peer connection failed. Retry limit reached.");
-            }
-            Logger.error(`[retry] ${kind} retries exhausted. callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} reason=${reason}`);
+            Logger.setStatus(ErrorMessages.callRetryLimitStatus(kind));
+            Logger.error(ErrorMessages.callRetryExhausted(kind, this.callId ?? "n/a", cfg.roomId, reason));
             return;
         }
         if (kind === "server") {
             this.connectionEngine.onServerRetrying(attempt, maxAttempts);
-            Logger.setStatus(`Video server call failed. Retrying (${attempt}/${maxAttempts})...`);
+            Logger.setStatus(ErrorMessages.callServerRetrying(attempt, maxAttempts));
         }
         else {
             this.connectionEngine.onPeerRetrying(attempt, maxAttempts);
-            Logger.setStatus(`TURN/peer connection failed. Retrying (${attempt}/${maxAttempts})...`);
+            Logger.setStatus(ErrorMessages.callPeerRetrying(attempt, maxAttempts));
         }
-        Logger.warn(`[retry] ${kind} scheduled (${attempt}/${maxAttempts}). callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} reason=${reason}`);
+        Logger.warn(ErrorMessages.callRetryScheduled(kind, attempt, maxAttempts, this.callId ?? "n/a", cfg.roomId, reason));
         this.cleanupForRetry();
         this.retryTimer = window.setTimeout(() => {
             this.retryTimer = null;
@@ -2555,7 +2948,7 @@ class CallController {
             this.currentRecordingId = null;
             this.bus.emit("recording-changed", false);
             this.connectionEngine.onPublisherAttached();
-            Logger.setStatus("Plugin attached. Checking room...");
+            Logger.setStatus(ErrorMessages.CALL_PLUGIN_ATTACHED_CHECKING_ROOM);
             this.ensureRoomThenJoin(cfg);
         }, (msg, jsep) => this.onPublisherMessage(cfg, msg, jsep), (track, on) => {
             if (track && typeof track.kind === "string") {
@@ -2565,7 +2958,7 @@ class CallController {
             if (this.isLeaving || this.suppressPublisherCleanupRetry)
                 return;
             this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts);
-            Logger.setStatus("Publisher cleanup. Recovering media connection...");
+            Logger.setStatus(ErrorMessages.CALL_PUBLISHER_CLEANUP_RECOVERING);
             this.schedulePeerRetry("Publisher cleanup");
         }, (e) => {
             this.scheduleServerRetry(`Attach publisher failed: ${JSON.stringify(e)}`);
@@ -2583,11 +2976,11 @@ class CallController {
                 const data = this.getVideoRoomData(res);
                 const exists = !!data?.exists;
                 if (exists) {
-                    Logger.setStatus(`Room exists. Joining...`);
+                    Logger.setStatus(ErrorMessages.CALL_ROOM_EXISTS_JOINING);
                     this.sendPublisherJoin(cfg);
                 }
                 else {
-                    Logger.setStatus(`Room not found. Creating...`);
+                    Logger.setStatus(ErrorMessages.CALL_ROOM_NOT_FOUND_CREATING);
                     this.roomCreateAttempted = true;
                     this.sendCreateRoom(cfg);
                 }
@@ -2621,10 +3014,11 @@ class CallController {
                 request: "create",
                 room: cfg.roomId,
                 publishers: APP_CONFIG.videoroom.maxPublishers,
-                description: `Room ${cfg.roomId}`
+                description: `Room ${cfg.roomId}`,
+                videocodec: CodecSupportUtil.getRoomVideoCodecList()
             },
             success: () => {
-                Logger.setStatus("Room created. Joining...");
+                Logger.setStatus(ErrorMessages.CALL_ROOM_CREATED_JOINING);
                 this.sendPublisherJoin(cfg);
             },
             error: () => {
@@ -2632,62 +3026,54 @@ class CallController {
             }
         });
     }
-    isParticipantIdCollisionError(errorCode, errorText) {
-        const lower = errorText.toLowerCase();
-        if (errorCode === 436)
-            return true;
-        return lower.includes("id") &&
-            (lower.includes("exists") || lower.includes("exist") || lower.includes("already") || lower.includes("taken"));
-    }
     handlePublisherJoinError(cfg, data, errorCodeRaw) {
-        const errorCode = Number.isFinite(Number(errorCodeRaw)) ? Number(errorCodeRaw) : null;
-        const errorText = String(data?.error || data?.error_reason || data?.reason || "").trim();
-        const lower = errorText.toLowerCase();
-        if (errorCode === 426) {
+        const errorCode = JoinErrorUtils.parseErrorCode(errorCodeRaw);
+        const errorText = JoinErrorUtils.extractErrorText(data);
+        if (errorCode === ErrorCodes.JANUS_ROOM_NOT_FOUND) {
             if (!this.roomCreateAttempted) {
                 this.roomCreateAttempted = true;
                 this.sendCreateRoom(cfg);
             }
             else {
-                this.scheduleServerRetry("Room join failed with 426 after create attempt");
+                this.scheduleServerRetry(ErrorMessages.callRoomJoinFailedAfterCreateAttempt(String(ErrorCodes.JANUS_ROOM_NOT_FOUND)));
             }
             return true;
         }
-        if (this.isParticipantIdCollisionError(errorCode, errorText)) {
-            const msg = "Participant ID already in use. Use a unique Participant ID and reconnect.";
-            Logger.error(`[join] participant id collision callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} participantId=${cfg.participantId ?? "n/a"} code=${errorCode ?? "n/a"} detail=${errorText}`);
+        if (JoinErrorUtils.isParticipantIdCollisionError(errorCode, errorText)) {
+            const msg = ErrorMessages.CALL_PARTICIPANT_ID_IN_USE;
+            Logger.error(ErrorMessages.callParticipantIdCollision(this.callId ?? "n/a", cfg.roomId, String(cfg.participantId ?? "n/a"), String(errorCode ?? "n/a"), errorText));
             Logger.setStatus(msg);
-            this.connectionEngine.setFatalError(msg, "Open call with a unique participant ID.");
+            this.connectionEngine.setFatalError(msg, ErrorMessages.CALL_PARTICIPANT_ID_IN_USE_SECONDARY);
             this.bus.emit("joined", false);
             return true;
         }
-        const unauthorized = lower.includes("unauthor") || lower.includes("forbidden") || errorCode === 433 || errorCode === 428;
+        const unauthorized = JoinErrorUtils.isUnauthorizedJoinError(errorCode, errorText);
         if (unauthorized) {
-            const msg = "Authorization failed for call join. Please refresh and re-authenticate.";
-            Logger.error(`[join] unauthorized callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} code=${errorCode ?? "n/a"} detail=${errorText}`);
+            const msg = ErrorMessages.CALL_AUTHORIZATION_FAILED;
+            Logger.error(ErrorMessages.callUnauthorizedJoin(this.callId ?? "n/a", cfg.roomId, String(errorCode ?? "n/a"), errorText));
             Logger.setStatus(msg);
-            this.connectionEngine.setFatalError(msg, "Retry after authentication.");
+            this.connectionEngine.setFatalError(msg, ErrorMessages.CALL_AUTHORIZATION_FAILED_SECONDARY);
             this.bus.emit("joined", false);
             return true;
         }
-        const roomMissing = lower.includes("no such room") || lower.includes("room not found");
+        const roomMissing = JoinErrorUtils.isRoomMissingError(errorText);
         if (roomMissing) {
             if (!this.roomCreateAttempted) {
                 this.roomCreateAttempted = true;
                 this.sendCreateRoom(cfg);
             }
             else {
-                this.scheduleServerRetry(`Room missing after create attempt (code=${errorCode ?? "n/a"})`);
+                this.scheduleServerRetry(ErrorMessages.callRoomMissingAfterCreate(String(errorCode ?? "n/a")));
             }
             return true;
         }
-        this.scheduleServerRetry(`Publisher join error code=${errorCode ?? "n/a"} detail=${errorText || JSON.stringify(data)}`);
+        this.scheduleServerRetry(ErrorMessages.callPublisherJoinError(String(errorCode ?? "n/a"), errorText || JSON.stringify(data)));
         return true;
     }
     onPublisherMessage(cfg, msg, jsep) {
         if (msg?.janus === "hangup") {
             const reason = String(msg?.reason || "Peer hangup");
-            Logger.error(`Publisher hangup: ${reason}`);
+            Logger.error(ErrorMessages.callPublisherHangup(reason));
             if (reason.toLowerCase().includes("ice")) {
                 this.schedulePeerRetry(`Publisher hangup: ${reason}`);
             }
@@ -2697,7 +3083,7 @@ class CallController {
         const event = data["videoroom"];
         const errorCode = data["error_code"];
         if (data?.error || errorCode) {
-            Logger.error(`Publisher plugin error: ${JSON.stringify(data)}`);
+            Logger.error(ErrorMessages.callPublisherPluginError(data));
             if (!this.joinedRoom && this.handlePublisherJoinError(cfg, data, errorCode)) {
                 return;
             }
@@ -2714,7 +3100,7 @@ class CallController {
             this.privateId = data["private_id"];
             this.selfId = myId;
             this.roster.setSelf(myId);
-            Logger.setStatus("Joined. Publishing...");
+            Logger.setStatus(ErrorMessages.CALL_JOINED_PUBLISHING);
             this.remoteFeeds = new RemoteFeedManager(this.gateway.getJanus(), cfg.roomId, this.privateId, this.gateway.getOpaqueId(), this.media, this.remoteVideo, {
                 onSubscriberPcReady: (feedId, pc) => {
                     this.subscriberPcs.set(feedId, pc);
@@ -2744,8 +3130,8 @@ class CallController {
                 onRemoteFeedRetryExhausted: (feedId, attempts) => {
                     this.subscriberPcs.delete(feedId);
                     this.connectionEngine.onRemoteFeedRetryExhausted(feedId, attempts);
-                    Logger.setStatus("Remote video is unstable. Ask participant to reconnect.");
-                    Logger.error(`[remote-feed] retry exhausted callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} feedId=${feedId} attempts=${attempts}`);
+                    Logger.setStatus(ErrorMessages.CALL_REMOTE_VIDEO_UNSTABLE);
+                    Logger.error(ErrorMessages.callRemoteFeedRetryExhausted(this.callId ?? "n/a", cfg.roomId, feedId, attempts));
                 }
             });
             this.publish();
@@ -2831,7 +3217,7 @@ class CallController {
                 return;
             this.participantSyncInFlight = false;
             this.participantSyncRequestTimer = null;
-            Logger.error(`listparticipants timeout (request=${requestSeq}, room=${cfg.roomId})`);
+            Logger.error(ErrorMessages.callListParticipantsTimeout(requestSeq, cfg.roomId));
         }, APP_CONFIG.call.participantSyncRequestTimeoutMs);
         this.plugin.send({
             message: { request: "listparticipants", room: cfg.roomId },
@@ -2869,7 +3255,7 @@ class CallController {
                     return;
                 this.clearParticipantSyncRequestTimer();
                 this.participantSyncInFlight = false;
-                Logger.error(`listparticipants error (request=${requestSeq}): ${JSON.stringify(e)}`);
+                Logger.error(ErrorMessages.callListParticipantsError(requestSeq, e));
             }
         });
     }
@@ -2913,86 +3299,12 @@ class CallController {
             encodings[0].maxFramerate = maxFramerate;
             p.encodings = encodings;
             sender.setParameters(p).catch((e) => {
-                Logger.error("VCX_SET_PARAMETERS_ERROR", e);
+                Logger.error(ErrorMessages.CALL_MEDIA_SETUP_SET_PARAMETERS_ERROR, e);
             });
         }
         catch (e) {
-            Logger.error("VCX_SET_PARAMETERS_HOOK_ERROR", e);
+            Logger.error(ErrorMessages.CALL_MEDIA_SETUP_SET_PARAMETERS_HOOK_ERROR, e);
         }
-    }
-    getErrorName(err) {
-        return String(err?.name || err?.error?.name || "").trim();
-    }
-    getErrorMessage(err) {
-        return String(err?.message || err?.error?.message || "").trim();
-    }
-    isMediaPermissionError(err) {
-        const name = this.getErrorName(err).toLowerCase();
-        const msg = this.getErrorMessage(err).toLowerCase();
-        return name === "notallowederror" ||
-            name === "permissiondeniederror" ||
-            name === "securityerror" ||
-            /permission|denied|not allowed/.test(msg);
-    }
-    isMediaDeviceMissingError(err) {
-        const name = this.getErrorName(err).toLowerCase();
-        const msg = this.getErrorMessage(err).toLowerCase();
-        return name === "notfounderror" ||
-            name === "devicesnotfounderror" ||
-            /requested device not found|notfound/.test(msg);
-    }
-    isMediaBusyError(err) {
-        const name = this.getErrorName(err).toLowerCase();
-        const msg = this.getErrorMessage(err).toLowerCase();
-        return name === "notreadableerror" ||
-            name === "trackstarterror" ||
-            /device in use|device is busy|could not start video source/.test(msg);
-    }
-    isMediaConstraintError(err) {
-        const name = this.getErrorName(err).toLowerCase();
-        const msg = this.getErrorMessage(err).toLowerCase();
-        return name === "overconstrainederror" ||
-            name === "constraintnotsatisfiederror" ||
-            /overconstrained|constraint/.test(msg);
-    }
-    getCameraMicErrorMessage(err) {
-        if (this.isMediaPermissionError(err)) {
-            return "Camera/Mic access blocked. Allow permissions in browser settings, then retry.";
-        }
-        if (this.isMediaDeviceMissingError(err)) {
-            return "Camera or microphone not found. Connect your devices, then retry.";
-        }
-        if (this.isMediaBusyError(err)) {
-            return "Camera/Mic is busy in another app. Close other apps using them, then retry.";
-        }
-        if (this.isMediaConstraintError(err)) {
-            return "Camera/Mic settings are unsupported. Reconnect device or reset browser media settings.";
-        }
-        return "Unable to start camera/microphone. Check devices and browser permissions, then retry.";
-    }
-    getScreenShareErrorMessage(err) {
-        if (this.isMediaPermissionError(err)) {
-            return "Screen share was blocked or canceled. Select a window/screen and allow access.";
-        }
-        if (this.getErrorName(err).toLowerCase() === "aborterror") {
-            return "Screen share was canceled. Please try sharing again.";
-        }
-        if (this.isMediaBusyError(err)) {
-            return "Screen share is unavailable right now. Close blocking apps and retry.";
-        }
-        return "Screen share failed. Please try again.";
-    }
-    classifyPublishError(err) {
-        if (this.isMediaPermissionError(err) || this.isMediaDeviceMissingError(err) || this.isMediaBusyError(err) || this.isMediaConstraintError(err)) {
-            return {
-                userMessage: this.getCameraMicErrorMessage(err),
-                retryable: false
-            };
-        }
-        return {
-            userMessage: "Offer error. Recovering media path...",
-            retryable: true
-        };
     }
     isIOSDevice() {
         const ua = navigator.userAgent || "";
@@ -3024,7 +3336,7 @@ class CallController {
         const audioTrack = stream.getAudioTracks()[0];
         const videoTrack = stream.getVideoTracks()[0];
         if (!audioTrack || !videoTrack) {
-            throw new Error("Camera or microphone track unavailable");
+            throw new Error(ErrorMessages.CALL_CAMERA_MIC_TRACK_UNAVAILABLE);
         }
         // Ensure local preview and connectivity state are updated even when
         // browser/Janus onlocaltrack callback is delayed or missing.
@@ -3055,7 +3367,7 @@ class CallController {
     // }
     async publish() {
         if (!this.plugin) {
-            Logger.setStatus("Publish ignored: plugin not ready");
+            Logger.setStatus(ErrorMessages.CALL_PUBLISH_IGNORED_PLUGIN_NOT_READY);
             return;
         }
         const videoCfg = this.getVideoConfig();
@@ -3064,76 +3376,28 @@ class CallController {
             tracks = await this.getPublishTracks();
         }
         catch (e) {
-            const classified = this.classifyPublishError(e);
+            const classified = MediaErrorUtils.classifyPublishError(e);
             Logger.setStatus(classified.userMessage);
             Logger.error(classified.userMessage, e);
-            this.connectionEngine.setFatalError(classified.userMessage, "Fix camera/mic issue and reconnect the call.");
+            this.connectionEngine.setFatalError(classified.userMessage, ErrorMessages.CALL_FIX_CAMERA_MIC_AND_RECONNECT);
             return;
         }
+        const codecOrder = CodecSupportUtil.getPublishCodecAttemptOrder();
+        this.attemptPublishWithCodec(tracks, videoCfg, codecOrder, 0);
+    }
+    attemptPublishWithCodec(tracks, videoCfg, codecOrder, attemptIndex) {
+        if (!this.plugin)
+            return;
+        const codec = codecOrder[attemptIndex];
+        if (!codec) {
+            this.handlePublishFailure(new Error("No publish codec available"));
+            return;
+        }
+        Logger.user(`[publish] createOffer videocodec=${codec} attempt=${attemptIndex + 1}/${codecOrder.length}`);
         this.plugin.createOffer({
             tracks,
             success: (jsep) => {
-                // ✅ Point #4: capture and emit connectivity info from RTCPeerConnection
-                try {
-                    // TODO: If Janus internals change and webrtcStuff.pc is unavailable, bind the publisher PC from Janus plugin callbacks.
-                    const pc = this.plugin?.webrtcStuff?.pc;
-                    if (pc) {
-                        this.publisherPc = pc;
-                        this.connectionEngine.registerPublisherPc(pc);
-                        this.tuneVideoSenderBitrate(pc, videoCfg.bitrate_bps, videoCfg.max_framerate);
-                        const emit = () => {
-                            const payload = {
-                                ice: pc.iceConnectionState,
-                                signaling: pc.signalingState,
-                                connection: pc.connectionState ?? "n/a",
-                                gathering: pc.iceGatheringState,
-                                ts: Date.now(),
-                            };
-                            console.log("VCX_CONNECTIVITY=", payload);
-                            this.bus.emit("connectivity", payload);
-                        };
-                        // emit once immediately
-                        emit();
-                        pc.oniceconnectionstatechange = () => {
-                            console.log("VCX_ICE=" + pc.iceConnectionState);
-                            emit();
-                            if (pc.iceConnectionState === "failed") {
-                                this.schedulePeerRetry("Publisher ICE state failed");
-                            }
-                        };
-                        pc.onsignalingstatechange = () => {
-                            console.log("VCX_SIGNALING=" + pc.signalingState);
-                            emit();
-                        };
-                        // connectionState exists on modern browsers; not always present everywhere
-                        pc.onconnectionstatechange = () => {
-                            console.log("VCX_CONNECTION=" + (pc.connectionState ?? "n/a"));
-                            emit();
-                            if (pc.connectionState === "failed") {
-                                this.schedulePeerRetry("Publisher connection state failed");
-                            }
-                        };
-                        pc.onicegatheringstatechange = () => {
-                            console.log("VCX_GATHERING=" + pc.iceGatheringState);
-                            emit();
-                        };
-                    }
-                    else {
-                        this.publisherPc = null;
-                        console.log("VCX_CONNECTIVITY=pc_not_available");
-                        this.bus.emit("connectivity", {
-                            ice: "n/a",
-                            signaling: "n/a",
-                            connection: "n/a",
-                            gathering: "n/a",
-                            ts: Date.now(),
-                        });
-                    }
-                }
-                catch (e) {
-                    Logger.error("VCX_CONNECTIVITY hook error", e);
-                }
-                // ✅ normal Janus publish configure
+                this.bindPublisherConnectivity(videoCfg);
                 this.plugin.send({
                     message: {
                         request: "configure",
@@ -3141,25 +3405,111 @@ class CallController {
                         video: true,
                         data: APP_CONFIG.mediaTelemetry.enablePeerTelemetry,
                         bitrate: videoCfg.bitrate_bps,
-                        bitrate_cap: videoCfg.bitrate_cap
+                        bitrate_cap: videoCfg.bitrate_cap,
+                        videocodec: codec
                     },
                     jsep,
+                    success: (res) => {
+                        const data = this.getVideoRoomData(res);
+                        if (data?.error || data?.error_code) {
+                            this.fallbackOrHandlePublishFailure(codecOrder, attemptIndex, tracks, videoCfg, data);
+                        }
+                    },
+                    error: (e) => {
+                        this.fallbackOrHandlePublishFailure(codecOrder, attemptIndex, tracks, videoCfg, e);
+                    }
                 });
             },
             error: (e) => {
-                const classified = this.classifyPublishError(e);
-                console.error("VCX_OFFER_ERROR", e);
-                Logger.setStatus(classified.userMessage);
-                Logger.error(classified.userMessage, e);
-                if (!classified.retryable) {
-                    this.connectionEngine.setFatalError(classified.userMessage, "Fix camera/mic issue and reconnect the call.");
-                    return;
-                }
-                this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts);
-                Logger.setStatus("Offer error. Recovering media path...");
-                this.schedulePeerRetry("Offer error: " + JSON.stringify(e));
-            },
+                this.fallbackOrHandlePublishFailure(codecOrder, attemptIndex, tracks, videoCfg, e);
+            }
         });
+    }
+    fallbackOrHandlePublishFailure(codecOrder, attemptIndex, tracks, videoCfg, error) {
+        const canFallback = APP_CONFIG.media.enableVideoCodecFallback && (attemptIndex + 1) < codecOrder.length;
+        if (canFallback) {
+            const currentCodec = codecOrder[attemptIndex];
+            const nextCodec = codecOrder[attemptIndex + 1];
+            Logger.warn(`[publish] videocodec=${currentCodec} failed. Falling back to ${nextCodec}.`);
+            this.attemptPublishWithCodec(tracks, videoCfg, codecOrder, attemptIndex + 1);
+            return;
+        }
+        this.handlePublishFailure(error);
+    }
+    bindPublisherConnectivity(videoCfg) {
+        // Capture and emit connectivity info from RTCPeerConnection.
+        try {
+            // TODO: If Janus internals change and webrtcStuff.pc is unavailable, bind the publisher PC from Janus plugin callbacks.
+            const pc = this.plugin?.webrtcStuff?.pc;
+            if (pc) {
+                this.publisherPc = pc;
+                this.connectionEngine.registerPublisherPc(pc);
+                this.tuneVideoSenderBitrate(pc, videoCfg.bitrate_bps, videoCfg.max_framerate);
+                const emit = () => {
+                    const payload = {
+                        ice: pc.iceConnectionState,
+                        signaling: pc.signalingState,
+                        connection: pc.connectionState ?? "n/a",
+                        gathering: pc.iceGatheringState,
+                        ts: Date.now(),
+                    };
+                    console.log("VCX_CONNECTIVITY=", payload);
+                    this.bus.emit("connectivity", payload);
+                };
+                // emit once immediately
+                emit();
+                pc.oniceconnectionstatechange = () => {
+                    console.log("VCX_ICE=" + pc.iceConnectionState);
+                    emit();
+                    if (pc.iceConnectionState === "failed") {
+                        this.schedulePeerRetry("Publisher ICE state failed");
+                    }
+                };
+                pc.onsignalingstatechange = () => {
+                    console.log("VCX_SIGNALING=" + pc.signalingState);
+                    emit();
+                };
+                // connectionState exists on modern browsers; not always present everywhere
+                pc.onconnectionstatechange = () => {
+                    console.log("VCX_CONNECTION=" + (pc.connectionState ?? "n/a"));
+                    emit();
+                    if (pc.connectionState === "failed") {
+                        this.schedulePeerRetry("Publisher connection state failed");
+                    }
+                };
+                pc.onicegatheringstatechange = () => {
+                    console.log("VCX_GATHERING=" + pc.iceGatheringState);
+                    emit();
+                };
+            }
+            else {
+                this.publisherPc = null;
+                console.log("VCX_CONNECTIVITY=pc_not_available");
+                this.bus.emit("connectivity", {
+                    ice: "n/a",
+                    signaling: "n/a",
+                    connection: "n/a",
+                    gathering: "n/a",
+                    ts: Date.now(),
+                });
+            }
+        }
+        catch (e) {
+            Logger.error(ErrorMessages.CALL_CONNECTIVITY_HOOK_ERROR, e);
+        }
+    }
+    handlePublishFailure(e) {
+        const classified = MediaErrorUtils.classifyPublishError(e);
+        console.error(ErrorMessages.CALL_OFFER_ERROR_CONSOLE_TAG, e);
+        Logger.setStatus(classified.userMessage);
+        Logger.error(classified.userMessage, e);
+        if (!classified.retryable) {
+            this.connectionEngine.setFatalError(classified.userMessage, ErrorMessages.CALL_FIX_CAMERA_MIC_AND_RECONNECT);
+            return;
+        }
+        this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts);
+        Logger.setStatus(ErrorMessages.CALL_OFFER_ERROR_RECOVERING);
+        this.schedulePeerRetry(ErrorMessages.callOfferErrorReason(e));
     }
     toggleMute() {
         if (!this.plugin)
@@ -3206,7 +3556,7 @@ class CallController {
                     }
                 }
                 catch (e) {
-                    Logger.error("Video unmute signaling failed", e);
+                    Logger.error(ErrorMessages.CALL_VIDEO_UNMUTE_SIGNALING_FAILED, e);
                 }
                 this.localVideoEnabled = true;
             }
@@ -3220,7 +3570,7 @@ class CallController {
                     }
                 }
                 catch (e) {
-                    Logger.error("Video mute signaling failed", e);
+                    Logger.error(ErrorMessages.CALL_VIDEO_MUTE_SIGNALING_FAILED, e);
                 }
                 const localTrack = this.screenEnabled
                     ? this.screenManager.getStream()?.getVideoTracks()[0]
@@ -3235,8 +3585,8 @@ class CallController {
             }
         }
         catch (e) {
-            Logger.error("Video toggle failed", e);
-            Logger.setStatus(this.getCameraMicErrorMessage(e));
+            Logger.error(ErrorMessages.CALL_VIDEO_TOGGLE_FAILED, e);
+            Logger.setStatus(MediaErrorUtils.getCameraMicErrorMessage(e));
         }
         finally {
             this.videoToggleBusy = false;
@@ -3260,8 +3610,8 @@ class CallController {
     // RECORDING
     // =====================================
     endCallOnRecordingFailure(message, err) {
-        Logger.error(`[recording] ${message}`, err);
-        Logger.setStatus("Recording failed twice. Ending call.");
+        Logger.error(ErrorMessages.callRecordingLog(message), err);
+        Logger.setStatus(ErrorMessages.CALL_RECORDING_FAILED_ENDING);
         this.recording = false;
         this.currentRecordingId = null;
         this.bus.emit("recording-changed", false);
@@ -3285,15 +3635,15 @@ class CallController {
             },
             success: () => {
                 this.recording = true;
-                Logger.setStatus(`Recording started (room): ${recordingId}`);
+                Logger.setStatus(ErrorMessages.callRecordingStarted(recordingId));
                 this.bus.emit("recording-changed", true);
             },
             error: (e) => {
-                Logger.error(`[recording] start failed (attempt ${attempt})`, e);
+                Logger.error(ErrorMessages.callRecordingStartFailed(attempt), e);
                 this.recording = false;
                 this.bus.emit("recording-changed", false);
                 if (attempt < 2) {
-                    Logger.setStatus("Recording start failed. Retrying...");
+                    Logger.setStatus(ErrorMessages.CALL_RECORDING_START_RETRYING);
                     window.setTimeout(() => this.startRecording(recordingId, attempt + 1), this.recordingRetryDelayMs);
                     return;
                 }
@@ -3309,13 +3659,13 @@ class CallController {
             success: () => {
                 this.recording = false;
                 this.currentRecordingId = null;
-                Logger.setStatus("Recording stopped");
+                Logger.setStatus(ErrorMessages.CALL_RECORDING_STOPPED);
                 this.bus.emit("recording-changed", false);
             },
             error: (e) => {
-                Logger.error(`[recording] stop failed (attempt ${attempt})`, e);
+                Logger.error(ErrorMessages.callRecordingStopFailed(attempt), e);
                 if (attempt < 2) {
-                    Logger.setStatus("Recording stop failed. Retrying...");
+                    Logger.setStatus(ErrorMessages.CALL_RECORDING_STOP_RETRYING);
                     window.setTimeout(() => this.stopRecording(attempt + 1), this.recordingRetryDelayMs);
                     return;
                 }
@@ -3344,7 +3694,7 @@ class CallController {
                     this.plugin.send({ message: { request: "enable_recording", record: false, room: this.currentRoomId } });
                 }
                 catch (e) {
-                    Logger.error("[recording] stop on leave failed", e);
+                    Logger.error(ErrorMessages.CALL_RECORDING_STOP_ON_LEAVE_FAILED, e);
                 }
             }
             try {
@@ -3353,7 +3703,7 @@ class CallController {
                 }
             }
             catch (e) {
-                Logger.error("Leave signaling failed", e);
+                Logger.error(ErrorMessages.CALL_LEAVE_SIGNALING_FAILED, e);
             }
             this.remoteFeeds?.cleanupAll();
             this.remoteFeeds = null;
@@ -3385,11 +3735,11 @@ class CallController {
             this.cameraStream = null;
             this.cameraStreamOrientation = null;
             this.callId = null;
-            Logger.setStatus("Left");
+            Logger.setStatus(ErrorMessages.CALL_LEFT);
         }
         catch (e) {
-            Logger.setStatus("Leave error: " + e.message);
-            Logger.error("Leave error", e);
+            Logger.setStatus(ErrorMessages.callLeaveErrorStatus(e.message));
+            Logger.error(ErrorMessages.CALL_LEAVE_ERROR, e);
         }
     }
     async toggleScreenShare() {
@@ -3401,7 +3751,7 @@ class CallController {
                 const ss = await this.screenManager.start();
                 const screenTrack = ss.getVideoTracks()[0];
                 if (!screenTrack)
-                    throw new Error("Screen video track unavailable");
+                    throw new Error(ErrorMessages.CALL_SCREEN_VIDEO_TRACK_UNAVAILABLE);
                 const cam = await this.ensureCameraStream();
                 const micTrack = cam.getAudioTracks()[0] ?? null;
                 const displayAudioTrack = ss.getAudioTracks()[0] ?? null;
@@ -3411,7 +3761,7 @@ class CallController {
                 this.screenEnabled = true;
                 await this.ensureOutgoingAudio({ camera: cam, screen: ss });
                 this.replaceVideoTrack(screenTrack);
-                Logger.setStatus("Screen share started");
+                Logger.setStatus(ErrorMessages.CALL_SCREEN_SHARE_STARTED);
                 this.bus.emit("screen-changed", true);
                 screenTrack.onended = () => {
                     if (!this.isLeaving && this.screenEnabled)
@@ -3432,13 +3782,13 @@ class CallController {
                 const micTrack = cam.getAudioTracks()[0];
                 if (micTrack)
                     this.syncPublishedAudioTrack(micTrack);
-                Logger.setStatus("Screen share stopped");
+                Logger.setStatus(ErrorMessages.CALL_SCREEN_SHARE_STOPPED);
                 this.bus.emit("screen-changed", false);
             }
         }
         catch (e) {
-            Logger.error("Screen share toggle failed", e);
-            Logger.setStatus(this.getScreenShareErrorMessage(e));
+            Logger.error(ErrorMessages.CALL_SCREEN_SHARE_TOGGLE_FAILED, e);
+            Logger.setStatus(MediaErrorUtils.getScreenShareErrorMessage(e));
         }
         finally {
             this.screenToggleBusy = false;
@@ -3448,7 +3798,7 @@ class CallController {
         if (!this.plugin || this.vbToggleBusy)
             return;
         if (this.screenEnabled) {
-            Logger.setStatus("Disable screen share before virtual background");
+            Logger.setStatus(ErrorMessages.CALL_DISABLE_SCREEN_BEFORE_VB);
             return;
         }
         this.vbToggleBusy = true;
@@ -3464,7 +3814,7 @@ class CallController {
                 const processed = await this.vbManager.enable(cam);
                 const track = processed.getVideoTracks()[0];
                 if (!track)
-                    throw new Error("Virtual background output track unavailable");
+                    throw new Error(ErrorMessages.CALL_VB_OUTPUT_TRACK_UNAVAILABLE);
                 track.enabled = true;
                 this.vbEnabled = true;
                 this.localVideoEnabled = true;
@@ -3493,8 +3843,8 @@ class CallController {
             }
         }
         catch (e) {
-            Logger.error("Virtual background toggle failed", e);
-            Logger.setStatus(this.getCameraMicErrorMessage(e));
+            Logger.error(ErrorMessages.CALL_VB_TOGGLE_FAILED, e);
+            Logger.setStatus(MediaErrorUtils.getCameraMicErrorMessage(e));
         }
         finally {
             this.vbToggleBusy = false;
@@ -3539,19 +3889,19 @@ class CallController {
                             t.stop();
                         }
                         catch (stopErr) {
-                            Logger.error("Stopping stale camera track failed", stopErr);
+                            Logger.error(ErrorMessages.CALL_STOP_STALE_CAMERA_TRACK_FAILED, stopErr);
                         }
                     });
                 }
             }
             if (!this.cameraStream) {
-                throw new Error("Camera stream unavailable after initialization");
+                throw new Error(ErrorMessages.CALL_CAMERA_STREAM_UNAVAILABLE_AFTER_INIT);
             }
             return this.cameraStream;
         }
         catch (e) {
-            Logger.error("Camera access failed", e);
-            Logger.setStatus(this.getCameraMicErrorMessage(e));
+            Logger.error(ErrorMessages.CALL_CAMERA_ACCESS_FAILED, e);
+            Logger.setStatus(MediaErrorUtils.getCameraMicErrorMessage(e));
             throw e;
         }
     }
@@ -3567,8 +3917,8 @@ class CallController {
             this.syncPreferredAudioTrack();
         }
         catch (e) {
-            Logger.error("replaceVideoTrack failed", e);
-            Logger.setStatus("Video track switch failed.");
+            Logger.error(ErrorMessages.CALL_REPLACE_VIDEO_TRACK_FAILED, e);
+            Logger.setStatus(ErrorMessages.CALL_VIDEO_TRACK_SWITCH_FAILED);
         }
     }
     getPreferredAudioTrack() {
@@ -3630,7 +3980,7 @@ class CallController {
             });
         }
         catch (e) {
-            Logger.error("replaceAudioTrack failed", e);
+            Logger.error(ErrorMessages.CALL_REPLACE_AUDIO_TRACK_FAILED, e);
         }
     }
     async resolveScreenShareAudioTrack(micTrack, displayAudioTrack) {
@@ -3658,7 +4008,7 @@ class CallController {
             return mixedTrack;
         }
         catch (e) {
-            Logger.error("Screen-share audio mixing failed; using microphone only", e);
+            Logger.error(ErrorMessages.CALL_SCREEN_AUDIO_MIXING_FAILED, e);
             return micTrack;
         }
     }
@@ -3668,13 +4018,13 @@ class CallController {
                 this.mixedAudioTrack.stop();
             }
             catch (e) {
-                Logger.error("Stopping mixed audio track failed", e);
+                Logger.error(ErrorMessages.CALL_STOP_MIXED_AUDIO_TRACK_FAILED, e);
             }
         }
         this.mixedAudioTrack = null;
         if (this.mixedAudioContext) {
             this.mixedAudioContext.close().catch((e) => {
-                Logger.error("Closing mixed audio context failed", e);
+                Logger.error(ErrorMessages.CALL_CLOSE_MIXED_AUDIO_CONTEXT_FAILED, e);
             });
         }
         this.mixedAudioContext = null;
@@ -3941,7 +4291,7 @@ class CallController {
             };
         }
         catch (e) {
-            Logger.error("Publisher metrics collection failed", e);
+            Logger.error(ErrorMessages.CALL_PUBLISHER_METRICS_FAILED, e);
             return {
                 audioBytesSent: this.outboundPrev.audio,
                 audioPacketsSent: this.outboundAudioPacketsPrev,
@@ -3987,7 +4337,7 @@ class CallController {
                 });
             }
             catch (e) {
-                Logger.error("Subscriber metrics collection failed", e);
+                Logger.error(ErrorMessages.CALL_SUBSCRIBER_METRICS_FAILED, e);
             }
         }));
         return {

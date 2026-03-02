@@ -22,7 +22,7 @@ class CallController {
   private screenManager = new ScreenShareManager();
   private vbManager: VirtualBackgroundManager;
 
-  // ✅ CLEAN recording state
+  // âœ… CLEAN recording state
   private recording = false;
   private currentRecordingId: string | null = null;
   private currentRoomId: number | null = null;
@@ -130,8 +130,8 @@ class CallController {
       );
     } catch (e: any) {
       const requestId = String(e?.requestId || "n/a");
-      Logger.error(`[join] failed callId=${this.callId} roomId=${cfg.roomId} requestId=${requestId}`, e);
-      this.scheduleServerRetry("Join error: " + (e?.message || e));
+      Logger.error(ErrorMessages.callJoinFailed(this.callId ?? "n/a", cfg.roomId, requestId), e);
+      this.scheduleServerRetry(ErrorMessages.callJoinError(e?.message || e));
     }
   }
 
@@ -216,23 +216,19 @@ class CallController {
 
     if (attempt > maxAttempts) {
       this.connectionEngine.onFailed();
-      if (kind === "server") {
-        Logger.setStatus("Video server call failed. Retry limit reached.");
-      } else {
-        Logger.setStatus("TURN/peer connection failed. Retry limit reached.");
-      }
-      Logger.error(`[retry] ${kind} retries exhausted. callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} reason=${reason}`);
+      Logger.setStatus(ErrorMessages.callRetryLimitStatus(kind));
+      Logger.error(ErrorMessages.callRetryExhausted(kind, this.callId ?? "n/a", cfg.roomId, reason));
       return;
     }
 
     if (kind === "server") {
       this.connectionEngine.onServerRetrying(attempt, maxAttempts);
-      Logger.setStatus(`Video server call failed. Retrying (${attempt}/${maxAttempts})...`);
+      Logger.setStatus(ErrorMessages.callServerRetrying(attempt, maxAttempts));
     } else {
       this.connectionEngine.onPeerRetrying(attempt, maxAttempts);
-      Logger.setStatus(`TURN/peer connection failed. Retrying (${attempt}/${maxAttempts})...`);
+      Logger.setStatus(ErrorMessages.callPeerRetrying(attempt, maxAttempts));
     }
-    Logger.warn(`[retry] ${kind} scheduled (${attempt}/${maxAttempts}). callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} reason=${reason}`);
+    Logger.warn(ErrorMessages.callRetryScheduled(kind, attempt, maxAttempts, this.callId ?? "n/a", cfg.roomId, reason));
 
     this.cleanupForRetry();
     this.retryTimer = window.setTimeout(() => {
@@ -261,7 +257,7 @@ class CallController {
         this.bus.emit("recording-changed", false);
         this.connectionEngine.onPublisherAttached();
 
-        Logger.setStatus("Plugin attached. Checking room...");
+        Logger.setStatus(ErrorMessages.CALL_PLUGIN_ATTACHED_CHECKING_ROOM);
         this.ensureRoomThenJoin(cfg);
       },
       (msg: any, jsep: any) => this.onPublisherMessage(cfg, msg, jsep),
@@ -273,7 +269,7 @@ class CallController {
       () => {
         if (this.isLeaving || this.suppressPublisherCleanupRetry) return;
         this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts);
-        Logger.setStatus("Publisher cleanup. Recovering media connection...");
+        Logger.setStatus(ErrorMessages.CALL_PUBLISHER_CLEANUP_RECOVERING);
         this.schedulePeerRetry("Publisher cleanup");
       },
       (e: any) => {
@@ -298,10 +294,10 @@ class CallController {
         const exists = !!data?.exists;
 
         if (exists) {
-          Logger.setStatus(`Room exists. Joining...`);
+          Logger.setStatus(ErrorMessages.CALL_ROOM_EXISTS_JOINING);
           this.sendPublisherJoin(cfg);
         } else {
-          Logger.setStatus(`Room not found. Creating...`);
+          Logger.setStatus(ErrorMessages.CALL_ROOM_NOT_FOUND_CREATING);
           this.roomCreateAttempted = true;
           this.sendCreateRoom(cfg);
         }
@@ -337,10 +333,11 @@ class CallController {
         request: "create",
         room: cfg.roomId,
         publishers: APP_CONFIG.videoroom.maxPublishers,
-        description: `Room ${cfg.roomId}`
+        description: `Room ${cfg.roomId}`,
+        videocodec: CodecSupportUtil.getRoomVideoCodecList()
       },
       success: () => {
-        Logger.setStatus("Room created. Joining...");
+        Logger.setStatus(ErrorMessages.CALL_ROOM_CREATED_JOINING);
         this.sendPublisherJoin(cfg);
       },
       error: () => {
@@ -349,66 +346,72 @@ class CallController {
     });
   }
 
-  private isParticipantIdCollisionError(errorCode: number | null, errorText: string): boolean {
-    const lower = errorText.toLowerCase();
-    if (errorCode === 436) return true;
-    return lower.includes("id") &&
-      (lower.includes("exists") || lower.includes("exist") || lower.includes("already") || lower.includes("taken"));
-  }
-
   private handlePublisherJoinError(cfg: JoinConfig, data: any, errorCodeRaw: unknown): boolean {
-    const errorCode = Number.isFinite(Number(errorCodeRaw)) ? Number(errorCodeRaw) : null;
-    const errorText = String(data?.error || data?.error_reason || data?.reason || "").trim();
-    const lower = errorText.toLowerCase();
+    const errorCode = JoinErrorUtils.parseErrorCode(errorCodeRaw);
+    const errorText = JoinErrorUtils.extractErrorText(data);
 
-    if (errorCode === 426) {
+    if (errorCode === ErrorCodes.JANUS_ROOM_NOT_FOUND) {
       if (!this.roomCreateAttempted) {
         this.roomCreateAttempted = true;
         this.sendCreateRoom(cfg);
       } else {
-        this.scheduleServerRetry("Room join failed with 426 after create attempt");
+        this.scheduleServerRetry(ErrorMessages.callRoomJoinFailedAfterCreateAttempt(String(ErrorCodes.JANUS_ROOM_NOT_FOUND)));
       }
       return true;
     }
 
-    if (this.isParticipantIdCollisionError(errorCode, errorText)) {
-      const msg = "Participant ID already in use. Use a unique Participant ID and reconnect.";
-      Logger.error(`[join] participant id collision callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} participantId=${cfg.participantId ?? "n/a"} code=${errorCode ?? "n/a"} detail=${errorText}`);
+    if (JoinErrorUtils.isParticipantIdCollisionError(errorCode, errorText)) {
+      const msg = ErrorMessages.CALL_PARTICIPANT_ID_IN_USE;
+      Logger.error(ErrorMessages.callParticipantIdCollision(
+        this.callId ?? "n/a",
+        cfg.roomId,
+        String(cfg.participantId ?? "n/a"),
+        String(errorCode ?? "n/a"),
+        errorText
+      ));
       Logger.setStatus(msg);
-      this.connectionEngine.setFatalError(msg, "Open call with a unique participant ID.");
+      this.connectionEngine.setFatalError(msg, ErrorMessages.CALL_PARTICIPANT_ID_IN_USE_SECONDARY);
       this.bus.emit("joined", false);
       return true;
     }
 
-    const unauthorized = lower.includes("unauthor") || lower.includes("forbidden") || errorCode === 433 || errorCode === 428;
+    const unauthorized = JoinErrorUtils.isUnauthorizedJoinError(errorCode, errorText);
     if (unauthorized) {
-      const msg = "Authorization failed for call join. Please refresh and re-authenticate.";
-      Logger.error(`[join] unauthorized callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} code=${errorCode ?? "n/a"} detail=${errorText}`);
+      const msg = ErrorMessages.CALL_AUTHORIZATION_FAILED;
+      Logger.error(ErrorMessages.callUnauthorizedJoin(
+        this.callId ?? "n/a",
+        cfg.roomId,
+        String(errorCode ?? "n/a"),
+        errorText
+      ));
       Logger.setStatus(msg);
-      this.connectionEngine.setFatalError(msg, "Retry after authentication.");
+      this.connectionEngine.setFatalError(msg, ErrorMessages.CALL_AUTHORIZATION_FAILED_SECONDARY);
       this.bus.emit("joined", false);
       return true;
     }
 
-    const roomMissing = lower.includes("no such room") || lower.includes("room not found");
+    const roomMissing = JoinErrorUtils.isRoomMissingError(errorText);
     if (roomMissing) {
       if (!this.roomCreateAttempted) {
         this.roomCreateAttempted = true;
         this.sendCreateRoom(cfg);
       } else {
-        this.scheduleServerRetry(`Room missing after create attempt (code=${errorCode ?? "n/a"})`);
+        this.scheduleServerRetry(ErrorMessages.callRoomMissingAfterCreate(String(errorCode ?? "n/a")));
       }
       return true;
     }
 
-    this.scheduleServerRetry(`Publisher join error code=${errorCode ?? "n/a"} detail=${errorText || JSON.stringify(data)}`);
+    this.scheduleServerRetry(ErrorMessages.callPublisherJoinError(
+      String(errorCode ?? "n/a"),
+      errorText || JSON.stringify(data)
+    ));
     return true;
   }
 
   private onPublisherMessage(cfg: JoinConfig, msg: any, jsep: any) {
     if (msg?.janus === "hangup") {
       const reason = String(msg?.reason || "Peer hangup");
-      Logger.error(`Publisher hangup: ${reason}`);
+      Logger.error(ErrorMessages.callPublisherHangup(reason));
       if (reason.toLowerCase().includes("ice")) {
         this.schedulePeerRetry(`Publisher hangup: ${reason}`);
       }
@@ -419,7 +422,7 @@ class CallController {
     const event = data["videoroom"];
     const errorCode = data["error_code"];
     if (data?.error || errorCode) {
-      Logger.error(`Publisher plugin error: ${JSON.stringify(data)}`);
+      Logger.error(ErrorMessages.callPublisherPluginError(data));
       if (!this.joinedRoom && this.handlePublisherJoinError(cfg, data, errorCode)) {
         return;
       }
@@ -440,7 +443,7 @@ class CallController {
       this.selfId = myId;
       this.roster.setSelf(myId);
 
-      Logger.setStatus("Joined. Publishing...");
+      Logger.setStatus(ErrorMessages.CALL_JOINED_PUBLISHING);
 
       this.remoteFeeds = new RemoteFeedManager(
         this.gateway.getJanus(),
@@ -478,8 +481,8 @@ class CallController {
           onRemoteFeedRetryExhausted: (feedId: number, attempts: number) => {
             this.subscriberPcs.delete(feedId);
             this.connectionEngine.onRemoteFeedRetryExhausted(feedId, attempts);
-            Logger.setStatus("Remote video is unstable. Ask participant to reconnect.");
-            Logger.error(`[remote-feed] retry exhausted callId=${this.callId ?? "n/a"} roomId=${cfg.roomId} feedId=${feedId} attempts=${attempts}`);
+            Logger.setStatus(ErrorMessages.CALL_REMOTE_VIDEO_UNSTABLE);
+            Logger.error(ErrorMessages.callRemoteFeedRetryExhausted(this.callId ?? "n/a", cfg.roomId, feedId, attempts));
           }
         }
       );
@@ -575,7 +578,7 @@ class CallController {
       if (!this.participantSyncInFlight || requestSeq !== this.participantSyncRequestSeq) return;
       this.participantSyncInFlight = false;
       this.participantSyncRequestTimer = null;
-      Logger.error(`listparticipants timeout (request=${requestSeq}, room=${cfg.roomId})`);
+      Logger.error(ErrorMessages.callListParticipantsTimeout(requestSeq, cfg.roomId));
     }, APP_CONFIG.call.participantSyncRequestTimeoutMs);
 
     this.plugin.send({
@@ -613,7 +616,7 @@ class CallController {
         if (requestSeq !== this.participantSyncRequestSeq) return;
         this.clearParticipantSyncRequestTimer();
         this.participantSyncInFlight = false;
-        Logger.error(`listparticipants error (request=${requestSeq}): ${JSON.stringify(e)}`);
+        Logger.error(ErrorMessages.callListParticipantsError(requestSeq, e));
       }
     });
   }
@@ -662,95 +665,11 @@ class CallController {
       p.encodings = encodings;
 
       sender.setParameters(p).catch((e: any) => {
-        Logger.error("VCX_SET_PARAMETERS_ERROR", e);
+        Logger.error(ErrorMessages.CALL_MEDIA_SETUP_SET_PARAMETERS_ERROR, e);
       });
     } catch (e: any) {
-      Logger.error("VCX_SET_PARAMETERS_HOOK_ERROR", e);
+      Logger.error(ErrorMessages.CALL_MEDIA_SETUP_SET_PARAMETERS_HOOK_ERROR, e);
     }
-  }
-
-  private getErrorName(err: any): string {
-    return String(err?.name || err?.error?.name || "").trim();
-  }
-
-  private getErrorMessage(err: any): string {
-    return String(err?.message || err?.error?.message || "").trim();
-  }
-
-  private isMediaPermissionError(err: any): boolean {
-    const name = this.getErrorName(err).toLowerCase();
-    const msg = this.getErrorMessage(err).toLowerCase();
-    return name === "notallowederror" ||
-      name === "permissiondeniederror" ||
-      name === "securityerror" ||
-      /permission|denied|not allowed/.test(msg);
-  }
-
-  private isMediaDeviceMissingError(err: any): boolean {
-    const name = this.getErrorName(err).toLowerCase();
-    const msg = this.getErrorMessage(err).toLowerCase();
-    return name === "notfounderror" ||
-      name === "devicesnotfounderror" ||
-      /requested device not found|notfound/.test(msg);
-  }
-
-  private isMediaBusyError(err: any): boolean {
-    const name = this.getErrorName(err).toLowerCase();
-    const msg = this.getErrorMessage(err).toLowerCase();
-    return name === "notreadableerror" ||
-      name === "trackstarterror" ||
-      /device in use|device is busy|could not start video source/.test(msg);
-  }
-
-  private isMediaConstraintError(err: any): boolean {
-    const name = this.getErrorName(err).toLowerCase();
-    const msg = this.getErrorMessage(err).toLowerCase();
-    return name === "overconstrainederror" ||
-      name === "constraintnotsatisfiederror" ||
-      /overconstrained|constraint/.test(msg);
-  }
-
-  private getCameraMicErrorMessage(err: any): string {
-    if (this.isMediaPermissionError(err)) {
-      return "Camera/Mic access blocked. Allow permissions in browser settings, then retry.";
-    }
-    if (this.isMediaDeviceMissingError(err)) {
-      return "Camera or microphone not found. Connect your devices, then retry.";
-    }
-    if (this.isMediaBusyError(err)) {
-      return "Camera/Mic is busy in another app. Close other apps using them, then retry.";
-    }
-    if (this.isMediaConstraintError(err)) {
-      return "Camera/Mic settings are unsupported. Reconnect device or reset browser media settings.";
-    }
-    return "Unable to start camera/microphone. Check devices and browser permissions, then retry.";
-  }
-
-  private getScreenShareErrorMessage(err: any): string {
-    if (this.isMediaPermissionError(err)) {
-      return "Screen share was blocked or canceled. Select a window/screen and allow access.";
-    }
-    if (this.getErrorName(err).toLowerCase() === "aborterror") {
-      return "Screen share was canceled. Please try sharing again.";
-    }
-    if (this.isMediaBusyError(err)) {
-      return "Screen share is unavailable right now. Close blocking apps and retry.";
-    }
-    return "Screen share failed. Please try again.";
-  }
-
-  private classifyPublishError(err: any): { userMessage: string; retryable: boolean } {
-    if (this.isMediaPermissionError(err) || this.isMediaDeviceMissingError(err) || this.isMediaBusyError(err) || this.isMediaConstraintError(err)) {
-      return {
-        userMessage: this.getCameraMicErrorMessage(err),
-        retryable: false
-      };
-    }
-
-    return {
-      userMessage: "Offer error. Recovering media path...",
-      retryable: true
-    };
   }
 
   private isIOSDevice(): boolean {
@@ -787,7 +706,7 @@ class CallController {
     const videoTrack = stream.getVideoTracks()[0];
 
     if (!audioTrack || !videoTrack) {
-      throw new Error("Camera or microphone track unavailable");
+      throw new Error(ErrorMessages.CALL_CAMERA_MIC_TRACK_UNAVAILABLE);
     }
 
     // Ensure local preview and connectivity state are updated even when
@@ -822,7 +741,7 @@ class CallController {
 
   public async publish() {
     if (!this.plugin) {
-      Logger.setStatus("Publish ignored: plugin not ready");
+      Logger.setStatus(ErrorMessages.CALL_PUBLISH_IGNORED_PLUGIN_NOT_READY);
       return;
     }
     const videoCfg = this.getVideoConfig();
@@ -831,87 +750,39 @@ class CallController {
     try {
       tracks = await this.getPublishTracks();
     } catch (e: any) {
-      const classified = this.classifyPublishError(e);
+      const classified = MediaErrorUtils.classifyPublishError(e);
       Logger.setStatus(classified.userMessage);
       Logger.error(classified.userMessage, e);
       this.connectionEngine.setFatalError(
         classified.userMessage,
-        "Fix camera/mic issue and reconnect the call."
+        ErrorMessages.CALL_FIX_CAMERA_MIC_AND_RECONNECT
       );
       return;
     }
 
+    const codecOrder = CodecSupportUtil.getPublishCodecAttemptOrder();
+    this.attemptPublishWithCodec(tracks, videoCfg, codecOrder, 0);
+  }
+
+  private attemptPublishWithCodec(
+    tracks: any[],
+    videoCfg: VcxVideoConfig,
+    codecOrder: Array<"vp8" | "vp9">,
+    attemptIndex: number
+  ) {
+    if (!this.plugin) return;
+    const codec = codecOrder[attemptIndex];
+    if (!codec) {
+      this.handlePublishFailure(new Error("No publish codec available"));
+      return;
+    }
+
+    Logger.user(`[publish] createOffer videocodec=${codec} attempt=${attemptIndex + 1}/${codecOrder.length}`);
+
     this.plugin.createOffer({
       tracks,
-
       success: (jsep: any) => {
-        // ✅ Point #4: capture and emit connectivity info from RTCPeerConnection
-        try {
-          // TODO: If Janus internals change and webrtcStuff.pc is unavailable, bind the publisher PC from Janus plugin callbacks.
-          const pc: RTCPeerConnection | undefined = this.plugin?.webrtcStuff?.pc;
-
-          if (pc) {
-            this.publisherPc = pc;
-            this.connectionEngine.registerPublisherPc(pc);
-            this.tuneVideoSenderBitrate(pc, videoCfg.bitrate_bps, videoCfg.max_framerate);
-            const emit = () => {
-              const payload = {
-                ice: pc.iceConnectionState,
-                signaling: pc.signalingState,
-                connection: (pc as any).connectionState ?? "n/a",
-                gathering: pc.iceGatheringState,
-                ts: Date.now(),
-              };
-
-              console.log("VCX_CONNECTIVITY=", payload);
-              this.bus.emit("connectivity", payload);
-            };
-
-            // emit once immediately
-            emit();
-
-            pc.oniceconnectionstatechange = () => {
-              console.log("VCX_ICE=" + pc.iceConnectionState);
-              emit();
-              if (pc.iceConnectionState === "failed") {
-                this.schedulePeerRetry("Publisher ICE state failed");
-              }
-            };
-
-            pc.onsignalingstatechange = () => {
-              console.log("VCX_SIGNALING=" + pc.signalingState);
-              emit();
-            };
-
-            // connectionState exists on modern browsers; not always present everywhere
-            (pc as any).onconnectionstatechange = () => {
-              console.log("VCX_CONNECTION=" + ((pc as any).connectionState ?? "n/a"));
-              emit();
-              if ((pc as any).connectionState === "failed") {
-                this.schedulePeerRetry("Publisher connection state failed");
-              }
-            };
-
-            pc.onicegatheringstatechange = () => {
-              console.log("VCX_GATHERING=" + pc.iceGatheringState);
-              emit();
-            };
-          } else {
-            this.publisherPc = null;
-            console.log("VCX_CONNECTIVITY=pc_not_available");
-            this.bus.emit("connectivity", {
-              ice: "n/a",
-              signaling: "n/a",
-              connection: "n/a",
-              gathering: "n/a",
-              ts: Date.now(),
-            });
-          }
-        } catch (e: any) {
-          Logger.error("VCX_CONNECTIVITY hook error", e);
-        }
-
-        // ✅ normal Janus publish configure
+        this.bindPublisherConnectivity(videoCfg);
         this.plugin.send({
           message: {
             request: "configure",
@@ -919,29 +790,128 @@ class CallController {
             video: true,
             data: APP_CONFIG.mediaTelemetry.enablePeerTelemetry,
             bitrate: videoCfg.bitrate_bps,
-            bitrate_cap: videoCfg.bitrate_cap
+            bitrate_cap: videoCfg.bitrate_cap,
+            videocodec: codec
           },
           jsep,
+          success: (res: any) => {
+            const data = this.getVideoRoomData(res);
+            if (data?.error || data?.error_code) {
+              this.fallbackOrHandlePublishFailure(codecOrder, attemptIndex, tracks, videoCfg, data);
+            }
+          },
+          error: (e: any) => {
+            this.fallbackOrHandlePublishFailure(codecOrder, attemptIndex, tracks, videoCfg, e);
+          }
         });
       },
-
       error: (e: any) => {
-        const classified = this.classifyPublishError(e);
-        console.error("VCX_OFFER_ERROR", e);
-        Logger.setStatus(classified.userMessage);
-        Logger.error(classified.userMessage, e);
-        if (!classified.retryable) {
-          this.connectionEngine.setFatalError(
-            classified.userMessage,
-            "Fix camera/mic issue and reconnect the call."
-          );
-          return;
-        }
-        this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts);
-        Logger.setStatus("Offer error. Recovering media path...");
-        this.schedulePeerRetry("Offer error: " + JSON.stringify(e));
-      },
+        this.fallbackOrHandlePublishFailure(codecOrder, attemptIndex, tracks, videoCfg, e);
+      }
     });
+  }
+
+  private fallbackOrHandlePublishFailure(
+    codecOrder: Array<"vp8" | "vp9">,
+    attemptIndex: number,
+    tracks: any[],
+    videoCfg: VcxVideoConfig,
+    error: unknown
+  ) {
+    const canFallback = APP_CONFIG.media.enableVideoCodecFallback && (attemptIndex + 1) < codecOrder.length;
+    if (canFallback) {
+      const currentCodec = codecOrder[attemptIndex];
+      const nextCodec = codecOrder[attemptIndex + 1];
+      Logger.warn(`[publish] videocodec=${currentCodec} failed. Falling back to ${nextCodec}.`);
+      this.attemptPublishWithCodec(tracks, videoCfg, codecOrder, attemptIndex + 1);
+      return;
+    }
+    this.handlePublishFailure(error);
+  }
+
+  private bindPublisherConnectivity(videoCfg: VcxVideoConfig) {
+    // Capture and emit connectivity info from RTCPeerConnection.
+    try {
+      // TODO: If Janus internals change and webrtcStuff.pc is unavailable, bind the publisher PC from Janus plugin callbacks.
+      const pc: RTCPeerConnection | undefined = this.plugin?.webrtcStuff?.pc;
+
+      if (pc) {
+        this.publisherPc = pc;
+        this.connectionEngine.registerPublisherPc(pc);
+        this.tuneVideoSenderBitrate(pc, videoCfg.bitrate_bps, videoCfg.max_framerate);
+        const emit = () => {
+          const payload = {
+            ice: pc.iceConnectionState,
+            signaling: pc.signalingState,
+            connection: (pc as any).connectionState ?? "n/a",
+            gathering: pc.iceGatheringState,
+            ts: Date.now(),
+          };
+
+          console.log("VCX_CONNECTIVITY=", payload);
+          this.bus.emit("connectivity", payload);
+        };
+
+        // emit once immediately
+        emit();
+
+        pc.oniceconnectionstatechange = () => {
+          console.log("VCX_ICE=" + pc.iceConnectionState);
+          emit();
+          if (pc.iceConnectionState === "failed") {
+            this.schedulePeerRetry("Publisher ICE state failed");
+          }
+        };
+
+        pc.onsignalingstatechange = () => {
+          console.log("VCX_SIGNALING=" + pc.signalingState);
+          emit();
+        };
+
+        // connectionState exists on modern browsers; not always present everywhere
+        (pc as any).onconnectionstatechange = () => {
+          console.log("VCX_CONNECTION=" + ((pc as any).connectionState ?? "n/a"));
+          emit();
+          if ((pc as any).connectionState === "failed") {
+            this.schedulePeerRetry("Publisher connection state failed");
+          }
+        };
+
+        pc.onicegatheringstatechange = () => {
+          console.log("VCX_GATHERING=" + pc.iceGatheringState);
+          emit();
+        };
+      } else {
+        this.publisherPc = null;
+        console.log("VCX_CONNECTIVITY=pc_not_available");
+        this.bus.emit("connectivity", {
+          ice: "n/a",
+          signaling: "n/a",
+          connection: "n/a",
+          gathering: "n/a",
+          ts: Date.now(),
+        });
+      }
+    } catch (e: any) {
+      Logger.error(ErrorMessages.CALL_CONNECTIVITY_HOOK_ERROR, e);
+    }
+  }
+
+  private handlePublishFailure(e: unknown) {
+    const classified = MediaErrorUtils.classifyPublishError(e);
+    console.error(ErrorMessages.CALL_OFFER_ERROR_CONSOLE_TAG, e);
+    Logger.setStatus(classified.userMessage);
+    Logger.error(classified.userMessage, e);
+    if (!classified.retryable) {
+      this.connectionEngine.setFatalError(
+        classified.userMessage,
+        ErrorMessages.CALL_FIX_CAMERA_MIC_AND_RECONNECT
+      );
+      return;
+    }
+    this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts);
+    Logger.setStatus(ErrorMessages.CALL_OFFER_ERROR_RECOVERING);
+    this.schedulePeerRetry(ErrorMessages.callOfferErrorReason(e));
   }
 
   toggleMute() {
@@ -983,7 +953,7 @@ class CallController {
             this.plugin.send({ message: { request: "configure", video: true } });
           }
         } catch (e: any) {
-          Logger.error("Video unmute signaling failed", e);
+          Logger.error(ErrorMessages.CALL_VIDEO_UNMUTE_SIGNALING_FAILED, e);
         }
         this.localVideoEnabled = true;
       } else {
@@ -994,7 +964,7 @@ class CallController {
             this.plugin.send({ message: { request: "configure", video: false } });
           }
         } catch (e: any) {
-          Logger.error("Video mute signaling failed", e);
+          Logger.error(ErrorMessages.CALL_VIDEO_MUTE_SIGNALING_FAILED, e);
         }
         const localTrack = this.screenEnabled
           ? this.screenManager.getStream()?.getVideoTracks()[0]
@@ -1008,8 +978,8 @@ class CallController {
         this.localVideoEnabled = false;
       }
     } catch (e: any) {
-      Logger.error("Video toggle failed", e);
-      Logger.setStatus(this.getCameraMicErrorMessage(e));
+      Logger.error(ErrorMessages.CALL_VIDEO_TOGGLE_FAILED, e);
+      Logger.setStatus(MediaErrorUtils.getCameraMicErrorMessage(e));
     } finally {
       this.videoToggleBusy = false;
       this.bus.emit("video-mute-changed", !this.localVideoEnabled);
@@ -1037,8 +1007,8 @@ class CallController {
   // =====================================
 
   private endCallOnRecordingFailure(message: string, err?: unknown) {
-    Logger.error(`[recording] ${message}`, err);
-    Logger.setStatus("Recording failed twice. Ending call.");
+    Logger.error(ErrorMessages.callRecordingLog(message), err);
+    Logger.setStatus(ErrorMessages.CALL_RECORDING_FAILED_ENDING);
     this.recording = false;
     this.currentRecordingId = null;
     this.bus.emit("recording-changed", false);
@@ -1062,15 +1032,15 @@ class CallController {
       },
       success: () => {
         this.recording = true;
-        Logger.setStatus(`Recording started (room): ${recordingId}`);
+        Logger.setStatus(ErrorMessages.callRecordingStarted(recordingId));
         this.bus.emit("recording-changed", true);
       },
       error: (e: any) => {
-        Logger.error(`[recording] start failed (attempt ${attempt})`, e);
+        Logger.error(ErrorMessages.callRecordingStartFailed(attempt), e);
         this.recording = false;
         this.bus.emit("recording-changed", false);
         if (attempt < 2) {
-          Logger.setStatus("Recording start failed. Retrying...");
+          Logger.setStatus(ErrorMessages.CALL_RECORDING_START_RETRYING);
           window.setTimeout(() => this.startRecording(recordingId, attempt + 1), this.recordingRetryDelayMs);
           return;
         }
@@ -1088,13 +1058,13 @@ class CallController {
       success: () => {
         this.recording = false;
         this.currentRecordingId = null;
-        Logger.setStatus("Recording stopped");
+        Logger.setStatus(ErrorMessages.CALL_RECORDING_STOPPED);
         this.bus.emit("recording-changed", false);
       },
       error: (e: any) => {
-        Logger.error(`[recording] stop failed (attempt ${attempt})`, e);
+        Logger.error(ErrorMessages.callRecordingStopFailed(attempt), e);
         if (attempt < 2) {
-          Logger.setStatus("Recording stop failed. Retrying...");
+          Logger.setStatus(ErrorMessages.CALL_RECORDING_STOP_RETRYING);
           window.setTimeout(() => this.stopRecording(attempt + 1), this.recordingRetryDelayMs);
           return;
         }
@@ -1126,7 +1096,7 @@ class CallController {
         try {
           this.plugin.send({ message: { request: "enable_recording", record: false, room: this.currentRoomId } });
         } catch (e: any) {
-          Logger.error("[recording] stop on leave failed", e);
+          Logger.error(ErrorMessages.CALL_RECORDING_STOP_ON_LEAVE_FAILED, e);
         }
       }
 
@@ -1135,7 +1105,7 @@ class CallController {
           this.plugin?.send({ message: { request: "leave" } });
         }
       } catch (e: any) {
-        Logger.error("Leave signaling failed", e);
+        Logger.error(ErrorMessages.CALL_LEAVE_SIGNALING_FAILED, e);
       }
 
       this.remoteFeeds?.cleanupAll();
@@ -1173,11 +1143,11 @@ class CallController {
       this.cameraStreamOrientation = null;
       this.callId = null;
 
-      Logger.setStatus("Left");
+      Logger.setStatus(ErrorMessages.CALL_LEFT);
 
     } catch (e: any) {
-      Logger.setStatus("Leave error: " + e.message);
-      Logger.error("Leave error", e);
+      Logger.setStatus(ErrorMessages.callLeaveErrorStatus(e.message));
+      Logger.error(ErrorMessages.CALL_LEAVE_ERROR, e);
     }
   }
 
@@ -1188,7 +1158,7 @@ class CallController {
       if (!this.screenEnabled) {
         const ss = await this.screenManager.start();
         const screenTrack = ss.getVideoTracks()[0];
-        if (!screenTrack) throw new Error("Screen video track unavailable");
+        if (!screenTrack) throw new Error(ErrorMessages.CALL_SCREEN_VIDEO_TRACK_UNAVAILABLE);
 
         const cam = await this.ensureCameraStream();
         const micTrack = cam.getAudioTracks()[0] ?? null;
@@ -1199,7 +1169,7 @@ class CallController {
         this.screenEnabled = true;
         await this.ensureOutgoingAudio({ camera: cam, screen: ss });
         this.replaceVideoTrack(screenTrack);
-        Logger.setStatus("Screen share started");
+        Logger.setStatus(ErrorMessages.CALL_SCREEN_SHARE_STARTED);
         this.bus.emit("screen-changed", true);
         screenTrack.onended = () => {
           if (!this.isLeaving && this.screenEnabled) void this.toggleScreenShare();
@@ -1217,12 +1187,12 @@ class CallController {
         }
         const micTrack = cam.getAudioTracks()[0];
         if (micTrack) this.syncPublishedAudioTrack(micTrack);
-        Logger.setStatus("Screen share stopped");
+        Logger.setStatus(ErrorMessages.CALL_SCREEN_SHARE_STOPPED);
         this.bus.emit("screen-changed", false);
       }
     } catch (e: any) {
-      Logger.error("Screen share toggle failed", e);
-      Logger.setStatus(this.getScreenShareErrorMessage(e));
+      Logger.error(ErrorMessages.CALL_SCREEN_SHARE_TOGGLE_FAILED, e);
+      Logger.setStatus(MediaErrorUtils.getScreenShareErrorMessage(e));
     } finally {
       this.screenToggleBusy = false;
     }
@@ -1231,7 +1201,7 @@ class CallController {
   async toggleVirtualBackground() {
     if (!this.plugin || this.vbToggleBusy) return;
     if (this.screenEnabled) {
-      Logger.setStatus("Disable screen share before virtual background");
+      Logger.setStatus(ErrorMessages.CALL_DISABLE_SCREEN_BEFORE_VB);
       return;
     }
     this.vbToggleBusy = true;
@@ -1245,7 +1215,7 @@ class CallController {
         if (camVideoTrack) camVideoTrack.enabled = true;
         const processed = await this.vbManager.enable(cam);
         const track = processed.getVideoTracks()[0];
-        if (!track) throw new Error("Virtual background output track unavailable");
+        if (!track) throw new Error(ErrorMessages.CALL_VB_OUTPUT_TRACK_UNAVAILABLE);
         track.enabled = true;
         this.vbEnabled = true;
         this.localVideoEnabled = true;
@@ -1270,8 +1240,8 @@ class CallController {
         this.bus.emit("vb-changed", false);
       }
     } catch (e: any) {
-      Logger.error("Virtual background toggle failed", e);
-      Logger.setStatus(this.getCameraMicErrorMessage(e));
+      Logger.error(ErrorMessages.CALL_VB_TOGGLE_FAILED, e);
+      Logger.setStatus(MediaErrorUtils.getCameraMicErrorMessage(e));
     } finally {
       this.vbToggleBusy = false;
     }
@@ -1317,19 +1287,19 @@ class CallController {
             try {
               t.stop();
             } catch (stopErr: any) {
-              Logger.error("Stopping stale camera track failed", stopErr);
+              Logger.error(ErrorMessages.CALL_STOP_STALE_CAMERA_TRACK_FAILED, stopErr);
             }
           });
         }
       }
 
       if (!this.cameraStream) {
-        throw new Error("Camera stream unavailable after initialization");
+        throw new Error(ErrorMessages.CALL_CAMERA_STREAM_UNAVAILABLE_AFTER_INIT);
       }
       return this.cameraStream;
     } catch (e: any) {
-      Logger.error("Camera access failed", e);
-      Logger.setStatus(this.getCameraMicErrorMessage(e));
+      Logger.error(ErrorMessages.CALL_CAMERA_ACCESS_FAILED, e);
+      Logger.setStatus(MediaErrorUtils.getCameraMicErrorMessage(e));
       throw e;
     }
   }
@@ -1344,8 +1314,8 @@ class CallController {
       this.media.setLocalTrack(this.localVideo, track);
       this.syncPreferredAudioTrack();
     } catch (e: any) {
-      Logger.error("replaceVideoTrack failed", e);
-      Logger.setStatus("Video track switch failed.");
+      Logger.error(ErrorMessages.CALL_REPLACE_VIDEO_TRACK_FAILED, e);
+      Logger.setStatus(ErrorMessages.CALL_VIDEO_TRACK_SWITCH_FAILED);
     }
   }
 
@@ -1405,7 +1375,7 @@ class CallController {
         tracks: [{ type: "audio", capture: track, recv: false }]
       });
     } catch (e: any) {
-      Logger.error("replaceAudioTrack failed", e);
+      Logger.error(ErrorMessages.CALL_REPLACE_AUDIO_TRACK_FAILED, e);
     }
   }
 
@@ -1434,7 +1404,7 @@ class CallController {
       this.mixedAudioTrack = mixedTrack;
       return mixedTrack;
     } catch (e: any) {
-      Logger.error("Screen-share audio mixing failed; using microphone only", e);
+      Logger.error(ErrorMessages.CALL_SCREEN_AUDIO_MIXING_FAILED, e);
       return micTrack;
     }
   }
@@ -1444,13 +1414,13 @@ class CallController {
       try {
         this.mixedAudioTrack.stop();
       } catch (e: any) {
-        Logger.error("Stopping mixed audio track failed", e);
+        Logger.error(ErrorMessages.CALL_STOP_MIXED_AUDIO_TRACK_FAILED, e);
       }
     }
     this.mixedAudioTrack = null;
     if (this.mixedAudioContext) {
       this.mixedAudioContext.close().catch((e: any) => {
-        Logger.error("Closing mixed audio context failed", e);
+        Logger.error(ErrorMessages.CALL_CLOSE_MIXED_AUDIO_CONTEXT_FAILED, e);
       });
     }
     this.mixedAudioContext = null;
@@ -1723,7 +1693,7 @@ class CallController {
         localLossPct: total > 0 ? (lost / total) * 100 : null
       };
     } catch (e: any) {
-      Logger.error("Publisher metrics collection failed", e);
+      Logger.error(ErrorMessages.CALL_PUBLISHER_METRICS_FAILED, e);
       return {
         audioBytesSent: this.outboundPrev.audio,
         audioPacketsSent: this.outboundAudioPacketsPrev,
@@ -1774,7 +1744,7 @@ class CallController {
           }
         });
       } catch (e: any) {
-        Logger.error("Subscriber metrics collection failed", e);
+        Logger.error(ErrorMessages.CALL_SUBSCRIBER_METRICS_FAILED, e);
       }
     }));
 
@@ -1837,3 +1807,4 @@ class CallController {
     } catch {}
   }
 }
+

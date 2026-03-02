@@ -65,8 +65,8 @@ class NetworkQualityManager {
 
         cb("Low", "Low", "src=webrtc-stats unavailable");
       } catch (e: any) {
-        Logger.error("[network-quality] stats sampling failed", e);
-        cb("Low", "Low", "src=webrtc-stats error");
+        Logger.error(ErrorMessages.NETWORK_QUALITY_STATS_SAMPLING_FAILED, e);
+        cb("Low", "Low", ErrorMessages.NETWORK_QUALITY_DETAILS_ERROR);
       } finally {
         this.sampleBusy = false;
       }

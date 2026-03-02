@@ -12,6 +12,8 @@
   "files": [
     "src/globals.d.ts",
     "src/AppConfig.ts",
+    "src/core/errors/ErrorCodes.ts",
+    "src/core/errors/ErrorMessages.ts",
     "src/core/Logger.ts",
     "src/core/EventBus.ts",
     "src/core/Types.ts",
@@ -25,6 +27,9 @@
     "src/core/http/Correlation.ts",
     "src/core/http/HttpError.ts",
      "src/core/http/HttpTypes.ts",
+    "src/utils/JoinErrorUtils.ts",
+    "src/utils/MediaErrorUtils.ts",
+    "src/utils/CodecSupportUtil.ts",
     "src/managers/ParticipantRoster.ts",
     "src/managers/MediaManager.ts",
     "src/managers/VirtualBackgroundManager.ts",

@@ -5,7 +5,7 @@ class ParentBridge {
         window.parent.postMessage(evt, "*");
       }
     }catch(e:any){
-      Logger.error("ParentBridge postMessage failed", e);
+      Logger.error(ErrorMessages.PARENT_BRIDGE_POST_MESSAGE_FAILED, e);
     }
   }
 

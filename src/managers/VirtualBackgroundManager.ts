@@ -28,22 +28,22 @@ class VirtualBackgroundManager {
 
     this.canvas = document.createElement("canvas");
     const c = this.canvas.getContext("2d");
-    if(!c) throw new Error("No canvas 2d");
+    if(!c) throw new Error(ErrorMessages.VB_NO_CANVAS_2D);
     this.ctx = c;
 
     this.srcCanvas = document.createElement("canvas");
     const sc = this.srcCanvas.getContext("2d");
-    if(!sc) throw new Error("No source canvas 2d");
+    if(!sc) throw new Error(ErrorMessages.VB_NO_SOURCE_CANVAS_2D);
     this.srcCtx = sc;
 
     this.maskCanvas = document.createElement("canvas");
     const mc = this.maskCanvas.getContext("2d");
-    if(!mc) throw new Error("No mask canvas 2d");
+    if(!mc) throw new Error(ErrorMessages.VB_NO_MASK_CANVAS_2D);
     this.maskCtx = mc;
 
     this.bgCanvas = document.createElement("canvas");
     const bc = this.bgCanvas.getContext("2d");
-    if(!bc) throw new Error("No background canvas 2d");
+    if(!bc) throw new Error(ErrorMessages.VB_NO_BACKGROUND_CANVAS_2D);
     this.bgCtx = bc;
 
     this.inVideo = document.createElement("video");
@@ -114,7 +114,7 @@ class VirtualBackgroundManager {
     const cloned = this.cloneVideoOnlyStream(stream);
     const track = cloned.getVideoTracks()[0];
     if (!track) {
-      throw new Error("Virtual background source video track unavailable");
+      throw new Error(ErrorMessages.VB_SOURCE_TRACK_UNAVAILABLE);
     }
 
     this.releaseSourceStream();
@@ -126,7 +126,7 @@ class VirtualBackgroundManager {
 
     await this.inVideo.play().catch((e:any)=>{
       if (e?.name === "AbortError") return;
-      Logger.error("Virtual background input video play failed", e);
+      Logger.error(ErrorMessages.VB_INPUT_VIDEO_PLAY_FAILED, e);
     });
   }
 
@@ -155,7 +155,7 @@ class VirtualBackgroundManager {
     this.loop();
     this.outStream = this.canvas.captureStream(24);
     Logger.user("Virtual background enabled");
-    Logger.setStatus("Virtual background enabled");
+    Logger.setStatus(ErrorMessages.VB_ENABLED);
     return this.outStream;
   }
 
@@ -165,7 +165,7 @@ class VirtualBackgroundManager {
     this.outStream = null;
     this.releaseSourceStream();
     Logger.user("Virtual background disabled");
-    Logger.setStatus("Virtual background disabled");
+    Logger.setStatus(ErrorMessages.VB_DISABLED);
   }
 
   getSourceStream(){ return this.srcStream; }
@@ -184,7 +184,7 @@ class VirtualBackgroundManager {
       await this.prepareSourceStream(next);
       Logger.user("Virtual background source recovered");
     } catch (e: any) {
-      Logger.error("Virtual background source recovery failed", e);
+      Logger.error(ErrorMessages.VB_SOURCE_RECOVERY_FAILED, e);
     }
   }
 
@@ -214,7 +214,7 @@ class VirtualBackgroundManager {
               this.segInFlight = true;
               void this.seg.send({ image: this.inVideo })
                 .catch((e: any) => {
-                  Logger.error("Virtual background segmentation frame failed", e);
+                  Logger.error(ErrorMessages.VB_SEGMENTATION_FRAME_FAILED, e);
                 })
                 .finally(() => {
                   this.segInFlight = false;
@@ -222,7 +222,7 @@ class VirtualBackgroundManager {
             }
           }
         } catch (e: any) {
-          Logger.error("Virtual background loop failed", e);
+          Logger.error(ErrorMessages.VB_LOOP_FAILED, e);
         }
       } else {
         await this.tryRecoverSource();
@@ -294,7 +294,7 @@ class VirtualBackgroundManager {
 
       this.ctx.putImageData(out, 0, 0);
     } catch (e: any) {
-      Logger.error("Virtual background composition failed", e);
+      Logger.error(ErrorMessages.VB_COMPOSITION_FAILED, e);
     }
   }
 

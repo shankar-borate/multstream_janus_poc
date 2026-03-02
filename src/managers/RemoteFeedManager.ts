@@ -52,7 +52,7 @@ class RemoteFeedManager {
     const now = Date.now();
     const blockedUntil = this.retryBlockedUntil.get(feedId) ?? 0;
     if(blockedUntil > now){
-      Logger.warn(`Remote feed ${feedId} retry blocked until ${new Date(blockedUntil).toISOString()}`);
+      Logger.warn(ErrorMessages.remoteFeedRetryBlocked(feedId, new Date(blockedUntil).toISOString()));
       return;
     }
 
@@ -63,7 +63,7 @@ class RemoteFeedManager {
       const cooldownUntil = now + APP_CONFIG.call.remoteFeedRetryCooldownMs;
       this.retryAttempts.set(feedId, 0);
       this.retryBlockedUntil.set(feedId, cooldownUntil);
-      Logger.error(`Remote feed ${feedId} retries exhausted after ${maxAttempts} attempts. Cooldown started. reason=${reason}`);
+      Logger.error(ErrorMessages.remoteFeedRetriesExhausted(feedId, maxAttempts, reason));
       this.observer?.onRemoteFeedRetryExhausted?.(feedId, maxAttempts);
       return;
     }
@@ -74,7 +74,7 @@ class RemoteFeedManager {
     const backoffDelay = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, Math.max(0, attempt - 1)));
     const jitter = Math.floor(Math.random() * Math.max(1, jitterMaxMs));
     const delayMs = backoffDelay + jitter;
-    Logger.warn(`Remote feed ${feedId} retry scheduled (${attempt}/${maxAttempts}, delay=${delayMs}ms): ${reason}`);
+    Logger.warn(ErrorMessages.remoteFeedRetryScheduled(feedId, attempt, maxAttempts, delayMs, reason));
     const t = window.setTimeout(()=>{
       this.retryTimers.delete(feedId);
       this.addFeed(feedId);
@@ -86,14 +86,14 @@ class RemoteFeedManager {
     if(this.feeds.has(feedId) || this.pendingFeedAttach.has(feedId)) return;
     const blockedUntil = this.retryBlockedUntil.get(feedId) ?? 0;
     if(blockedUntil > Date.now()){
-      Logger.warn(`Remote feed ${feedId} add skipped during cooldown`);
+      Logger.warn(ErrorMessages.remoteFeedAddSkippedCooldown(feedId));
       return;
     }
     if(blockedUntil !== 0){
       this.retryBlockedUntil.delete(feedId);
     }
     if(!this.janus){
-      Logger.error(`Remote feed ${feedId} attach skipped: Janus session not ready`);
+      Logger.error(ErrorMessages.remoteFeedAttachSkippedNotReady(feedId));
       return;
     }
     this.clearRetryTimer(feedId);
@@ -103,8 +103,8 @@ class RemoteFeedManager {
       if(!this.pendingFeedAttach.has(feedId)) return;
       this.pendingFeedAttach.delete(feedId);
       this.clearAttachTimer(feedId);
-      Logger.error(`Remote feed ${feedId} attach timed out`);
-      this.scheduleReattach(feedId, "attach timeout");
+      Logger.error(ErrorMessages.remoteFeedAttachTimedOut(feedId));
+      this.scheduleReattach(feedId, ErrorMessages.REMOTE_ATTACH_TIMEOUT_REASON);
     }, APP_CONFIG.call.remoteFeedAttachTimeoutMs);
     this.pendingAttachTimers.set(feedId, attachTimer);
 
@@ -122,7 +122,7 @@ class RemoteFeedManager {
         this.clearFeedStartTimer(feedId);
         const startTimer = window.setTimeout(()=>{
           if(!this.feeds.has(feedId)) return;
-          Logger.error(`Remote feed ${feedId} did not start media in time`);
+          Logger.error(ErrorMessages.remoteFeedDidNotStartInTime(feedId));
           this.removeFeed(feedId, true, true);
         }, APP_CONFIG.call.remoteFeedStartTimeoutMs);
         this.feedStartTimers.set(feedId, startTimer);
@@ -131,16 +131,16 @@ class RemoteFeedManager {
       error:(e:any)=>{
         this.pendingFeedAttach.delete(feedId);
         this.clearAttachTimer(feedId);
-        Logger.error("Remote attach error: "+JSON.stringify(e));
-        this.scheduleReattach(feedId, `attach error: ${JSON.stringify(e)}`);
+        Logger.error(ErrorMessages.REMOTE_ATTACH_ERROR_PREFIX + JSON.stringify(e));
+        this.scheduleReattach(feedId, ErrorMessages.remoteFeedAttachErrorReason(e));
       },
       onmessage:(msg:any,jsep:any)=>{
         const data = msg?.plugindata?.data;
         if(data?.error || data?.error_code){
-          Logger.error(`Remote feed ${feedId} plugin error: ${JSON.stringify(data)}`);
+          Logger.error(ErrorMessages.remoteFeedPluginError(feedId, data));
         }
         if(msg?.janus === "hangup"){
-          Logger.error(`Remote feed ${feedId} hangup: ${msg?.reason || "unknown"}`);
+          Logger.error(ErrorMessages.remoteFeedHangup(feedId, msg?.reason || ErrorMessages.REMOTE_HANGUP_REASON_UNKNOWN));
           this.removeFeed(feedId, true, true);
           return;
         }
@@ -163,7 +163,7 @@ class RemoteFeedManager {
             tracks: answerTracks,
             success:(ans:any)=>remoteHandle.send({ message:{ request:"start", room:this.roomId }, jsep:ans }),
             error:(e:any)=>{
-              Logger.error("Remote answer error: "+JSON.stringify(e));
+              Logger.error(ErrorMessages.REMOTE_ANSWER_ERROR_PREFIX + JSON.stringify(e));
               this.removeFeed(feedId, true, true);
             }
           });
@@ -176,7 +176,7 @@ class RemoteFeedManager {
           if (parsed?.type !== "vcx-peer-telemetry") return;
           this.observer?.onRemoteTelemetry?.(feedId, parsed as PeerPlaybackTelemetry);
         } catch (e: any) {
-          Logger.error(`Remote feed ${feedId} telemetry parse failed`, e);
+          Logger.error(ErrorMessages.remoteFeedTelemetryParseFailed(feedId), e);
         }
       },
       onlocaltrack:()=>{},
@@ -229,7 +229,7 @@ class RemoteFeedManager {
     if(h){
       if(detach){
         try{h.detach();}catch(e:any){
-          Logger.error(`Remote feed ${id} detach failed`, e);
+          Logger.error(ErrorMessages.remoteFeedDetachFailed(id), e);
         }
       }
       this.feeds.delete(id);

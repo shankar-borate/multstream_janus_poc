@@ -28,14 +28,14 @@ class UrlConfig {
   static buildJoinConfig():JoinConfig{
     const roomIdRaw = this.getString("roomId", "");
     if(!roomIdRaw){
-      alert("This call link is missing a room ID, so we can't join yet. Please open the full link again or add ?roomId=1234 to the URL.");
-      throw new Error("Missing required query param: roomId");
+      alert(ErrorMessages.URL_ROOM_ID_ALERT);
+      throw new Error(ErrorMessages.URL_ROOM_ID_MISSING);
     }
 
     const roomId = parseInt(roomIdRaw, 10);
     if(!Number.isFinite(roomId)){
-      alert("This call link is missing a room ID, so we can't join yet. Please open the full link again or add ?roomId=1234 to the URL.");
-      throw new Error("Invalid query param: roomId must be a number");
+      alert(ErrorMessages.URL_ROOM_ID_ALERT);
+      throw new Error(ErrorMessages.URL_ROOM_ID_INVALID);
     }
 
     const participantIdRaw = this.getString("participantId", "");
@@ -43,7 +43,7 @@ class UrlConfig {
     if (participantIdRaw) {
       const parsedParticipantId = parseInt(participantIdRaw, 10);
       if (!Number.isFinite(parsedParticipantId) || parsedParticipantId <= 0) {
-        throw new Error("Invalid query param: participantId must be a positive number");
+        throw new Error(ErrorMessages.URL_PARTICIPANT_ID_INVALID);
       }
       participantId = parsedParticipantId;
     }

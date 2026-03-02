@@ -9,7 +9,7 @@ class JanusGateway {
     Janus.init({
       debug: APP_CONFIG.janus.initDebug,
       callback: () => {
-        Logger.setStatus("Janus initialized");
+        Logger.setStatus(ErrorMessages.JANUS_INITIALIZED);
         Logger.user("Janus.init done");
       }
     });
@@ -26,7 +26,7 @@ class JanusGateway {
     destroyed: () => void,
     onError?: (e: any) => void
   ) {
-    Logger.setStatus("Creating Janus session...");
+    Logger.setStatus(ErrorMessages.JANUS_CREATING_SESSION);
     Logger.user(`Creating Janus session: ${server}`);
 
     this.janus = new Janus({
@@ -38,8 +38,8 @@ class JanusGateway {
 
       success: ok,
       error: (e: any) => {
-        Logger.setStatus("Janus error: " + JSON.stringify(e));
-        Logger.error("Janus session create error: " + JSON.stringify(e));
+        Logger.setStatus(ErrorMessages.janusErrorStatus(e));
+        Logger.error(ErrorMessages.janusSessionCreateError(e));
         onError?.(e);
       },
       destroyed: () => {
@@ -57,9 +57,9 @@ class JanusGateway {
     onError?: (e: any) => void
   ) {
     if (!this.janus) {
-      Logger.setStatus("Janus not ready");
+      Logger.setStatus(ErrorMessages.JANUS_NOT_READY_STATUS);
       Logger.user("attachPublisher called but Janus session is null");
-      onError?.(new Error("Janus not ready"));
+      onError?.(new Error(ErrorMessages.JANUS_NOT_READY_ERROR));
       return;
     }
 
@@ -74,8 +74,8 @@ class JanusGateway {
         onAttached(h);
       },
       error: (e: any) => {
-        Logger.setStatus("Attach error: " + JSON.stringify(e));
-        Logger.error("Attach error: " + JSON.stringify(e));
+        Logger.setStatus(ErrorMessages.janusAttachErrorStatus(e));
+        Logger.error(ErrorMessages.janusAttachErrorLog(e));
         onError?.(e);
       },
       onmessage: (msg: any, jsep: any) => {
@@ -105,7 +105,7 @@ class JanusGateway {
     try {
       this.publisher?.detach?.();
     } catch (e: any) {
-      Logger.error("Publisher detach failed during destroy", e);
+      Logger.error(ErrorMessages.JANUS_PUBLISHER_DETACH_FAILED, e);
     }
 
     this.publisher = null;
@@ -113,7 +113,7 @@ class JanusGateway {
     try {
       this.janus?.destroy?.();
     } catch (e: any) {
-      Logger.error("Janus destroy failed", e);
+      Logger.error(ErrorMessages.JANUS_DESTROY_FAILED, e);
     }
 
     this.janus = null;

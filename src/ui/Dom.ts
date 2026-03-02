@@ -8,7 +8,7 @@ export class Dom {
     const el = document.getElementById(id);
 
     if (!el) {
-      throw new Error(`[DOM] Element not found: #${id}`);
+      throw new Error(ErrorMessages.domElementNotFound(id));
     }
 
     return el as T;

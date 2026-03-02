@@ -10,7 +10,7 @@ class MediaManager {
     video.muted = true;
     video.play().catch((e: any) => {
       if (e?.name === "AbortError") return;
-      Logger.error("Local video play failed", e);
+      Logger.error(ErrorMessages.MEDIA_LOCAL_VIDEO_PLAY_FAILED, e);
     });
   }
 
@@ -23,7 +23,7 @@ class MediaManager {
         try{
           t.stop();
         }catch(e:any){
-          Logger.error("Stopping replaced remote track failed", e);
+          Logger.error(ErrorMessages.MEDIA_STOP_REPLACED_REMOTE_TRACK_FAILED, e);
         }
       }
     });
@@ -39,7 +39,7 @@ class MediaManager {
       .catch((e:any)=>{
         // Normal when track/srcObject is reloaded during renegotiation.
         if (e?.name === "AbortError") return;
-        Logger.error("Remote video play failed", e);
+        Logger.error(ErrorMessages.MEDIA_REMOTE_VIDEO_PLAY_FAILED, e);
       })
       .finally(() => {
         this.remotePlayPromise = null;

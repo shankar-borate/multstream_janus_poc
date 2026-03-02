@@ -128,7 +128,10 @@ const APP_CONFIG = {
     minBitrateBps: 32000,
     maxBitrateBps: 1500000,
     minFramerate: 5,
-    maxFramerateCap: 30
+    maxFramerateCap: 30,
+    // Ordered by preference. Default: try VP9 first, then fallback to VP8.
+    videoCodecPreferenceOrder: ["vp8","vp9"] as const,
+    enableVideoCodecFallback: true
   },
   call: {
     reconnectDelayMs: 1000,

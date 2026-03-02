@@ -653,6 +653,6 @@ class ConnectionStatusEngine {
     const now = Date.now();
     if (now - this.lastStatsErrorLogAt < 5000) return;
     this.lastStatsErrorLogAt = now;
-    Logger.error(`[connection-status] ${message}`, err);
+    Logger.error(ErrorMessages.connectionStatusStatsError(message), err);
   }
 }
