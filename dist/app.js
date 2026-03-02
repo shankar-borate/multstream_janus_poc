@@ -398,6 +398,9 @@ ErrorMessages.CALL_REMOTE_VIDEO_UNSTABLE = "Remote video is unstable. Ask partic
 ErrorMessages.CALL_PUBLISH_IGNORED_PLUGIN_NOT_READY = "Publish ignored: plugin not ready";
 ErrorMessages.CALL_OFFER_ERROR_RECOVERING = "Offer error. Recovering media path...";
 ErrorMessages.CALL_OFFER_ERROR_CONSOLE_TAG = "VCX_OFFER_ERROR";
+ErrorMessages.CALL_AUDIO_UNMUTE_SIGNALING_FAILED = "Audio unmute signaling failed";
+ErrorMessages.CALL_AUDIO_MUTE_SIGNALING_FAILED = "Audio mute signaling failed";
+ErrorMessages.CALL_AUDIO_TOGGLE_FAILED = "Audio toggle failed";
 ErrorMessages.CALL_VIDEO_UNMUTE_SIGNALING_FAILED = "Video unmute signaling failed";
 ErrorMessages.CALL_VIDEO_MUTE_SIGNALING_FAILED = "Video mute signaling failed";
 ErrorMessages.CALL_VIDEO_TOGGLE_FAILED = "Video toggle failed";
@@ -3213,7 +3216,9 @@ class CallController {
         this.cameraStreamOrientation = null;
         this.publisherPc = null;
         this.subscriberPcs = new Map();
+        this.localAudioEnabled = true;
         this.localVideoEnabled = true;
+        this.audioToggleBusy = false;
         this.videoToggleBusy = false;
         this.screenToggleBusy = false;
         this.vbToggleBusy = false;
@@ -3248,7 +3253,7 @@ class CallController {
             },
             getPreferredAudioTrack: () => this.getPreferredAudioTrack(),
             isLocalAudioMuted: () => {
-                return typeof this.plugin?.isAudioMuted === "function" && this.plugin.isAudioMuted();
+                return !this.localAudioEnabled;
             },
             getPeerTelemetry: (now) => this.pickFreshPeerTelemetry(now),
             emitPeerTelemetry: (payload) => this.sendPeerTelemetry(payload)
@@ -3260,6 +3265,7 @@ class CallController {
         }
         this.activeJoinCfg = cfg;
         this.isLeaving = false;
+        this.localAudioEnabled = true;
         this.localVideoEnabled = true;
         this.suppressPublisherCleanupRetry = false;
         if (!opts?.internalRetry) {
@@ -3327,7 +3333,9 @@ class CallController {
         this.selfId = null;
         this.publisherPc = null;
         this.subscriberPcs.clear();
+        this.localAudioEnabled = true;
         this.localVideoEnabled = true;
+        this.audioToggleBusy = false;
         this.videoToggleBusy = false;
         this.screenToggleBusy = false;
         this.vbToggleBusy = false;
@@ -3337,6 +3345,7 @@ class CallController {
         this.roster.reset();
         this.bus.emit("recording-changed", false);
         this.bus.emit("joined", false);
+        this.bus.emit("mute-changed", false);
         this.suppressPublisherCleanupRetry = true;
         this.gateway.destroy();
     }
@@ -3962,11 +3971,58 @@ class CallController {
         this.schedulePeerRetry(ErrorMessages.callOfferErrorReason(e));
     }
     toggleMute() {
+        void this.setAudioEnabled(!this.localAudioEnabled);
+    }
+    async setAudioEnabled(enabled) {
         if (!this.plugin)
-            return;
-        const m = this.plugin.isAudioMuted();
-        m ? this.plugin.unmuteAudio() : this.plugin.muteAudio();
-        this.bus.emit("mute-changed", !m);
+            return this.localAudioEnabled;
+        if (this.audioToggleBusy)
+            return this.localAudioEnabled;
+        this.audioToggleBusy = true;
+        try {
+            const track = this.getPreferredAudioTrack();
+            if (enabled) {
+                if (track)
+                    track.enabled = true;
+                try {
+                    if (typeof this.plugin.unmuteAudio === "function") {
+                        this.plugin.unmuteAudio();
+                    }
+                    else {
+                        this.plugin.send({ message: { request: "configure", audio: true } });
+                    }
+                }
+                catch (e) {
+                    Logger.error(ErrorMessages.CALL_AUDIO_UNMUTE_SIGNALING_FAILED, e);
+                }
+                this.localAudioEnabled = true;
+            }
+            else {
+                if (track)
+                    track.enabled = false;
+                try {
+                    if (typeof this.plugin.muteAudio === "function") {
+                        this.plugin.muteAudio();
+                    }
+                    else {
+                        this.plugin.send({ message: { request: "configure", audio: false } });
+                    }
+                }
+                catch (e) {
+                    Logger.error(ErrorMessages.CALL_AUDIO_MUTE_SIGNALING_FAILED, e);
+                }
+                this.localAudioEnabled = false;
+            }
+        }
+        catch (e) {
+            Logger.error(ErrorMessages.CALL_AUDIO_TOGGLE_FAILED, e);
+            Logger.setStatus(MediaErrorUtils.getCameraMicErrorMessage(e));
+        }
+        finally {
+            this.audioToggleBusy = false;
+            this.bus.emit("mute-changed", !this.localAudioEnabled);
+        }
+        return this.localAudioEnabled;
     }
     async setVideoEnabled(enabled) {
         if (!this.plugin)
@@ -3975,28 +4031,29 @@ class CallController {
             return this.localVideoEnabled;
         this.videoToggleBusy = true;
         try {
+            const activeVideoTrack = this.screenEnabled
+                ? this.screenManager.getStream()?.getVideoTracks()[0]
+                : this.vbEnabled
+                    ? this.vbManager.getOutputStream()?.getVideoTracks()[0]
+                    : this.cameraStream?.getVideoTracks()[0];
             if (enabled) {
-                let track;
-                if (this.vbEnabled) {
-                    const vbSourceTrack = this.vbManager.getSourceStream()?.getVideoTracks()[0] ?? this.cameraStream?.getVideoTracks()[0];
-                    if (vbSourceTrack)
-                        vbSourceTrack.enabled = true;
-                }
-                if (this.screenEnabled) {
-                    track = this.screenManager.getStream()?.getVideoTracks()[0];
-                }
-                else if (this.vbEnabled) {
-                    track = this.vbManager.getOutputStream()?.getVideoTracks()[0];
-                }
+                let track = activeVideoTrack;
                 if (!track) {
                     const cam = await this.ensureCameraStream();
-                    track = cam.getVideoTracks()[0];
+                    track = this.vbEnabled
+                        ? this.vbManager.getOutputStream()?.getVideoTracks()[0] ?? cam.getVideoTracks()[0]
+                        : cam.getVideoTracks()[0];
+                    if (this.vbEnabled) {
+                        const vbSourceTrack = this.vbManager.getSourceStream()?.getVideoTracks()[0] ?? cam.getVideoTracks()[0];
+                        if (vbSourceTrack)
+                            vbSourceTrack.enabled = true;
+                    }
                 }
                 if (track) {
                     track.enabled = true;
-                    this.replaceVideoTrack(track);
+                    this.connectionEngine.onLocalTrackSignal(track, true);
+                    this.media.setLocalTrack(this.localVideo, track);
                 }
-                await this.ensureOutgoingAudio({ camera: this.cameraStream });
                 try {
                     if (typeof this.plugin.unmuteVideo === "function") {
                         this.plugin.unmuteVideo();
@@ -4022,14 +4079,10 @@ class CallController {
                 catch (e) {
                     Logger.error(ErrorMessages.CALL_VIDEO_MUTE_SIGNALING_FAILED, e);
                 }
-                const localTrack = this.screenEnabled
-                    ? this.screenManager.getStream()?.getVideoTracks()[0]
-                    : this.vbEnabled
-                        ? this.vbManager.getOutputStream()?.getVideoTracks()[0]
-                        : this.cameraStream?.getVideoTracks()[0];
-                if (localTrack) {
-                    localTrack.enabled = false;
-                    this.connectionEngine.onLocalTrackSignal(localTrack, false);
+                if (activeVideoTrack) {
+                    activeVideoTrack.enabled = false;
+                    this.connectionEngine.onLocalTrackSignal(activeVideoTrack, false);
+                    this.media.setLocalTrack(this.localVideo, activeVideoTrack);
                 }
                 this.localVideoEnabled = false;
             }
@@ -4171,13 +4224,16 @@ class CallController {
             this.publisherPc = null;
             this.subscriberPcs.clear();
             this.peerTelemetryByFeed.clear();
+            this.localAudioEnabled = true;
             this.localVideoEnabled = true;
+            this.audioToggleBusy = false;
             this.videoToggleBusy = false;
             this.screenToggleBusy = false;
             this.vbToggleBusy = false;
             this.roster.reset();
             this.bus.emit("recording-changed", false);
             this.bus.emit("joined", false);
+            this.bus.emit("mute-changed", false);
             this.bus.emit("video-mute-changed", false);
             this.connectionEngine.onLeft();
             this.media.clearLocal(this.localVideo);
@@ -4316,6 +4372,7 @@ class CallController {
                 this.cameraStreamOrientation = desiredOrientation;
                 const nextAudio = nextStream.getAudioTracks()[0];
                 if (nextAudio && (!this.screenEnabled || !this.mixedAudioTrack)) {
+                    nextAudio.enabled = this.localAudioEnabled;
                     this.syncPublishedAudioTrack(nextAudio);
                 }
                 if (previous && previous !== nextStream) {
@@ -4411,7 +4468,7 @@ class CallController {
         }
         if (!preferred)
             return;
-        preferred.enabled = true;
+        preferred.enabled = this.localAudioEnabled;
         this.syncPublishedAudioTrack(preferred);
     }
     async ensureOutgoingAudio(opts) {
@@ -4424,7 +4481,7 @@ class CallController {
             const displayAudioTrack = screen?.getAudioTracks()[0] ?? null;
             const outgoing = await this.resolveScreenShareAudioTrack(micTrack, displayAudioTrack);
             if (outgoing) {
-                outgoing.enabled = true;
+                outgoing.enabled = this.localAudioEnabled;
                 this.syncPublishedAudioTrack(outgoing);
             }
             else {
@@ -4437,7 +4494,7 @@ class CallController {
         }
         const micTrack = camera.getAudioTracks()[0] ?? null;
         if (micTrack) {
-            micTrack.enabled = true;
+            micTrack.enabled = this.localAudioEnabled;
             this.syncPublishedAudioTrack(micTrack);
         }
         else {

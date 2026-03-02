@@ -129,6 +129,9 @@ class ErrorMessages {
   static readonly CALL_PUBLISH_IGNORED_PLUGIN_NOT_READY = "Publish ignored: plugin not ready";
   static readonly CALL_OFFER_ERROR_RECOVERING = "Offer error. Recovering media path...";
   static readonly CALL_OFFER_ERROR_CONSOLE_TAG = "VCX_OFFER_ERROR";
+  static readonly CALL_AUDIO_UNMUTE_SIGNALING_FAILED = "Audio unmute signaling failed";
+  static readonly CALL_AUDIO_MUTE_SIGNALING_FAILED = "Audio mute signaling failed";
+  static readonly CALL_AUDIO_TOGGLE_FAILED = "Audio toggle failed";
   static readonly CALL_VIDEO_UNMUTE_SIGNALING_FAILED = "Video unmute signaling failed";
   static readonly CALL_VIDEO_MUTE_SIGNALING_FAILED = "Video mute signaling failed";
   static readonly CALL_VIDEO_TOGGLE_FAILED = "Video toggle failed";
