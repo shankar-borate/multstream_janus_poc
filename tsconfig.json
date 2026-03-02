@@ -36,6 +36,7 @@
     "src/managers/ScreenShareManager.ts",
     "src/managers/NetworkQualityManager.ts",
     "src/managers/ConnectionStatusEngine.ts",
+    "src/managers/CallMonitoringStat.ts",
     "src/managers/JanusGateway.ts",
     "src/managers/RemoteFeedManager.ts",
     "src/managers/CallController.ts",

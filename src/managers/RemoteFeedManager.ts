@@ -18,6 +18,12 @@ class RemoteFeedManager {
     private observer?: RemoteFeedObserver
   ){}
 
+  private notifySubscriberPcReady(feedId: number, handle: any) {
+    const pc = handle?.webrtcStuff?.pc as RTCPeerConnection | undefined;
+    if (!pc) return;
+    this.observer?.onSubscriberPcReady?.(feedId, pc);
+  }
+
   private clearAttachTimer(feedId: number){
     const t = this.pendingAttachTimers.get(feedId);
     if(t !== undefined){
@@ -118,6 +124,8 @@ class RemoteFeedManager {
         this.pendingFeedAttach.delete(feedId);
         this.clearAttachTimer(feedId);
         this.feeds.set(feedId,h);
+        // PC may already exist for some browsers/Janus timings.
+        this.notifySubscriberPcReady(feedId, h);
         this.resetRetryState(feedId);
         this.clearFeedStartTimer(feedId);
         const startTimer = window.setTimeout(()=>{
@@ -146,11 +154,8 @@ class RemoteFeedManager {
         }
         if(jsep){
           this.clearFeedStartTimer(feedId);
-          // TODO: If Janus internals change and webrtcStuff.pc is unavailable, pass the subscriber PC from a Janus plugin callback here.
-          const pc = remoteHandle?.webrtcStuff?.pc as RTCPeerConnection | undefined;
-          if(pc){
-            this.observer?.onSubscriberPcReady?.(feedId, pc);
-          }
+          // PC may appear only when remote SDP flow reaches this point.
+          this.notifySubscriberPcReady(feedId, remoteHandle);
           const answerTracks = [
             {type:"audio",capture:false,recv:true},
             {type:"video",capture:false,recv:true}
@@ -181,6 +186,8 @@ class RemoteFeedManager {
       },
       onlocaltrack:()=>{},
       onremotetrack:(track:MediaStreamTrack,_mid:string,on:boolean)=>{
+        // Last chance to bind subscriber PC if it appeared late.
+        this.notifySubscriberPcReady(feedId, remoteHandle);
         this.observer?.onRemoteTrackSignal?.(feedId, track, on);
         if(on){
           this.resetRetryState(feedId);

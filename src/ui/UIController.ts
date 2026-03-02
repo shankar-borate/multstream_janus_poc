@@ -52,6 +52,7 @@ class UIController {
   private mLocalRecvAudio = document.getElementById("mLocalRecvAudio") as HTMLDivElement;
   private mLocalAudioPlayback = document.getElementById("mLocalAudioPlayback") as HTMLDivElement;
   private mLocalVideoPlayback = document.getElementById("mLocalVideoPlayback") as HTMLDivElement;
+  private prevMediaBytes: MediaIoSnapshot["bytes"] | null = null;
 
   private audioMuted = false;
   private videoMuted = false;
@@ -586,11 +587,49 @@ class UIController {
     return `${v.toFixed(1)}`;
   }
 
+  private formatBytesWithTrend(current: number, previous: number | null): { text: string; color: string } {
+    const increasing = previous === null ? current > 0 : current > previous;
+    const symbol = increasing ? "✔" : "✖";
+    const color = increasing ? "#16a34a" : "#dc2626";
+    return {
+      text: `${this.formatBytes(current)} [${symbol}]`,
+      color
+    };
+  }
+
+  private renderStatusBadge(el: HTMLElement, value: string) {
+    const normalized = String(value || "").trim();
+    let symbol = "•";
+    let color = "#6b7280";
+
+    if (normalized === "Yes" || normalized === "Active") {
+      symbol = "✔";
+      color = "#16a34a";
+    } else if (normalized === "No" || normalized === "Stalled" || normalized === "Not possible") {
+      symbol = "✖";
+      color = "#dc2626";
+    } else if (normalized === "Pending") {
+      symbol = "•";
+      color = "#d97706";
+    }
+
+    el.textContent = `${symbol} ${normalized}`;
+    el.style.color = color;
+    el.style.fontWeight = "600";
+  }
+
   private renderMediaIo(stats: MediaIoSnapshot) {
     if (this.mediaIoBytes) {
-      this.mediaIoBytes.textContent =
-        `A(sent/recv): ${this.formatBytes(stats.bytes.audioSent)} / ${this.formatBytes(stats.bytes.audioReceived)} | ` +
-        `V(sent/recv): ${this.formatBytes(stats.bytes.videoSent)} / ${this.formatBytes(stats.bytes.videoReceived)}`;
+      const prev = this.prevMediaBytes;
+      const aSent = this.formatBytesWithTrend(stats.bytes.audioSent, prev?.audioSent ?? null);
+      const aRecv = this.formatBytesWithTrend(stats.bytes.audioReceived, prev?.audioReceived ?? null);
+      const vSent = this.formatBytesWithTrend(stats.bytes.videoSent, prev?.videoSent ?? null);
+      const vRecv = this.formatBytesWithTrend(stats.bytes.videoReceived, prev?.videoReceived ?? null);
+      this.mediaIoBytes.innerHTML =
+        `A(sent/recv): <span style="color:${aSent.color};font-weight:600">${aSent.text}</span> / ` +
+        `<span style="color:${aRecv.color};font-weight:600">${aRecv.text}</span> | ` +
+        `V(sent/recv): <span style="color:${vSent.color};font-weight:600">${vSent.text}</span> / ` +
+        `<span style="color:${vRecv.color};font-weight:600">${vRecv.text}</span>`;
     }
     if (this.mediaIoIssues) {
       this.mediaIoIssues.textContent = stats.issues.length > 0
@@ -598,19 +637,20 @@ class UIController {
         : "";
     }
 
-    this.mRemoteRecvVideo.textContent = stats.matrix.remoteReceivingYourVideo;
-    this.mRemoteRecvAudio.textContent = stats.matrix.remoteReceivingYourAudio;
-    this.mRemoteAudioPlayback.textContent = stats.matrix.remoteAudioPlaybackStatus;
-    this.mRemoteVideoPlayback.textContent = stats.matrix.remoteVideoPlaybackStatus;
-    this.mLocalRecvVideo.textContent = stats.matrix.localReceivingYourVideo;
-    this.mLocalRecvAudio.textContent = stats.matrix.localReceivingYourAudio;
-    this.mLocalAudioPlayback.textContent = stats.matrix.localAudioPlaybackStatus;
-    this.mLocalVideoPlayback.textContent = stats.matrix.localVideoPlaybackStatus;
+    this.renderStatusBadge(this.mRemoteRecvVideo, stats.matrix.remoteReceivingYourVideo);
+    this.renderStatusBadge(this.mRemoteRecvAudio, stats.matrix.remoteReceivingYourAudio);
+    this.renderStatusBadge(this.mRemoteAudioPlayback, stats.matrix.remoteAudioPlaybackStatus);
+    this.renderStatusBadge(this.mRemoteVideoPlayback, stats.matrix.remoteVideoPlaybackStatus);
+    this.renderStatusBadge(this.mLocalRecvVideo, stats.matrix.localReceivingYourVideo);
+    this.renderStatusBadge(this.mLocalRecvAudio, stats.matrix.localReceivingYourAudio);
+    this.renderStatusBadge(this.mLocalAudioPlayback, stats.matrix.localAudioPlaybackStatus);
+    this.renderStatusBadge(this.mLocalVideoPlayback, stats.matrix.localVideoPlaybackStatus);
 
     this.localQD.textContent =
       `jitter=${this.formatQuality(stats.quality.localJitterMs)}ms loss=${this.formatQuality(stats.quality.localLossPct)}%`;
     this.remoteQD.textContent =
       `jitter=${this.formatQuality(stats.quality.remoteJitterMs)}ms loss=${this.formatQuality(stats.quality.remoteLossPct)}%`;
+    this.prevMediaBytes = { ...stats.bytes };
   }
 
   private setupNetworkUI() {
