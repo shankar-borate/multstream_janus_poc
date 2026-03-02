@@ -379,6 +379,7 @@ ErrorMessages.VB_SOURCE_RECOVERY_FAILED = "Virtual background source recovery fa
 ErrorMessages.VB_SEGMENTATION_FRAME_FAILED = "Virtual background segmentation frame failed";
 ErrorMessages.VB_LOOP_FAILED = "Virtual background loop failed";
 ErrorMessages.VB_COMPOSITION_FAILED = "Virtual background composition failed";
+ErrorMessages.VB_OUTPUT_FRAME_TIMEOUT = "Virtual background output frame timeout";
 ErrorMessages.VB_ENABLED = "Virtual background enabled";
 ErrorMessages.VB_DISABLED = "Virtual background disabled";
 ErrorMessages.CALL_SERVER_RETRY_LIMIT_REACHED = "Video server call failed. Retry limit reached.";
@@ -413,6 +414,7 @@ ErrorMessages.CALL_SCREEN_SHARE_STOPPED = "Screen share stopped";
 ErrorMessages.CALL_DISABLE_SCREEN_BEFORE_VB = "Disable screen share before virtual background";
 ErrorMessages.CALL_SCREEN_SHARE_TOGGLE_FAILED = "Screen share toggle failed";
 ErrorMessages.CALL_VB_TOGGLE_FAILED = "Virtual background toggle failed";
+ErrorMessages.CALL_VB_FALLBACK_TO_CAMERA = "Virtual background failed to stream. Switched back to camera.";
 ErrorMessages.CALL_STOP_STALE_CAMERA_TRACK_FAILED = "Stopping stale camera track failed";
 ErrorMessages.CALL_CAMERA_ACCESS_FAILED = "Camera access failed";
 ErrorMessages.CALL_REPLACE_VIDEO_TRACK_FAILED = "replaceVideoTrack failed";
@@ -1251,6 +1253,9 @@ class VirtualBackgroundManager {
         this.sourceProvider = null;
         this.lastRecoverAttemptAt = 0;
         this.recoverCooldownMs = 1200;
+        this.sourceReadyTimeoutMs = 2500;
+        this.outputReadyTimeoutMs = 2000;
+        this.hasRenderedFrame = false;
         this.bgUrl = this.getBgUrl();
         this.bg.src = this.bgUrl;
         this.canvas = document.createElement("canvas");
@@ -1349,6 +1354,7 @@ class VirtualBackgroundManager {
             if (e?.name === "AbortError")
                 return;
             Logger.error(ErrorMessages.VB_INPUT_VIDEO_PLAY_FAILED, e);
+            throw e;
         });
     }
     ensureSegmentation() {
@@ -1367,15 +1373,30 @@ class VirtualBackgroundManager {
         this.maskVotes.normal = 0;
         this.maskVotes.inverted = 0;
         this.maskProbeFrames = 0;
-        await this.prepareSourceStream(stream);
-        await this.ensureBgLoaded();
-        this.ensureSegmentation();
-        this.running = true;
-        this.loop();
-        this.outStream = this.canvas.captureStream(24);
-        Logger.user("Virtual background enabled");
-        Logger.setStatus(ErrorMessages.VB_ENABLED);
-        return this.outStream;
+        this.hasRenderedFrame = false;
+        try {
+            await this.prepareSourceStream(stream);
+            await this.waitForInputVideoFrame(this.sourceReadyTimeoutMs);
+            await this.ensureBgLoaded();
+            this.ensureSegmentation();
+            this.primeOutputCanvasFromInput();
+            this.outStream = this.canvas.captureStream(24);
+            const outTrack = this.outStream.getVideoTracks()[0];
+            if (!outTrack) {
+                throw new Error(ErrorMessages.CALL_VB_OUTPUT_TRACK_UNAVAILABLE);
+            }
+            outTrack.enabled = true;
+            this.running = true;
+            this.loop();
+            await this.waitForRenderedOutputFrame(this.outputReadyTimeoutMs);
+            Logger.user("Virtual background enabled");
+            Logger.setStatus(ErrorMessages.VB_ENABLED);
+            return this.outStream;
+        }
+        catch (e) {
+            this.disable();
+            throw e;
+        }
     }
     disable() {
         this.running = false;
@@ -1427,6 +1448,7 @@ class VirtualBackgroundManager {
                         this.ctx.globalCompositeOperation = "source-over";
                         this.ctx.clearRect(0, 0, w, h);
                         this.ctx.drawImage(this.inVideo, 0, 0, w, h);
+                        this.hasRenderedFrame = true;
                         // Kick segmentation in non-blocking mode to avoid loop freeze.
                         if (!this.segInFlight && this.seg) {
                             this.segInFlight = true;
@@ -1516,10 +1538,40 @@ class VirtualBackgroundManager {
                 dst[i + 3] = 255;
             }
             this.ctx.putImageData(out, 0, 0);
+            this.hasRenderedFrame = true;
         }
         catch (e) {
             Logger.error(ErrorMessages.VB_COMPOSITION_FAILED, e);
         }
+    }
+    async waitForInputVideoFrame(timeoutMs) {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            if (this.inVideo.readyState >= 2 && this.inVideo.videoWidth > 0 && this.inVideo.videoHeight > 0) {
+                return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        throw new Error(ErrorMessages.VB_SOURCE_TRACK_UNAVAILABLE);
+    }
+    primeOutputCanvasFromInput() {
+        const w = this.inVideo.videoWidth || 640;
+        const h = this.inVideo.videoHeight || 480;
+        this.ensureCanvasSizes(w, h);
+        this.ctx.globalCompositeOperation = "source-over";
+        this.ctx.clearRect(0, 0, w, h);
+        this.ctx.drawImage(this.inVideo, 0, 0, w, h);
+        this.hasRenderedFrame = true;
+    }
+    async waitForRenderedOutputFrame(timeoutMs) {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            if (this.hasRenderedFrame) {
+                return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 33));
+        }
+        throw new Error(ErrorMessages.VB_OUTPUT_FRAME_TIMEOUT);
     }
     getMaskMode(maskData, w, h) {
         const configured = APP_CONFIG.virtualBackground.maskMode;
@@ -4223,27 +4275,20 @@ class CallController {
                 track.enabled = true;
                 this.vbEnabled = true;
                 this.localVideoEnabled = true;
-                await this.ensureOutgoingAudio({ camera: cam });
                 this.replaceVideoTrack(track);
+                this.guardVirtualBackgroundTrack(track, camVideoTrack ?? null);
                 this.bus.emit("video-mute-changed", false);
-                const micTrack = cam.getAudioTracks()[0];
-                if (micTrack)
-                    this.syncPublishedAudioTrack(micTrack);
                 this.bus.emit("vb-changed", true);
             }
             else {
                 this.vbManager.disable();
                 this.vbEnabled = false;
                 const cam = await this.ensureCameraStream();
-                await this.ensureOutgoingAudio({ camera: cam });
                 const track = cam.getVideoTracks()[0];
                 if (track) {
                     track.enabled = this.localVideoEnabled;
                     this.replaceVideoTrack(track);
                 }
-                const micTrack = cam.getAudioTracks()[0];
-                if (micTrack)
-                    this.syncPublishedAudioTrack(micTrack);
                 this.bus.emit("vb-changed", false);
             }
         }
@@ -4310,6 +4355,37 @@ class CallController {
             throw e;
         }
     }
+    guardVirtualBackgroundTrack(vbTrack, fallbackCameraTrack) {
+        window.setTimeout(() => {
+            const recover = async () => {
+                if (!this.vbEnabled)
+                    return;
+                const vbTrackBroken = vbTrack.readyState !== "live" || vbTrack.muted === true;
+                if (!vbTrackBroken)
+                    return;
+                Logger.warn("Virtual background output track is not flowing. Falling back to camera.");
+                this.vbManager.disable();
+                this.vbEnabled = false;
+                if (fallbackCameraTrack && fallbackCameraTrack.readyState === "live") {
+                    fallbackCameraTrack.enabled = this.localVideoEnabled;
+                    this.replaceVideoTrack(fallbackCameraTrack);
+                }
+                else {
+                    const activeCamera = await this.ensureCameraStream();
+                    const freshTrack = activeCamera.getVideoTracks()[0];
+                    if (freshTrack) {
+                        freshTrack.enabled = this.localVideoEnabled;
+                        this.replaceVideoTrack(freshTrack);
+                    }
+                }
+                this.bus.emit("vb-changed", false);
+                Logger.setStatus(ErrorMessages.CALL_VB_FALLBACK_TO_CAMERA);
+            };
+            void recover().catch((e) => {
+                Logger.error(ErrorMessages.CALL_VB_TOGGLE_FAILED, e);
+            });
+        }, 1500);
+    }
     replaceVideoTrack(track) {
         if (!this.plugin)
             return;
@@ -4319,7 +4395,6 @@ class CallController {
             });
             this.connectionEngine.onLocalTrackSignal(track, track.enabled !== false);
             this.media.setLocalTrack(this.localVideo, track);
-            this.syncPreferredAudioTrack();
         }
         catch (e) {
             Logger.error(ErrorMessages.CALL_REPLACE_VIDEO_TRACK_FAILED, e);

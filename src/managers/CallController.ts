@@ -1225,24 +1225,19 @@ class CallController {
         track.enabled = true;
         this.vbEnabled = true;
         this.localVideoEnabled = true;
-        await this.ensureOutgoingAudio({ camera: cam });
         this.replaceVideoTrack(track);
+        this.guardVirtualBackgroundTrack(track, camVideoTrack ?? null);
         this.bus.emit("video-mute-changed", false);
-        const micTrack = cam.getAudioTracks()[0];
-        if (micTrack) this.syncPublishedAudioTrack(micTrack);
         this.bus.emit("vb-changed", true);
       } else {
         this.vbManager.disable();
         this.vbEnabled = false;
         const cam = await this.ensureCameraStream();
-        await this.ensureOutgoingAudio({ camera: cam });
         const track = cam.getVideoTracks()[0];
         if (track) {
           track.enabled = this.localVideoEnabled;
           this.replaceVideoTrack(track);
         }
-        const micTrack = cam.getAudioTracks()[0];
-        if (micTrack) this.syncPublishedAudioTrack(micTrack);
         this.bus.emit("vb-changed", false);
       }
     } catch (e: any) {
@@ -1310,6 +1305,37 @@ class CallController {
     }
   }
 
+  private guardVirtualBackgroundTrack(vbTrack: MediaStreamTrack, fallbackCameraTrack: MediaStreamTrack | null): void {
+    window.setTimeout(() => {
+      const recover = async () => {
+        if (!this.vbEnabled) return;
+        const vbTrackBroken = vbTrack.readyState !== "live" || vbTrack.muted === true;
+        if (!vbTrackBroken) return;
+
+        Logger.warn("Virtual background output track is not flowing. Falling back to camera.");
+        this.vbManager.disable();
+        this.vbEnabled = false;
+
+        if (fallbackCameraTrack && fallbackCameraTrack.readyState === "live") {
+          fallbackCameraTrack.enabled = this.localVideoEnabled;
+          this.replaceVideoTrack(fallbackCameraTrack);
+        } else {
+          const activeCamera = await this.ensureCameraStream();
+          const freshTrack = activeCamera.getVideoTracks()[0];
+          if (freshTrack) {
+            freshTrack.enabled = this.localVideoEnabled;
+            this.replaceVideoTrack(freshTrack);
+          }
+        }
+        this.bus.emit("vb-changed", false);
+        Logger.setStatus(ErrorMessages.CALL_VB_FALLBACK_TO_CAMERA);
+      };
+      void recover().catch((e: any) => {
+        Logger.error(ErrorMessages.CALL_VB_TOGGLE_FAILED, e);
+      });
+    }, 1500);
+  }
+
   private replaceVideoTrack(track: MediaStreamTrack) {
     if (!this.plugin) return;
     try {
@@ -1318,7 +1344,6 @@ class CallController {
       });
       this.connectionEngine.onLocalTrackSignal(track, track.enabled !== false);
       this.media.setLocalTrack(this.localVideo, track);
-      this.syncPreferredAudioTrack();
     } catch (e: any) {
       Logger.error(ErrorMessages.CALL_REPLACE_VIDEO_TRACK_FAILED, e);
       Logger.setStatus(ErrorMessages.CALL_VIDEO_TRACK_SWITCH_FAILED);

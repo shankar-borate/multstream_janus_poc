@@ -20,6 +20,9 @@ class VirtualBackgroundManager {
   private sourceProvider: (() => Promise<MediaStream | null>) | null = null;
   private lastRecoverAttemptAt = 0;
   private readonly recoverCooldownMs = 1200;
+  private readonly sourceReadyTimeoutMs = 2500;
+  private readonly outputReadyTimeoutMs = 2000;
+  private hasRenderedFrame = false;
 
   private bgUrl = this.getBgUrl();
 
@@ -127,6 +130,7 @@ class VirtualBackgroundManager {
     await this.inVideo.play().catch((e:any)=>{
       if (e?.name === "AbortError") return;
       Logger.error(ErrorMessages.VB_INPUT_VIDEO_PLAY_FAILED, e);
+      throw e;
     });
   }
 
@@ -146,17 +150,33 @@ class VirtualBackgroundManager {
     this.maskVotes.normal = 0;
     this.maskVotes.inverted = 0;
     this.maskProbeFrames = 0;
+    this.hasRenderedFrame = false;
 
-    await this.prepareSourceStream(stream);
-    await this.ensureBgLoaded();
-    this.ensureSegmentation();
+    try {
+      await this.prepareSourceStream(stream);
+      await this.waitForInputVideoFrame(this.sourceReadyTimeoutMs);
+      await this.ensureBgLoaded();
+      this.ensureSegmentation();
 
-    this.running = true;
-    this.loop();
-    this.outStream = this.canvas.captureStream(24);
-    Logger.user("Virtual background enabled");
-    Logger.setStatus(ErrorMessages.VB_ENABLED);
-    return this.outStream;
+      this.primeOutputCanvasFromInput();
+      this.outStream = this.canvas.captureStream(24);
+      const outTrack = this.outStream.getVideoTracks()[0];
+      if (!outTrack) {
+        throw new Error(ErrorMessages.CALL_VB_OUTPUT_TRACK_UNAVAILABLE);
+      }
+      outTrack.enabled = true;
+
+      this.running = true;
+      this.loop();
+      await this.waitForRenderedOutputFrame(this.outputReadyTimeoutMs);
+
+      Logger.user("Virtual background enabled");
+      Logger.setStatus(ErrorMessages.VB_ENABLED);
+      return this.outStream;
+    } catch (e: any) {
+      this.disable();
+      throw e;
+    }
   }
 
   disable(){
@@ -208,6 +228,7 @@ class VirtualBackgroundManager {
             this.ctx.globalCompositeOperation = "source-over";
             this.ctx.clearRect(0, 0, w, h);
             this.ctx.drawImage(this.inVideo, 0, 0, w, h);
+            this.hasRenderedFrame = true;
 
             // Kick segmentation in non-blocking mode to avoid loop freeze.
             if (!this.segInFlight && this.seg) {
@@ -293,9 +314,42 @@ class VirtualBackgroundManager {
       }
 
       this.ctx.putImageData(out, 0, 0);
+      this.hasRenderedFrame = true;
     } catch (e: any) {
       Logger.error(ErrorMessages.VB_COMPOSITION_FAILED, e);
     }
+  }
+
+  private async waitForInputVideoFrame(timeoutMs: number): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (this.inVideo.readyState >= 2 && this.inVideo.videoWidth > 0 && this.inVideo.videoHeight > 0) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error(ErrorMessages.VB_SOURCE_TRACK_UNAVAILABLE);
+  }
+
+  private primeOutputCanvasFromInput(): void {
+    const w = this.inVideo.videoWidth || 640;
+    const h = this.inVideo.videoHeight || 480;
+    this.ensureCanvasSizes(w, h);
+    this.ctx.globalCompositeOperation = "source-over";
+    this.ctx.clearRect(0, 0, w, h);
+    this.ctx.drawImage(this.inVideo, 0, 0, w, h);
+    this.hasRenderedFrame = true;
+  }
+
+  private async waitForRenderedOutputFrame(timeoutMs: number): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (this.hasRenderedFrame) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 33));
+    }
+    throw new Error(ErrorMessages.VB_OUTPUT_FRAME_TIMEOUT);
   }
 
   private getMaskMode(maskData: ImageData, w: number, h: number): "normal" | "inverted" {

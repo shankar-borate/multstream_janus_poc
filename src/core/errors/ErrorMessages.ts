@@ -109,6 +109,7 @@ class ErrorMessages {
   static readonly VB_SEGMENTATION_FRAME_FAILED = "Virtual background segmentation frame failed";
   static readonly VB_LOOP_FAILED = "Virtual background loop failed";
   static readonly VB_COMPOSITION_FAILED = "Virtual background composition failed";
+  static readonly VB_OUTPUT_FRAME_TIMEOUT = "Virtual background output frame timeout";
   static readonly VB_ENABLED = "Virtual background enabled";
   static readonly VB_DISABLED = "Virtual background disabled";
 
@@ -144,6 +145,7 @@ class ErrorMessages {
   static readonly CALL_DISABLE_SCREEN_BEFORE_VB = "Disable screen share before virtual background";
   static readonly CALL_SCREEN_SHARE_TOGGLE_FAILED = "Screen share toggle failed";
   static readonly CALL_VB_TOGGLE_FAILED = "Virtual background toggle failed";
+  static readonly CALL_VB_FALLBACK_TO_CAMERA = "Virtual background failed to stream. Switched back to camera.";
   static readonly CALL_STOP_STALE_CAMERA_TRACK_FAILED = "Stopping stale camera track failed";
   static readonly CALL_CAMERA_ACCESS_FAILED = "Camera access failed";
   static readonly CALL_REPLACE_VIDEO_TRACK_FAILED = "replaceVideoTrack failed";
