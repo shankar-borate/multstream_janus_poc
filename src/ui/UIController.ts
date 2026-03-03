@@ -585,12 +585,18 @@ class UIController {
     return `${v.toFixed(1)}`;
   }
 
-  private formatBytesWithTrend(current: number, previous: number | null): { text: string; color: string } {
-    const increasing = previous === null ? current > 0 : current > previous;
-    const symbol = increasing ? "✔" : "✖";
-    const color = increasing ? "#16a34a" : "#dc2626";
+  private formatFlowBytes(
+    current: number,
+    previous: number | null,
+    minDeltaBytes: number,
+    forceStopped: boolean = false
+  ): { text: string; color: string } {
+    const delta = previous === null ? 0 : Math.max(0, current - previous);
+    const flowing = !forceStopped && delta >= minDeltaBytes;
+    const symbol = flowing ? "+" : "x";
+    const color = flowing ? "#16a34a" : "#dc2626";
     return {
-      text: `${this.formatBytes(current)} [${symbol}]`,
+      text: `${this.formatBytes(delta)} [${symbol}]`,
       color
     };
   }
@@ -619,10 +625,12 @@ class UIController {
   private renderMediaIo(stats: MediaIoSnapshot) {
     if (this.mediaIoBytes) {
       const prev = this.prevMediaBytes;
-      const aSent = this.formatBytesWithTrend(stats.bytes.audioSent, prev?.audioSent ?? null);
-      const aRecv = this.formatBytesWithTrend(stats.bytes.audioReceived, prev?.audioReceived ?? null);
-      const vSent = this.formatBytesWithTrend(stats.bytes.videoSent, prev?.videoSent ?? null);
-      const vRecv = this.formatBytesWithTrend(stats.bytes.videoReceived, prev?.videoReceived ?? null);
+      const audioMinDeltaBytes = 64;
+      const videoMinDeltaBytes = 512;
+      const aSent = this.formatFlowBytes(stats.bytes.audioSent, prev?.audioSent ?? null, audioMinDeltaBytes, this.audioMuted);
+      const aRecv = this.formatFlowBytes(stats.bytes.audioReceived, prev?.audioReceived ?? null, audioMinDeltaBytes, false);
+      const vSent = this.formatFlowBytes(stats.bytes.videoSent, prev?.videoSent ?? null, videoMinDeltaBytes, this.videoMuted);
+      const vRecv = this.formatFlowBytes(stats.bytes.videoReceived, prev?.videoReceived ?? null, videoMinDeltaBytes, false);
       this.mediaIoBytes.innerHTML =
         `A(sent/recv): <span style="color:${aSent.color};font-weight:600">${aSent.text}</span> / ` +
         `<span style="color:${aRecv.color};font-weight:600">${aRecv.text}</span> | ` +

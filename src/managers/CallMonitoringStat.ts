@@ -16,6 +16,8 @@ class CallMonitoringStat {
   private outboundPrev = { audio: 0, video: 0 };
   private outboundAudioPacketsPrev = 0;
   private inboundPrev = { audio: 0, video: 0 };
+  private inboundPacketsPrev = { audio: 0, video: 0 };
+  private inboundVideoFramesDecodedPrev = 0;
   private remoteInboundPrev = { audioPackets: 0, videoPackets: 0 };
   private remoteReceiveGrowthAt = { audio: 0, video: 0 };
   private localReceiveGrowthAt = { audio: 0, video: 0 };
@@ -36,6 +38,8 @@ class CallMonitoringStat {
     this.outboundPrev = { audio: 0, video: 0 };
     this.outboundAudioPacketsPrev = 0;
     this.inboundPrev = { audio: 0, video: 0 };
+    this.inboundPacketsPrev = { audio: 0, video: 0 };
+    this.inboundVideoFramesDecodedPrev = 0;
     this.remoteInboundPrev = { audioPackets: 0, videoPackets: 0 };
     this.remoteReceiveGrowthAt = { audio: 0, video: 0 };
     this.localReceiveGrowthAt = { audio: 0, video: 0 };
@@ -126,9 +130,17 @@ class CallMonitoringStat {
     const videoSentDelta = Math.max(0, publisherMetrics.videoBytesSent - this.outboundPrev.video);
     const audioRecvDelta = Math.max(0, subscriberMetrics.audioBytesReceived - this.inboundPrev.audio);
     const videoRecvDelta = Math.max(0, subscriberMetrics.videoBytesReceived - this.inboundPrev.video);
+    const audioPacketsRecvDelta = Math.max(0, subscriberMetrics.audioPacketsReceived - this.inboundPacketsPrev.audio);
+    const videoPacketsRecvDelta = Math.max(0, subscriberMetrics.videoPacketsReceived - this.inboundPacketsPrev.video);
+    const videoFramesDecodedDelta = Math.max(0, subscriberMetrics.videoFramesDecoded - this.inboundVideoFramesDecodedPrev);
     this.outboundPrev = { audio: publisherMetrics.audioBytesSent, video: publisherMetrics.videoBytesSent };
     this.outboundAudioPacketsPrev = publisherMetrics.audioPacketsSent;
     this.inboundPrev = { audio: subscriberMetrics.audioBytesReceived, video: subscriberMetrics.videoBytesReceived };
+    this.inboundPacketsPrev = {
+      audio: subscriberMetrics.audioPacketsReceived,
+      video: subscriberMetrics.videoPacketsReceived
+    };
+    this.inboundVideoFramesDecodedPrev = subscriberMetrics.videoFramesDecoded;
 
     const localOutgoingAudioTrack = this.callbacks.getPreferredAudioTrack();
     const localOutgoingAudioActive = !!localOutgoingAudioTrack &&
@@ -186,12 +198,31 @@ class CallMonitoringStat {
       videoPackets: publisherMetrics.remoteInboundVideoPacketsReceived ?? this.remoteInboundPrev.videoPackets
     };
 
-    if (videoRecvDelta > 0) this.localReceiveGrowthAt.video = now;
-    if (audioRecvDelta > 0) this.localReceiveGrowthAt.audio = now;
+    if (videoRecvDelta > 0 || videoPacketsRecvDelta > 0 || videoFramesDecodedDelta > 0) {
+      this.localReceiveGrowthAt.video = now;
+    }
+    if (audioRecvDelta > 0 || audioPacketsRecvDelta > 0) {
+      this.localReceiveGrowthAt.audio = now;
+    }
     const localReceivingVideo: YesNoUnknown = this.deriveLocalReceiveStatus(remotePresent, this.localReceiveGrowthAt.video, now, inWarmup);
     const localReceivingAudio: YesNoUnknown = this.deriveLocalReceiveStatus(remotePresent, this.localReceiveGrowthAt.audio, now, inWarmup);
-    const localVideoPlaybackStatus = this.deriveLocalVideoPlaybackStatus(now, remotePresent, inWarmup);
-    const localAudioPlaybackStatus = this.deriveLocalAudioPlaybackStatus(now, audioRecvDelta, subscriberMetrics.hasAudioTrack, remotePresent, inWarmup);
+    const localVideoPlaybackStatus = this.deriveLocalVideoPlaybackStatus(
+      now,
+      remotePresent,
+      inWarmup,
+      videoRecvDelta,
+      videoPacketsRecvDelta,
+      videoFramesDecodedDelta,
+      subscriberMetrics.hasVideoTrack
+    );
+    const localAudioPlaybackStatus = this.deriveLocalAudioPlaybackStatus(
+      now,
+      audioRecvDelta,
+      audioPacketsRecvDelta,
+      subscriberMetrics.hasAudioTrack,
+      remotePresent,
+      inWarmup
+    );
     const peerTelemetry = this.callbacks.getPeerTelemetry(now);
     const remoteAudioPlaybackStatus = peerTelemetry?.audioPlaybackStatus ?? (remotePresent ? "Pending" : "Not possible");
     const remoteVideoPlaybackStatus = peerTelemetry?.videoPlaybackStatus ?? (remotePresent ? "Pending" : "Not possible");
@@ -318,16 +349,24 @@ class CallMonitoringStat {
   private async collectSubscriberMetrics(subscribers: RTCPeerConnection[]): Promise<{
     audioBytesReceived: number;
     videoBytesReceived: number;
+    audioPacketsReceived: number;
+    videoPacketsReceived: number;
+    videoFramesDecoded: number;
     remoteJitterMs: number | null;
     remoteLossPct: number | null;
     hasAudioTrack: boolean;
+    hasVideoTrack: boolean;
   }> {
     let audioBytesReceived = 0;
     let videoBytesReceived = 0;
+    let audioPacketsReceived = 0;
+    let videoPacketsReceived = 0;
+    let videoFramesDecoded = 0;
     let remoteJitterMs: number | null = null;
     let lost = 0;
     let total = 0;
     let hasAudioTrack = false;
+    let hasVideoTrack = false;
 
     await Promise.all(subscribers.map(async (pc: RTCPeerConnection) => {
       try {
@@ -338,9 +377,13 @@ class CallMonitoringStat {
             if (anyS.kind === "audio" || anyS.mediaType === "audio") {
               hasAudioTrack = true;
               if (typeof anyS.bytesReceived === "number") audioBytesReceived += anyS.bytesReceived;
+              if (typeof anyS.packetsReceived === "number") audioPacketsReceived += anyS.packetsReceived;
             }
             if (anyS.kind === "video" || anyS.mediaType === "video") {
+              hasVideoTrack = true;
               if (typeof anyS.bytesReceived === "number") videoBytesReceived += anyS.bytesReceived;
+              if (typeof anyS.packetsReceived === "number") videoPacketsReceived += anyS.packetsReceived;
+              if (typeof anyS.framesDecoded === "number") videoFramesDecoded += anyS.framesDecoded;
             }
             if (typeof anyS.jitter === "number") {
               const jitterMs = anyS.jitter * 1000;
@@ -360,9 +403,13 @@ class CallMonitoringStat {
     return {
       audioBytesReceived,
       videoBytesReceived,
+      audioPacketsReceived,
+      videoPacketsReceived,
+      videoFramesDecoded,
       remoteJitterMs,
       remoteLossPct: total > 0 ? (lost / total) * 100 : null,
-      hasAudioTrack
+      hasAudioTrack,
+      hasVideoTrack
     };
   }
 
@@ -378,20 +425,39 @@ class CallMonitoringStat {
     return "No";
   }
 
-  private deriveLocalVideoPlaybackStatus(now: number, remotePresent: boolean, inWarmup: boolean): PlaybackState {
+  private deriveLocalVideoPlaybackStatus(
+    now: number,
+    remotePresent: boolean,
+    inWarmup: boolean,
+    videoRecvDelta: number,
+    videoPacketsRecvDelta: number,
+    videoFramesDecodedDelta: number,
+    hasVideoTrack: boolean
+  ): PlaybackState {
     if (!remotePresent) return "Not possible";
-    const ms = this.remoteVideo.srcObject as MediaStream | null;
-    const hasTrack = !!ms?.getVideoTracks().some(t => t.readyState === "live" && t.enabled !== false);
-    if (!hasTrack) return inWarmup ? "Pending" : "Not possible";
+    if (!hasVideoTrack) return inWarmup ? "Pending" : "Not possible";
+
+    const hasTransportProgress =
+      videoRecvDelta > 0 ||
+      videoPacketsRecvDelta > 0 ||
+      videoFramesDecodedDelta > 0;
+
     const currentTime = Number.isFinite(this.remoteVideo.currentTime) ? this.remoteVideo.currentTime : 0;
     if (currentTime > this.lastRemoteVideoTime + 0.03) {
       this.lastRemoteVideoTime = currentTime;
       this.remoteVideoPlaybackAt = now;
       return "Active";
     }
+    if (hasTransportProgress) {
+      this.remoteVideoPlaybackAt = now;
+      return "Active";
+    }
     if (this.remoteVideoPlaybackAt === 0 && currentTime > 0) {
       this.remoteVideoPlaybackAt = now;
       return "Active";
+    }
+    if (this.remoteVideoPlaybackAt === 0 && inWarmup) {
+      return "Pending";
     }
     if (this.remoteVideoPlaybackAt > 0 && now - this.remoteVideoPlaybackAt <= APP_CONFIG.mediaTelemetry.stallWindowMs) {
       return "Active";
@@ -402,15 +468,19 @@ class CallMonitoringStat {
   private deriveLocalAudioPlaybackStatus(
     now: number,
     audioRecvDelta: number,
+    audioPacketsRecvDelta: number,
     hasAudioTrack: boolean,
     remotePresent: boolean,
     inWarmup: boolean
   ): PlaybackState {
     if (!remotePresent) return "Not possible";
     if (!hasAudioTrack) return inWarmup ? "Pending" : "Not possible";
-    if (audioRecvDelta > 0) {
+    if (audioRecvDelta > 0 || audioPacketsRecvDelta > 0) {
       this.localAudioPlaybackAt = now;
       return "Active";
+    }
+    if (this.localAudioPlaybackAt === 0 && inWarmup) {
+      return "Pending";
     }
     if (this.localAudioPlaybackAt > 0 && now - this.localAudioPlaybackAt <= APP_CONFIG.mediaTelemetry.stallWindowMs) {
       return "Active";

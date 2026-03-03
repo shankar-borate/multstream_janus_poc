@@ -2436,6 +2436,8 @@ class CallMonitoringStat {
         this.outboundPrev = { audio: 0, video: 0 };
         this.outboundAudioPacketsPrev = 0;
         this.inboundPrev = { audio: 0, video: 0 };
+        this.inboundPacketsPrev = { audio: 0, video: 0 };
+        this.inboundVideoFramesDecodedPrev = 0;
         this.remoteInboundPrev = { audioPackets: 0, videoPackets: 0 };
         this.remoteReceiveGrowthAt = { audio: 0, video: 0 };
         this.localReceiveGrowthAt = { audio: 0, video: 0 };
@@ -2450,6 +2452,8 @@ class CallMonitoringStat {
         this.outboundPrev = { audio: 0, video: 0 };
         this.outboundAudioPacketsPrev = 0;
         this.inboundPrev = { audio: 0, video: 0 };
+        this.inboundPacketsPrev = { audio: 0, video: 0 };
+        this.inboundVideoFramesDecodedPrev = 0;
         this.remoteInboundPrev = { audioPackets: 0, videoPackets: 0 };
         this.remoteReceiveGrowthAt = { audio: 0, video: 0 };
         this.localReceiveGrowthAt = { audio: 0, video: 0 };
@@ -2535,9 +2539,17 @@ class CallMonitoringStat {
         const videoSentDelta = Math.max(0, publisherMetrics.videoBytesSent - this.outboundPrev.video);
         const audioRecvDelta = Math.max(0, subscriberMetrics.audioBytesReceived - this.inboundPrev.audio);
         const videoRecvDelta = Math.max(0, subscriberMetrics.videoBytesReceived - this.inboundPrev.video);
+        const audioPacketsRecvDelta = Math.max(0, subscriberMetrics.audioPacketsReceived - this.inboundPacketsPrev.audio);
+        const videoPacketsRecvDelta = Math.max(0, subscriberMetrics.videoPacketsReceived - this.inboundPacketsPrev.video);
+        const videoFramesDecodedDelta = Math.max(0, subscriberMetrics.videoFramesDecoded - this.inboundVideoFramesDecodedPrev);
         this.outboundPrev = { audio: publisherMetrics.audioBytesSent, video: publisherMetrics.videoBytesSent };
         this.outboundAudioPacketsPrev = publisherMetrics.audioPacketsSent;
         this.inboundPrev = { audio: subscriberMetrics.audioBytesReceived, video: subscriberMetrics.videoBytesReceived };
+        this.inboundPacketsPrev = {
+            audio: subscriberMetrics.audioPacketsReceived,
+            video: subscriberMetrics.videoPacketsReceived
+        };
+        this.inboundVideoFramesDecodedPrev = subscriberMetrics.videoFramesDecoded;
         const localOutgoingAudioTrack = this.callbacks.getPreferredAudioTrack();
         const localOutgoingAudioActive = !!localOutgoingAudioTrack &&
             localOutgoingAudioTrack.readyState === "live" &&
@@ -2605,14 +2617,16 @@ class CallMonitoringStat {
             audioPackets: publisherMetrics.remoteInboundAudioPacketsReceived ?? this.remoteInboundPrev.audioPackets,
             videoPackets: publisherMetrics.remoteInboundVideoPacketsReceived ?? this.remoteInboundPrev.videoPackets
         };
-        if (videoRecvDelta > 0)
+        if (videoRecvDelta > 0 || videoPacketsRecvDelta > 0 || videoFramesDecodedDelta > 0) {
             this.localReceiveGrowthAt.video = now;
-        if (audioRecvDelta > 0)
+        }
+        if (audioRecvDelta > 0 || audioPacketsRecvDelta > 0) {
             this.localReceiveGrowthAt.audio = now;
+        }
         const localReceivingVideo = this.deriveLocalReceiveStatus(remotePresent, this.localReceiveGrowthAt.video, now, inWarmup);
         const localReceivingAudio = this.deriveLocalReceiveStatus(remotePresent, this.localReceiveGrowthAt.audio, now, inWarmup);
-        const localVideoPlaybackStatus = this.deriveLocalVideoPlaybackStatus(now, remotePresent, inWarmup);
-        const localAudioPlaybackStatus = this.deriveLocalAudioPlaybackStatus(now, audioRecvDelta, subscriberMetrics.hasAudioTrack, remotePresent, inWarmup);
+        const localVideoPlaybackStatus = this.deriveLocalVideoPlaybackStatus(now, remotePresent, inWarmup, videoRecvDelta, videoPacketsRecvDelta, videoFramesDecodedDelta, subscriberMetrics.hasVideoTrack);
+        const localAudioPlaybackStatus = this.deriveLocalAudioPlaybackStatus(now, audioRecvDelta, audioPacketsRecvDelta, subscriberMetrics.hasAudioTrack, remotePresent, inWarmup);
         const peerTelemetry = this.callbacks.getPeerTelemetry(now);
         const remoteAudioPlaybackStatus = peerTelemetry?.audioPlaybackStatus ?? (remotePresent ? "Pending" : "Not possible");
         const remoteVideoPlaybackStatus = peerTelemetry?.videoPlaybackStatus ?? (remotePresent ? "Pending" : "Not possible");
@@ -2730,10 +2744,14 @@ class CallMonitoringStat {
     async collectSubscriberMetrics(subscribers) {
         let audioBytesReceived = 0;
         let videoBytesReceived = 0;
+        let audioPacketsReceived = 0;
+        let videoPacketsReceived = 0;
+        let videoFramesDecoded = 0;
         let remoteJitterMs = null;
         let lost = 0;
         let total = 0;
         let hasAudioTrack = false;
+        let hasVideoTrack = false;
         await Promise.all(subscribers.map(async (pc) => {
             try {
                 const report = await pc.getStats();
@@ -2744,10 +2762,17 @@ class CallMonitoringStat {
                             hasAudioTrack = true;
                             if (typeof anyS.bytesReceived === "number")
                                 audioBytesReceived += anyS.bytesReceived;
+                            if (typeof anyS.packetsReceived === "number")
+                                audioPacketsReceived += anyS.packetsReceived;
                         }
                         if (anyS.kind === "video" || anyS.mediaType === "video") {
+                            hasVideoTrack = true;
                             if (typeof anyS.bytesReceived === "number")
                                 videoBytesReceived += anyS.bytesReceived;
+                            if (typeof anyS.packetsReceived === "number")
+                                videoPacketsReceived += anyS.packetsReceived;
+                            if (typeof anyS.framesDecoded === "number")
+                                videoFramesDecoded += anyS.framesDecoded;
                         }
                         if (typeof anyS.jitter === "number") {
                             const jitterMs = anyS.jitter * 1000;
@@ -2767,9 +2792,13 @@ class CallMonitoringStat {
         return {
             audioBytesReceived,
             videoBytesReceived,
+            audioPacketsReceived,
+            videoPacketsReceived,
+            videoFramesDecoded,
             remoteJitterMs,
             remoteLossPct: total > 0 ? (lost / total) * 100 : null,
-            hasAudioTrack
+            hasAudioTrack,
+            hasVideoTrack
         };
     }
     deriveLocalReceiveStatus(remotePresent, growthAt, now, inWarmup) {
@@ -2781,16 +2810,21 @@ class CallMonitoringStat {
             return "Pending";
         return "No";
     }
-    deriveLocalVideoPlaybackStatus(now, remotePresent, inWarmup) {
+    deriveLocalVideoPlaybackStatus(now, remotePresent, inWarmup, videoRecvDelta, videoPacketsRecvDelta, videoFramesDecodedDelta, hasVideoTrack) {
         if (!remotePresent)
             return "Not possible";
-        const ms = this.remoteVideo.srcObject;
-        const hasTrack = !!ms?.getVideoTracks().some(t => t.readyState === "live" && t.enabled !== false);
-        if (!hasTrack)
+        if (!hasVideoTrack)
             return inWarmup ? "Pending" : "Not possible";
+        const hasTransportProgress = videoRecvDelta > 0 ||
+            videoPacketsRecvDelta > 0 ||
+            videoFramesDecodedDelta > 0;
         const currentTime = Number.isFinite(this.remoteVideo.currentTime) ? this.remoteVideo.currentTime : 0;
         if (currentTime > this.lastRemoteVideoTime + 0.03) {
             this.lastRemoteVideoTime = currentTime;
+            this.remoteVideoPlaybackAt = now;
+            return "Active";
+        }
+        if (hasTransportProgress) {
             this.remoteVideoPlaybackAt = now;
             return "Active";
         }
@@ -2798,19 +2832,25 @@ class CallMonitoringStat {
             this.remoteVideoPlaybackAt = now;
             return "Active";
         }
+        if (this.remoteVideoPlaybackAt === 0 && inWarmup) {
+            return "Pending";
+        }
         if (this.remoteVideoPlaybackAt > 0 && now - this.remoteVideoPlaybackAt <= APP_CONFIG.mediaTelemetry.stallWindowMs) {
             return "Active";
         }
         return "Stalled";
     }
-    deriveLocalAudioPlaybackStatus(now, audioRecvDelta, hasAudioTrack, remotePresent, inWarmup) {
+    deriveLocalAudioPlaybackStatus(now, audioRecvDelta, audioPacketsRecvDelta, hasAudioTrack, remotePresent, inWarmup) {
         if (!remotePresent)
             return "Not possible";
         if (!hasAudioTrack)
             return inWarmup ? "Pending" : "Not possible";
-        if (audioRecvDelta > 0) {
+        if (audioRecvDelta > 0 || audioPacketsRecvDelta > 0) {
             this.localAudioPlaybackAt = now;
             return "Active";
+        }
+        if (this.localAudioPlaybackAt === 0 && inWarmup) {
+            return "Pending";
         }
         if (this.localAudioPlaybackAt > 0 && now - this.localAudioPlaybackAt <= APP_CONFIG.mediaTelemetry.stallWindowMs) {
             return "Active";
@@ -4566,12 +4606,15 @@ class CallController {
         this.monitoringStat.stop();
     }
     pickFreshPeerTelemetry(now) {
+        let latest = null;
         for (const payload of this.peerTelemetryByFeed.values()) {
             if (now - payload.ts <= APP_CONFIG.mediaTelemetry.peerTelemetryFreshnessMs) {
-                return payload;
+                if (!latest || payload.ts > latest.ts) {
+                    latest = payload;
+                }
             }
         }
-        return null;
+        return latest;
     }
     sendPeerTelemetry(payload) {
         if (!APP_CONFIG.mediaTelemetry.enablePeerTelemetry)
@@ -5113,12 +5156,13 @@ class UIController {
             return "n/a";
         return `${v.toFixed(1)}`;
     }
-    formatBytesWithTrend(current, previous) {
-        const increasing = previous === null ? current > 0 : current > previous;
-        const symbol = increasing ? "✔" : "✖";
-        const color = increasing ? "#16a34a" : "#dc2626";
+    formatFlowBytes(current, previous, minDeltaBytes, forceStopped = false) {
+        const delta = previous === null ? 0 : Math.max(0, current - previous);
+        const flowing = !forceStopped && delta >= minDeltaBytes;
+        const symbol = flowing ? "+" : "x";
+        const color = flowing ? "#16a34a" : "#dc2626";
         return {
-            text: `${this.formatBytes(current)} [${symbol}]`,
+            text: `${this.formatBytes(delta)} [${symbol}]`,
             color
         };
     }
@@ -5145,10 +5189,12 @@ class UIController {
     renderMediaIo(stats) {
         if (this.mediaIoBytes) {
             const prev = this.prevMediaBytes;
-            const aSent = this.formatBytesWithTrend(stats.bytes.audioSent, prev?.audioSent ?? null);
-            const aRecv = this.formatBytesWithTrend(stats.bytes.audioReceived, prev?.audioReceived ?? null);
-            const vSent = this.formatBytesWithTrend(stats.bytes.videoSent, prev?.videoSent ?? null);
-            const vRecv = this.formatBytesWithTrend(stats.bytes.videoReceived, prev?.videoReceived ?? null);
+            const audioMinDeltaBytes = 64;
+            const videoMinDeltaBytes = 512;
+            const aSent = this.formatFlowBytes(stats.bytes.audioSent, prev?.audioSent ?? null, audioMinDeltaBytes, this.audioMuted);
+            const aRecv = this.formatFlowBytes(stats.bytes.audioReceived, prev?.audioReceived ?? null, audioMinDeltaBytes, false);
+            const vSent = this.formatFlowBytes(stats.bytes.videoSent, prev?.videoSent ?? null, videoMinDeltaBytes, this.videoMuted);
+            const vRecv = this.formatFlowBytes(stats.bytes.videoReceived, prev?.videoReceived ?? null, videoMinDeltaBytes, false);
             this.mediaIoBytes.innerHTML =
                 `A(sent/recv): <span style="color:${aSent.color};font-weight:600">${aSent.text}</span> / ` +
                     `<span style="color:${aRecv.color};font-weight:600">${aRecv.text}</span> | ` +

@@ -1506,12 +1506,15 @@ class CallController {
   }
 
   private pickFreshPeerTelemetry(now: number): PeerPlaybackTelemetry | null {
+    let latest: PeerPlaybackTelemetry | null = null;
     for (const payload of this.peerTelemetryByFeed.values()) {
       if (now - payload.ts <= APP_CONFIG.mediaTelemetry.peerTelemetryFreshnessMs) {
-        return payload;
+        if (!latest || payload.ts > latest.ts) {
+          latest = payload;
+        }
       }
     }
-    return null;
+    return latest;
   }
 
   private sendPeerTelemetry(payload: PeerPlaybackTelemetry) {
