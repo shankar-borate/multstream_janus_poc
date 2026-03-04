@@ -32,10 +32,22 @@ class HttpClient {
       Cookie.get("XSRF-TOKEN") ||
       "";
 
+    const userType = this.resolveUserType();
+    const isCustomer = userType === "customer";
+    const registerUserId = this.resolveRegisterUserId();
+    if (isCustomer && !registerUserId) {
+      throw new HttpError(
+        ErrorMessages.URL_RUID_MISSING,
+        400,
+        requestId,
+        url
+      );
+    }
     const headers: Record<string, string> = {
       "accept": "application/json",
       ...(req.body !== undefined ? { "content-type": "application/json; charset=utf-8" } : {}),
-      "client-id": this.resolveClientId(),
+      "client-id": this.resolveClientId(isCustomer),
+      ...(isCustomer ? { "register-user-id": registerUserId } : {}),
       "x-request-id": requestId,
       ...(xsrf ? { "x-xsrf-token": xsrf } : {}),
       ...(req.headers ?? {}),
@@ -110,13 +122,26 @@ class HttpClient {
     try { return JSON.parse(text); } catch { return text; }
   }
 
-  private resolveClientId(): string {
+  private resolveClientId(isCustomer: boolean): string {
+    return isCustomer ? "111" : "101";
+  }
+
+  private resolveUserType(): string {
     const qs = new URLSearchParams(window.location.search);
     const raw =
       qs.get("user_type") ??
       qs.get("usertpye") ??
       qs.get("usertype") ??
       "";
-    return raw.trim().toLowerCase() === "customer" ? "111" : "101";
+    return raw.trim().toLowerCase();
+  }
+
+  private resolveRegisterUserId(): string {
+    const qs = new URLSearchParams(window.location.search);
+    return (
+      qs.get("ruId") ??
+      qs.get("ruid") ??
+      ""
+    ).trim();
   }
 }

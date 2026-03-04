@@ -48,6 +48,21 @@ class UrlConfig {
       participantId = parsedParticipantId;
     }
 
+    const userTypeRaw =
+      this.getString("user_type", "") ||
+      this.getString("usertpye", "") ||
+      this.getString("usertype", "");
+    const isCustomer = userTypeRaw.trim().toLowerCase() === "customer";
+    if (isCustomer) {
+      const ruId =
+        this.getString("ruId", "") ||
+        this.getString("ruid", "");
+      if (!ruId) {
+        alert(ErrorMessages.URL_RUID_ALERT);
+        throw new Error(ErrorMessages.URL_RUID_MISSING);
+      }
+    }
+
     return {
       server: this.getString("server", APP_CONFIG.vcx.defaultJanusServer),
       groupId,

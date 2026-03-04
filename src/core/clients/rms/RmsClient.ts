@@ -3,13 +3,13 @@ class RmsClient {
 
   async createMeetingByGroup(groupId: number): Promise<number> {
     const body: RmsCreateMeetingRequest = {
-      groupId: null,
+      groupId: groupId,
       meetingType: 1,
       to: groupId,
       recordingMethod: 2,
       autoRecording: false,
       recordingType: 1,
-      alwaysCreateNewMeeting: true
+      alwaysCreateNewMeeting: false
     };
 
     const res = await this.http.request<RmsCreateMeetingResponse>({

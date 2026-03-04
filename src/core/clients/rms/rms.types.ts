@@ -1,11 +1,11 @@
 interface RmsCreateMeetingRequest {
-  groupId: null;
+  groupId: number;
   meetingType: 1;
   to: number;
   recordingMethod: 2;
   autoRecording: false;
   recordingType: 1;
-  alwaysCreateNewMeeting: true;
+  alwaysCreateNewMeeting: false;
 }
 
 interface RmsCreateMeetingResponse {

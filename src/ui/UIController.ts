@@ -45,12 +45,29 @@ class UIController {
   private localQD = document.getElementById("localQualityDetails") as HTMLDivElement;
   private remoteQD = document.getElementById("remoteQualityDetails") as HTMLDivElement;
   private networkSidePanel = document.getElementById("networkSidePanel") as HTMLDivElement;
+  private networkSideHead = document.getElementById("networkSideHead") as HTMLDivElement;
+  private networkSideToggle = document.getElementById("networkSideToggle") as HTMLSpanElement;
+  private networkSideUpdated = document.getElementById("networkSideUpdated") as HTMLDivElement;
+  private networkSideBody = document.getElementById("networkSideBody") as HTMLDivElement;
   private networkPanelBtn = document.getElementById("networkPanelBtn") as HTMLButtonElement;
   private networkPanelPopup = document.getElementById("networkPanelPopup") as HTMLDivElement;
+  private networkPopupCard = document.getElementById("networkPopupCard") as HTMLDivElement;
+  private networkPopupHead = document.getElementById("networkPopupHead") as HTMLDivElement;
+  private networkPopupToggle = document.getElementById("networkPopupToggle") as HTMLButtonElement;
   private networkPanelClose = document.getElementById("networkPanelClose") as HTMLButtonElement;
+  private networkPopupUpdated = document.getElementById("networkPopupUpdated") as HTMLDivElement;
   private networkPopupBody = document.getElementById("networkPopupBody") as HTMLDivElement;
+  private diagPanel = document.getElementById("diagPanel") as HTMLDivElement;
+  private diagPanelHead = document.getElementById("diagPanelHead") as HTMLDivElement;
+  private diagPanelToggle = document.getElementById("diagPanelToggle") as HTMLSpanElement;
+  private diagPerspective = document.getElementById("diagPerspective") as HTMLDivElement;
+  private diagPanelBtn = document.getElementById("diagPanelBtn") as HTMLButtonElement;
+  private diagPanelClose = document.getElementById("diagPanelClose") as HTMLButtonElement;
   private callMeta = document.getElementById("callMeta") as HTMLDivElement;
-  private mediaIoBytes = document.getElementById("mediaIoBytes") as HTMLDivElement;
+  private diagAudioSent = document.getElementById("diagAudioSent") as HTMLSpanElement;
+  private diagAudioRecv = document.getElementById("diagAudioRecv") as HTMLSpanElement;
+  private diagVideoSent = document.getElementById("diagVideoSent") as HTMLSpanElement;
+  private diagVideoRecv = document.getElementById("diagVideoRecv") as HTMLSpanElement;
   private mediaIoIssues = document.getElementById("mediaIoIssues") as HTMLDivElement;
   private mRemoteRecvVideo = document.getElementById("mRemoteRecvVideo") as HTMLDivElement;
   private mRemoteRecvAudio = document.getElementById("mRemoteRecvAudio") as HTMLDivElement;
@@ -75,6 +92,9 @@ class UIController {
   private remoteVideoFrameProgressAt = 0;
   private connectionStatus: ConnectionStatusView | null = null;
   private remoteVideoMonitorTimer: number | null = null;
+  private diagPanelMinimized = false;
+  private networkSidePanelMinimized = false;
+  private networkPopupMinimized = false;
 
   constructor() {
     const qn = this.getQueryParam("name");
@@ -183,6 +203,7 @@ class UIController {
 
     this.wire();
     this.setupNetworkUI();
+    this.setupDiagnosticsPanel();
     this.setupParticipantNetworkPanel();
     this.setupParentBridge();
     this.setupRemoteFallbackMonitor();
@@ -400,6 +421,10 @@ class UIController {
     this.callMeta.textContent =
       `GroupId: ${groupText} | RoomId: ${roomText} | Name: ${display}` +
       `${participantId ? ` | ParticipantId: ${participantId}` : ""}`;
+    if (this.diagPerspective) {
+      this.diagPerspective.textContent =
+        `Perspective: You (${display}${participantId ? `, participantId: ${participantId}` : ""})`;
+    }
   }
 
   private reconnect() {
@@ -638,40 +663,52 @@ class UIController {
 
   private renderStatusBadge(el: HTMLElement, value: string) {
     const normalized = String(value || "").trim();
-    let symbol = "•";
+    let symbol = "\u2022";
     let color = "#6b7280";
+    let bg = "#e2e8f0";
+    let border = "#cbd5e1";
 
     if (normalized === "Yes" || normalized === "Active") {
-      symbol = "✔";
+      symbol = "\u2714";
       color = "#16a34a";
+      bg = "#dcfce7";
+      border = "#86efac";
     } else if (normalized === "No" || normalized === "Stalled" || normalized === "Not possible") {
-      symbol = "✖";
+      symbol = "\u2716";
       color = "#dc2626";
+      bg = "#fee2e2";
+      border = "#fca5a5";
     } else if (normalized === "Pending") {
-      symbol = "•";
+      symbol = "\u2022";
       color = "#d97706";
+      bg = "#fef3c7";
+      border = "#fcd34d";
     }
 
     el.textContent = `${symbol} ${normalized}`;
     el.style.color = color;
-    el.style.fontWeight = "600";
+    el.style.fontWeight = "700";
+    el.style.display = "inline-flex";
+    el.style.alignItems = "center";
+    el.style.padding = "2px 8px";
+    el.style.borderRadius = "999px";
+    el.style.background = bg;
+    el.style.border = `1px solid ${border}`;
   }
 
   private renderMediaIo(stats: MediaIoSnapshot) {
-    if (this.mediaIoBytes) {
-      const prev = this.prevMediaBytes;
-      const audioMinDeltaBytes = 64;
-      const videoMinDeltaBytes = 512;
-      const aSent = this.formatFlowBytes(stats.bytes.audioSent, prev?.audioSent ?? null, audioMinDeltaBytes, this.audioMuted);
-      const aRecv = this.formatFlowBytes(stats.bytes.audioReceived, prev?.audioReceived ?? null, audioMinDeltaBytes, false);
-      const vSent = this.formatFlowBytes(stats.bytes.videoSent, prev?.videoSent ?? null, videoMinDeltaBytes, this.videoMuted);
-      const vRecv = this.formatFlowBytes(stats.bytes.videoReceived, prev?.videoReceived ?? null, videoMinDeltaBytes, false);
-      this.mediaIoBytes.innerHTML =
-        `A(sent/recv): <span style="color:${aSent.color};font-weight:600">${aSent.text}</span> / ` +
-        `<span style="color:${aRecv.color};font-weight:600">${aRecv.text}</span> | ` +
-        `V(sent/recv): <span style="color:${vSent.color};font-weight:600">${vSent.text}</span> / ` +
-        `<span style="color:${vRecv.color};font-weight:600">${vRecv.text}</span>`;
-    }
+    const prev = this.prevMediaBytes;
+    const audioMinDeltaBytes = 64;
+    const videoMinDeltaBytes = 512;
+    const aSent = this.formatFlowBytes(stats.bytes.audioSent, prev?.audioSent ?? null, audioMinDeltaBytes, this.audioMuted);
+    const aRecv = this.formatFlowBytes(stats.bytes.audioReceived, prev?.audioReceived ?? null, audioMinDeltaBytes, false);
+    const vSent = this.formatFlowBytes(stats.bytes.videoSent, prev?.videoSent ?? null, videoMinDeltaBytes, this.videoMuted);
+    const vRecv = this.formatFlowBytes(stats.bytes.videoReceived, prev?.videoReceived ?? null, videoMinDeltaBytes, false);
+    this.renderFlowValue(this.diagAudioSent, aSent);
+    this.renderFlowValue(this.diagAudioRecv, aRecv);
+    this.renderFlowValue(this.diagVideoSent, vSent);
+    this.renderFlowValue(this.diagVideoRecv, vRecv);
+
     if (this.mediaIoIssues) {
       this.mediaIoIssues.textContent = stats.issues.length > 0
         ? stats.issues.join(" | ")
@@ -692,6 +729,63 @@ class UIController {
     this.remoteQD.textContent =
       `jitter=${this.formatQuality(stats.quality.remoteJitterMs)}ms loss=${this.formatQuality(stats.quality.remoteLossPct)}%`;
     this.prevMediaBytes = { ...stats.bytes };
+  }
+
+  private renderFlowValue(el: HTMLElement, flow: { text: string; color: string }) {
+    if (!el) return;
+    el.textContent = flow.text;
+    el.style.color = flow.color;
+    el.style.fontWeight = "700";
+  }
+
+  private setupDiagnosticsPanel() {
+    if (
+      !this.diagPanel ||
+      !this.diagPanelHead ||
+      !this.diagPanelToggle ||
+      !this.diagPanelBtn ||
+      !this.diagPanelClose
+    ) {
+      return;
+    }
+    const isMobile = () => window.innerWidth <= 900;
+    const closeMobile = () => this.diagPanel.classList.remove("show-mobile");
+    const applyMinimizedState = () => {
+      this.diagPanel.classList.toggle("minimized", this.diagPanelMinimized);
+      this.diagPanelToggle.textContent = this.diagPanelMinimized ? "+" : "-";
+      this.diagPanelHead.setAttribute("aria-expanded", String(!this.diagPanelMinimized));
+    };
+    const toggleMinimized = () => {
+      this.diagPanelMinimized = !this.diagPanelMinimized;
+      applyMinimizedState();
+    };
+
+    this.diagPanelHead.onclick = (ev: MouseEvent) => {
+      const target = ev.target as HTMLElement;
+      if (target?.closest("#diagPanelClose")) return;
+      toggleMinimized();
+    };
+    this.diagPanelHead.onkeydown = (ev: KeyboardEvent) => {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      ev.preventDefault();
+      toggleMinimized();
+    };
+
+    this.diagPanelBtn.onclick = () => {
+      if (!isMobile()) {
+        toggleMinimized();
+        return;
+      }
+      this.diagPanel.classList.toggle("show-mobile");
+    };
+    this.diagPanelClose.onclick = (ev: MouseEvent) => {
+      ev.stopPropagation();
+      closeMobile();
+    };
+    window.addEventListener("resize", () => {
+      if (!isMobile()) closeMobile();
+    });
+    applyMinimizedState();
   }
 
   private setupNetworkUI() {
@@ -720,8 +814,16 @@ class UIController {
   private setupParticipantNetworkPanel() {
     if (
       !this.networkSidePanel ||
+      !this.networkSideHead ||
+      !this.networkSideToggle ||
+      !this.networkSideUpdated ||
+      !this.networkSideBody ||
       !this.networkPanelBtn ||
       !this.networkPanelPopup ||
+      !this.networkPopupCard ||
+      !this.networkPopupHead ||
+      !this.networkPopupToggle ||
+      !this.networkPopupUpdated ||
       !this.networkPopupBody ||
       !this.networkPanelClose
     ) {
@@ -734,16 +836,64 @@ class UIController {
     const openPopup = () => {
       this.networkPanelPopup.classList.add("show");
     };
+    const applySideMinimizedState = () => {
+      this.networkSidePanel.classList.toggle("minimized", this.networkSidePanelMinimized);
+      this.networkSideToggle.textContent = this.networkSidePanelMinimized ? "+" : "-";
+      this.networkSideHead.setAttribute("aria-expanded", String(!this.networkSidePanelMinimized));
+    };
+    const applyPopupMinimizedState = () => {
+      this.networkPopupCard.classList.toggle("minimized", this.networkPopupMinimized);
+      this.networkPopupToggle.textContent = this.networkPopupMinimized ? "+" : "-";
+      this.networkPopupHead.setAttribute("aria-expanded", String(!this.networkPopupMinimized));
+      this.networkPopupToggle.setAttribute(
+        "aria-label",
+        this.networkPopupMinimized ? "Maximize network panel" : "Minimize network panel"
+      );
+    };
+    const toggleSideMinimized = () => {
+      this.networkSidePanelMinimized = !this.networkSidePanelMinimized;
+      applySideMinimizedState();
+    };
+    const togglePopupMinimized = () => {
+      this.networkPopupMinimized = !this.networkPopupMinimized;
+      applyPopupMinimizedState();
+    };
 
     this.networkPanelBtn.onclick = () => {
-      if (!this.isParticipantNetworkPopupMode()) return;
+      if (!this.isParticipantNetworkPopupMode()) {
+        toggleSideMinimized();
+        return;
+      }
       if (this.networkPanelPopup.classList.contains("show")) {
         closePopup();
       } else {
         openPopup();
       }
     };
-    this.networkPanelClose.onclick = closePopup;
+    this.networkSideHead.onclick = () => toggleSideMinimized();
+    this.networkSideHead.onkeydown = (ev: KeyboardEvent) => {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      ev.preventDefault();
+      toggleSideMinimized();
+    };
+    this.networkPopupHead.onclick = (ev: MouseEvent) => {
+      const target = ev.target as HTMLElement;
+      if (target?.closest("#networkPanelClose") || target?.closest("#networkPopupToggle")) return;
+      togglePopupMinimized();
+    };
+    this.networkPopupHead.onkeydown = (ev: KeyboardEvent) => {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      ev.preventDefault();
+      togglePopupMinimized();
+    };
+    this.networkPopupToggle.onclick = (ev: MouseEvent) => {
+      ev.stopPropagation();
+      togglePopupMinimized();
+    };
+    this.networkPanelClose.onclick = (ev: MouseEvent) => {
+      ev.stopPropagation();
+      closePopup();
+    };
     this.networkPanelPopup.onclick = (ev: MouseEvent) => {
       if (ev.target === this.networkPanelPopup) closePopup();
     };
@@ -752,6 +902,8 @@ class UIController {
         closePopup();
       }
     });
+    applySideMinimizedState();
+    applyPopupMinimizedState();
 
     this.participantNet.start(
       (snapshot: ParticipantNetworkSnapshot) => this.renderParticipantNetwork(snapshot),
@@ -764,15 +916,20 @@ class UIController {
   }
 
   private renderParticipantNetwork(snapshot: ParticipantNetworkSnapshot) {
-    if (!this.networkSidePanel || !this.networkPopupBody) return;
+    if (
+      !this.networkSideUpdated ||
+      !this.networkSideBody ||
+      !this.networkPopupUpdated ||
+      !this.networkPopupBody
+    ) {
+      return;
+    }
     const updated = new Date(snapshot.updatedAt).toLocaleTimeString();
     const content = this.renderParticipantNetworkRows(snapshot.rows);
-    const html =
-      `<div class="network-panel-title">Participant Network</div>` +
-      `<div class="network-panel-updated">Updated: ${updated}</div>` +
-      content;
-    this.networkSidePanel.innerHTML = html;
-    this.networkPopupBody.innerHTML = html;
+    this.networkSideUpdated.textContent = `Updated: ${updated}`;
+    this.networkPopupUpdated.textContent = `Updated: ${updated}`;
+    this.networkSideBody.innerHTML = content;
+    this.networkPopupBody.innerHTML = content;
   }
 
   private renderParticipantNetworkRows(rows: ParticipantNetworkRow[]): string {
@@ -1012,4 +1169,5 @@ class UIController {
     console.log("VCX_DEBUG", (window as any).__vcxDebug);
   }
 }
+
 

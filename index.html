@@ -23,16 +23,35 @@
     .ctrl-btn.purple{ background:#7c3aed; }
     .ctrl-btn:disabled{ opacity:.45; cursor:not-allowed; }
     .reconnect { position:absolute; left:18px; bottom:60px; padding:10px 14px; border-radius:6px; border:0; background:#f97316; color:white; font-weight:600; box-shadow:0 6px 18px rgba(0,0,0,.12); z-index:30; }
-    .media-io-panel{position:absolute;left:130px;bottom:60px;z-index:30;display:flex;flex-direction:column;gap:4px;padding:8px 10px;border-radius:8px;background:rgba(255,255,255,.95);border:1px solid rgba(148,163,184,.4);box-shadow:0 8px 18px rgba(15,23,42,.14);font:600 11px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;color:#0f172a;max-width:min(66vw,760px)}
-    .media-io-bytes{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .media-io-issues{color:#b91c1c;min-height:14px}
-    .status-matrix{position:absolute;left:18px;bottom:98px;z-index:30;display:grid;grid-template-columns:auto auto;column-gap:10px;row-gap:4px;padding:8px 10px;border-radius:8px;background:rgba(255,255,255,.95);border:1px solid rgba(148,163,184,.4);box-shadow:0 8px 18px rgba(15,23,42,.14);font:600 11px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;color:#0f172a;max-width:min(92vw,860px)}
-    .status-matrix .label{color:#334155}
-    .status-matrix .value{color:#0f172a}
+    .diag-panel{position:absolute;left:18px;bottom:108px;z-index:34;width:max-content;max-width:min(760px,74vw);padding:10px;border-radius:10px;background:rgba(255,255,255,.96);border:1px solid rgba(148,163,184,.4);box-shadow:0 10px 22px rgba(15,23,42,.14);font:600 11px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;color:#0f172a}
+    .diag-panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;cursor:pointer;user-select:none}
+    .diag-panel-title{font-size:12px;font-weight:800;color:#0f172a}
+    .diag-panel-context{margin:-4px 0 8px;color:#475569;font-size:10px}
+    .diag-head-actions{display:flex;align-items:center;gap:6px}
+    .diag-mobile-close{display:none;align-items:center;justify-content:center;width:24px;height:24px;border:0;border-radius:999px;background:#e2e8f0;color:#0f172a;font-weight:700}
+    .panel-toggle{display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:24px;border-radius:999px;background:#e2e8f0;color:#0f172a;font-size:14px;font-weight:800}
+    .diag-section{margin-top:8px}
+    .diag-section:first-of-type{margin-top:0}
+    .diag-section-title{font-size:11px;font-weight:800;color:#334155;margin:0 0 4px;padding:3px 8px;border-radius:6px;border:1px solid rgba(148,163,184,.35);background:#f8fafc}
+    .diag-section-local .diag-section-title{background:#eff6ff;border-color:#bfdbfe;color:#1e3a8a}
+    .diag-section-remote .diag-section-title{background:#ecfdf5;border-color:#86efac;color:#166534}
+    .diag-section-flow .diag-section-title{background:#fff7ed;border-color:#fdba74;color:#9a3412}
+    .diag-table{width:fit-content;max-width:100%;table-layout:auto;border-collapse:separate;border-spacing:0;border:1px solid rgba(148,163,184,.35);border-radius:8px;overflow:hidden;background:#fff}
+    .diag-table tr + tr td,.diag-table tr + tr th{border-top:1px solid rgba(148,163,184,.25)}
+    .diag-table th,.diag-table td{padding:6px 8px;vertical-align:middle}
+    .diag-table th{font-weight:700;color:#334155;text-align:left;white-space:nowrap;padding-right:14px}
+    .diag-table td{font-weight:700;color:#0f172a;text-align:left;white-space:nowrap}
+    .diag-issues{margin-top:8px;padding:6px 8px;border-radius:8px;background:#fff5f5;color:#b91c1c;min-height:16px}
+    .diag-issues:empty{display:none}
+    .diag-panel.minimized .diag-section,.diag-panel.minimized .diag-issues{display:none}
+    .diag-panel-btn{position:absolute;right:10px;bottom:calc(176px + env(safe-area-inset-bottom));z-index:35;display:none;align-items:center;justify-content:center;padding:10px 12px;border-radius:8px;border:0;background:#0f172a;color:#fff;font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;box-shadow:0 8px 18px rgba(15,23,42,.18)}
     .call-meta{position:absolute;left:18px;bottom:18px;z-index:12;display:inline-flex;align-items:center;padding:6px 10px;border-radius:10px;background:rgba(255,255,255,.96);color:#111827;border:1px solid rgba(15,23,42,.12);box-shadow:0 8px 18px rgba(15,23,42,.12);font:600 12px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;white-space:nowrap;max-width:calc(100vw - 36px);overflow:hidden;text-overflow:ellipsis}
-    .network-side-panel{position:absolute;right:18px;top:86px;z-index:32;width:min(340px,34vw);max-height:min(74vh,620px);overflow:auto;padding:10px;border-radius:10px;background:rgba(255,255,255,.96);border:1px solid rgba(148,163,184,.4);box-shadow:0 10px 22px rgba(15,23,42,.14);font:600 11px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;color:#0f172a}
+    .network-side-panel{position:absolute;right:18px;top:18px;z-index:32;width:min(340px,34vw);max-height:min(74vh,620px);overflow:auto;padding:10px;border-radius:10px;background:rgba(255,255,255,.96);border:1px solid rgba(148,163,184,.4);box-shadow:0 10px 22px rgba(15,23,42,.14);font:600 11px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;color:#0f172a}
+    .network-panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer;user-select:none}
     .network-panel-title{font-size:12px;font-weight:700;color:#0f172a}
     .network-panel-updated{margin-top:2px;color:#475569;font-size:10px}
+    .network-panel-content{margin-top:8px}
+    .network-side-panel.minimized .network-panel-updated,.network-side-panel.minimized .network-panel-content{display:none}
     .network-empty{margin-top:8px;color:#64748b}
     .network-row{margin-top:8px;padding:8px;border:1px solid rgba(148,163,184,.35);border-radius:8px;background:#fff}
     .network-row-header{font-size:11px;font-weight:700;color:#0f172a;margin-bottom:6px}
@@ -59,9 +78,12 @@
     .network-popup{position:absolute;inset:0;z-index:40;display:none;align-items:flex-end;justify-content:center;background:rgba(15,23,42,.4)}
     .network-popup.show{display:flex}
     .network-popup-card{width:min(95vw,540px);max-height:min(82vh,680px);overflow:auto;margin-bottom:10px;padding:10px;border-radius:12px;background:#fff;box-shadow:0 14px 28px rgba(15,23,42,.22)}
-    .network-popup-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;font:700 12px/1.2 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;color:#0f172a}
+    .network-popup-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;font:700 12px/1.2 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;color:#0f172a;cursor:pointer;user-select:none}
+    .network-popup-actions{display:flex;align-items:center;gap:6px}
+    .network-popup-toggle{border:0;background:#e2e8f0;color:#0f172a;width:24px;height:24px;border-radius:999px;font-weight:800}
     .network-popup-close{border:0;background:#e2e8f0;color:#0f172a;width:24px;height:24px;border-radius:999px;font-weight:700}
     .network-popup-body{font:600 11px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace}
+    .network-popup-card.minimized .network-panel-updated,.network-popup-card.minimized .network-popup-body{display:none}
     @media (max-width: 768px){
       .call-meta{
         left:10px;
@@ -74,8 +96,6 @@
         max-width:calc(100vw - 20px)
       }
       .reconnect{left:10px;bottom:calc(126px + env(safe-area-inset-bottom))}
-      .media-io-panel{left:10px;bottom:calc(166px + env(safe-area-inset-bottom));max-width:calc(100vw - 20px)}
-      .status-matrix{left:10px;bottom:calc(236px + env(safe-area-inset-bottom));max-width:calc(100vw - 20px)}
       .network-side-panel{display:none}
       .network-panel-btn{display:inline-flex}
     }
@@ -88,16 +108,19 @@
       #remoteVideo{max-width:min(96vw,900px);max-height:min(62vh,380px);transform:translateY(-30px)}
       .local-pip{width:224px;height:140px;right:8px;bottom:calc(126px + env(safe-area-inset-bottom))}
       .reconnect{left:8px;bottom:calc(126px + env(safe-area-inset-bottom))}
-      .media-io-panel{left:8px;bottom:calc(166px + env(safe-area-inset-bottom));max-width:calc(100vw - 16px)}
-      .status-matrix{left:8px;bottom:calc(236px + env(safe-area-inset-bottom));max-width:calc(100vw - 16px)}
     }
     @media (max-height: 500px){
       #remoteVideo{transform:translateY(-34px)}
       .local-pip{width:210px;height:130px;right:8px;bottom:calc(136px + env(safe-area-inset-bottom))}
       .reconnect{left:8px;bottom:calc(136px + env(safe-area-inset-bottom))}
-      .media-io-panel{left:8px;bottom:calc(176px + env(safe-area-inset-bottom));max-width:calc(100vw - 16px)}
-      .status-matrix{left:8px;bottom:calc(246px + env(safe-area-inset-bottom));max-width:calc(100vw - 16px)}
       .call-meta{left:8px;bottom:calc(8px + env(safe-area-inset-bottom));max-width:calc(100vw - 16px)}
+    }
+    @media (max-width: 900px){
+      .diag-panel{display:none;left:8px;right:8px;bottom:calc(176px + env(safe-area-inset-bottom));width:auto;max-height:min(60vh,560px);overflow:auto;z-index:44}
+      .diag-panel.show-mobile{display:block}
+      .diag-mobile-close{display:inline-flex}
+      .diag-panel-btn{display:inline-flex}
+      .diag-table{width:100%}
     }
     .status{position:absolute;top:14px;left:50%;transform:translateX(-50%);width:min(84vw,860px);background:rgba(255,255,255,.94);color:#111827;border:1px solid rgba(148,163,184,.38);border-radius:12px;padding:12px 14px;box-shadow:0 12px 24px rgba(15,23,42,.14);backdrop-filter:blur(6px);z-index:20;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;text-align:center}
     .status #statusLine{font-size:14px;font-weight:700;line-height:1.25}
@@ -138,30 +161,76 @@
   </div>
 
   <button id="btnReconnect" class="reconnect" disabled>Re-Connect</button>
-  <div id="mediaIoPanel" class="media-io-panel">
-    <div id="mediaIoBytes" class="media-io-bytes">A(sent/recv): 0 / 0 | V(sent/recv): 0 / 0</div>
-    <div id="mediaIoIssues" class="media-io-issues"></div>
-  </div>
-  <div id="statusMatrix" class="status-matrix">
-    <div class="label">Remote receiving your video</div><div id="mRemoteRecvVideo" class="value">Unknown</div>
-    <div class="label">Remote receiving your audio</div><div id="mRemoteRecvAudio" class="value">Unknown</div>
-    <div class="label">Remote audio playback status</div><div id="mRemoteAudioPlayback" class="value">Unknown</div>
-    <div class="label">Remote video playback status</div><div id="mRemoteVideoPlayback" class="value">Unknown</div>
-    <div class="label">Local receiving your video</div><div id="mLocalRecvVideo" class="value">Unknown</div>
-    <div class="label">Local receiving your audio</div><div id="mLocalRecvAudio" class="value">Unknown</div>
-    <div class="label">Local audio playback status</div><div id="mLocalAudioPlayback" class="value">Unknown</div>
-    <div class="label">Local video playback status</div><div id="mLocalVideoPlayback" class="value">Unknown</div>
+  <button id="diagPanelBtn" class="diag-panel-btn" type="button">Health</button>
+  <div id="diagPanel" class="diag-panel">
+    <div id="diagPanelHead" class="diag-panel-head" role="button" tabindex="0" aria-expanded="true">
+      <span class="diag-panel-title">Connection Health</span>
+      <div class="diag-head-actions">
+        <span id="diagPanelToggle" class="panel-toggle" aria-hidden="true">-</span>
+        <button id="diagPanelClose" class="diag-mobile-close" type="button">x</button>
+      </div>
+    </div>
+    <div id="diagPerspective" class="diag-panel-context">Perspective: You</div>
+    <div class="diag-section diag-section-local">
+      <div class="diag-section-title">Local (You)</div>
+      <table class="diag-table" aria-label="Local connection health">
+        <tbody>
+          <tr><th>Receiving remote video</th><td id="mLocalRecvVideo">Pending</td></tr>
+          <tr><th>Receiving remote audio</th><td id="mLocalRecvAudio">Pending</td></tr>
+          <tr><th>Remote audio playback</th><td id="mLocalAudioPlayback">Pending</td></tr>
+          <tr><th>Remote video playback</th><td id="mLocalVideoPlayback">Pending</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="diag-section diag-section-remote">
+      <div class="diag-section-title">Remote (Participant)</div>
+      <table class="diag-table" aria-label="Remote connection health">
+        <tbody>
+          <tr><th>Receiving your video</th><td id="mRemoteRecvVideo">Pending</td></tr>
+          <tr><th>Receiving your audio</th><td id="mRemoteRecvAudio">Pending</td></tr>
+          <tr><th>Your audio playback</th><td id="mRemoteAudioPlayback">Pending</td></tr>
+          <tr><th>Your video playback</th><td id="mRemoteVideoPlayback">Pending</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="diag-section diag-section-flow">
+      <div class="diag-section-title">Data Flow</div>
+      <table class="diag-table diag-flow-table" aria-label="Media flow">
+        <tbody>
+          <tr><th>Audio sent</th><td id="diagAudioSent">0B [x]</td></tr>
+          <tr><th>Audio received</th><td id="diagAudioRecv">0B [x]</td></tr>
+          <tr><th>Video sent</th><td id="diagVideoSent">0B [x]</td></tr>
+          <tr><th>Video received</th><td id="diagVideoRecv">0B [x]</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div id="mediaIoIssues" class="diag-issues"></div>
   </div>
   <div id="callMeta" class="call-meta">GroupId: - | RoomId: - | Name: -</div>
-  <div id="networkSidePanel" class="network-side-panel"></div>
+  <div id="networkSidePanel" class="network-side-panel">
+    <div id="networkSideHead" class="network-panel-head" role="button" tabindex="0" aria-expanded="true">
+      <span class="network-panel-title">Participant Network</span>
+      <span id="networkSideToggle" class="panel-toggle" aria-hidden="true">-</span>
+    </div>
+    <div id="networkSideUpdated" class="network-panel-updated">Updated: -</div>
+    <div id="networkSideBody" class="network-panel-content">
+      <div class="network-empty">Pending stats...</div>
+    </div>
+  </div>
   <button id="networkPanelBtn" class="network-panel-btn" type="button">Network</button>
   <div id="networkPanelPopup" class="network-popup">
-    <div class="network-popup-card">
-      <div class="network-popup-header">
+    <div id="networkPopupCard" class="network-popup-card">
+      <div id="networkPopupHead" class="network-popup-header" role="button" tabindex="0" aria-expanded="true">
         <span>Participant Network</span>
-        <button id="networkPanelClose" class="network-popup-close" type="button">x</button>
+        <div class="network-popup-actions">
+          <button id="networkPopupToggle" class="network-popup-toggle" type="button">-</button>
+          <button id="networkPanelClose" class="network-popup-close" type="button">x</button>
+        </div>
       </div>
-      <div id="networkPopupBody" class="network-popup-body"></div>
+      <div id="networkPopupUpdated" class="network-panel-updated">Updated: -</div>
+      <div id="networkPopupBody" class="network-popup-body">
+        <div class="network-empty">Pending stats...</div>
+      </div>
     </div>
   </div>
 

@@ -4,6 +4,9 @@ class ErrorMessages {
   static readonly URL_GROUP_ID_MISSING = "Missing required query param: groupId";
   static readonly URL_GROUP_ID_INVALID = "Invalid query param: groupId must be a number";
   static readonly URL_PARTICIPANT_ID_INVALID = "Invalid query param: participantId must be a positive number";
+  static readonly URL_RUID_ALERT =
+    "Customer call link is missing ruId. Please open the full link again or add ?ruId=<register-user-id>.";
+  static readonly URL_RUID_MISSING = "Missing required query param: ruId (mandatory for customer)";
   static readonly RMS_MEETING_CREATE_FAILED = "Unable to create meeting from group. Please try again.";
   static readonly RMS_MEETING_ID_INVALID = "RMS response is missing a valid meetingId";
   static readonly RMS_RECORDING_CREATE_FAILED = "Unable to create recording from meeting. Please try again.";
