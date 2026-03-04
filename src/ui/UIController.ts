@@ -14,7 +14,6 @@ class UIController {
   private logger: Logger;
   private bus = new EventBus();
   private controller: CallController;
-  private recordingController: RecordingController;
 
   private btnMute = document.getElementById("btnMute") as HTMLButtonElement;
   private btnUnpublish = document.getElementById("btnUnpublish") as HTMLButtonElement;
@@ -93,7 +92,6 @@ class UIController {
     const remoteVideo = this.remoteVideoEl;
 
     this.controller = new CallController(this.bus, localVideo, remoteVideo);
-    this.recordingController = new RecordingController(this.controller, this.canRecord);
     this.applyRecordingAccess();
 
     this.bus.on<boolean>("joined", j=>{
@@ -294,11 +292,11 @@ class UIController {
   }
 
   private async startRecording(source: "manual" | "auto") {
-    await this.recordingController.start(source, this.renderedParticipantCount, this.recording);
+    await this.controller.startRecording(source, this.renderedParticipantCount);
   }
 
   private stopRecording(source: "manual" | "auto") {
-    this.recordingController.stop(source, this.recording);
+    this.controller.stopRecording(source);
   }
 
   private updateRecordUI() {
@@ -341,7 +339,7 @@ class UIController {
     }
     const joinSeq = ++this.autoJoinSeq;
     this.lastGroupId = req.groupId;
-    this.recordingController.clearMeetingContext();
+    this.controller.clearRecordingMeetingContext();
     this.recording = false;
     this.renderedParticipantCount = 0;
     this.lastRemoteVideoTime = 0;
@@ -368,7 +366,7 @@ class UIController {
         participantId: req.participantId
       };
       this.lastCfg = cfg;
-      this.recordingController.setMeetingContext(req.groupId, cfg.roomId);
+      this.controller.setRecordingMeetingContext(req.groupId, cfg.roomId);
       this.renderCallMeta(cfg.display, cfg.participantId, cfg.roomId);
       this.updateDebugState({
         groupId: req.groupId,

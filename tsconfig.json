@@ -43,8 +43,8 @@
     "src/managers/CallMonitoringStat.ts",
     "src/managers/JanusGateway.ts",
     "src/managers/RemoteFeedManager.ts",
-    "src/managers/CallController.ts",
     "src/managers/RecordingController.ts",
+    "src/managers/CallController.ts",
     "src/ui/UIController.ts",
     "src/app.ts"
   ]

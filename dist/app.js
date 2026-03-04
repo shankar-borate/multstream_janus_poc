@@ -3971,6 +3971,167 @@ class RemoteFeedManager {
         this.media.clearRemote(this.remoteVideo);
     }
 }
+class RecordingController {
+    constructor(deps) {
+        this.deps = deps;
+        this.groupId = null;
+        this.meetingId = null;
+        this.recording = false;
+        this.currentRecordingId = null;
+        this.createInFlight = false;
+        this.recordingRetryDelayMs = 700;
+    }
+    setMeetingContext(groupId, meetingId) {
+        this.groupId = groupId;
+        this.meetingId = meetingId;
+    }
+    clearMeetingContext() {
+        this.groupId = null;
+        this.meetingId = null;
+    }
+    reset() {
+        this.recording = false;
+        this.currentRecordingId = null;
+        this.createInFlight = false;
+        this.deps.bus.emit("recording-changed", false);
+    }
+    isRecording() {
+        return this.recording;
+    }
+    async start(source, renderedParticipantCount) {
+        if (!this.deps.canRecord()) {
+            Logger.user("Recording blocked for user_type=customer");
+            return;
+        }
+        const requiredParticipants = APP_CONFIG.recording.autoStartParticipantThreshold;
+        if (renderedParticipantCount !== requiredParticipants) {
+            Logger.setStatus("Recording requires both participants on live video.");
+            Logger.user(`Recording blocked: rendered participants=${renderedParticipantCount}, required=${requiredParticipants}`);
+            return;
+        }
+        if (this.recording || this.createInFlight)
+            return;
+        const groupId = this.groupId;
+        const meetingId = this.meetingId;
+        if (!Number.isFinite(groupId) || !Number.isFinite(meetingId)) {
+            Logger.error(ErrorMessages.RMS_RECORDING_CREATE_FAILED, { groupId, meetingId });
+            Logger.setStatus(ErrorMessages.RMS_RECORDING_CREATE_FAILED);
+            return;
+        }
+        this.createInFlight = true;
+        try {
+            const server = this.deps.getServer();
+            const http = new HttpClient(server.server, server.client_id);
+            const rms = new RmsClient(http);
+            const recordingId = await rms.createRecording(groupId, meetingId);
+            Logger.user(`[rms] recording created groupId=${groupId} meetingId=${meetingId} recordingId=${recordingId}`);
+            Logger.user(`${source} start recording`);
+            this.enableRecording(recordingId, 1);
+        }
+        catch (e) {
+            Logger.error(ErrorMessages.RMS_RECORDING_CREATE_FAILED, e);
+            Logger.setStatus(ErrorMessages.RMS_RECORDING_CREATE_FAILED);
+        }
+        finally {
+            this.createInFlight = false;
+        }
+    }
+    stop(source) {
+        if (!this.recording)
+            return;
+        Logger.user(`${source} stop recording`);
+        this.disableRecording(1);
+    }
+    stopOnLeave() {
+        const plugin = this.deps.getPlugin();
+        if (this.recording && plugin) {
+            try {
+                plugin.send({
+                    message: {
+                        request: "enable_recording",
+                        record: false,
+                        room: this.deps.getCurrentRoomId()
+                    }
+                });
+            }
+            catch (e) {
+                Logger.error(ErrorMessages.CALL_RECORDING_STOP_ON_LEAVE_FAILED, e);
+            }
+        }
+        this.recording = false;
+        this.currentRecordingId = null;
+        this.deps.bus.emit("recording-changed", false);
+    }
+    endCallOnRecordingFailure(message, err) {
+        Logger.error(ErrorMessages.callRecordingLog(message), err);
+        Logger.setStatus(ErrorMessages.CALL_RECORDING_FAILED_ENDING);
+        this.recording = false;
+        this.currentRecordingId = null;
+        this.deps.bus.emit("recording-changed", false);
+        if (!this.deps.isLeaving())
+            this.deps.leave();
+    }
+    enableRecording(recordingId, attempt) {
+        const plugin = this.deps.getPlugin();
+        if (!plugin || !this.deps.getJoinedRoom())
+            return;
+        if (this.recording)
+            return;
+        this.currentRecordingId = recordingId;
+        plugin.send({
+            message: {
+                request: "enable_recording",
+                record: true,
+                room: this.deps.getCurrentRoomId(),
+                recordingId,
+                participantId: this.deps.getParticipantId()
+            },
+            success: () => {
+                this.recording = true;
+                Logger.setStatus(ErrorMessages.callRecordingStarted(String(recordingId)));
+                this.deps.bus.emit("recording-changed", true);
+            },
+            error: (e) => {
+                Logger.error(ErrorMessages.callRecordingStartFailed(attempt), e);
+                this.recording = false;
+                this.deps.bus.emit("recording-changed", false);
+                if (attempt < 2) {
+                    Logger.setStatus(ErrorMessages.CALL_RECORDING_START_RETRYING);
+                    window.setTimeout(() => this.enableRecording(recordingId, attempt + 1), this.recordingRetryDelayMs);
+                    return;
+                }
+                this.endCallOnRecordingFailure("start failed after retry", e);
+            }
+        });
+    }
+    disableRecording(attempt) {
+        const plugin = this.deps.getPlugin();
+        if (!plugin || !this.recording)
+            return;
+        plugin.send({
+            message: {
+                request: "enable_recording",
+                record: false,
+                room: this.deps.getCurrentRoomId()
+            },
+            success: () => {
+                this.recording = false;
+                this.currentRecordingId = null;
+                Logger.setStatus(ErrorMessages.CALL_RECORDING_STOPPED);
+                this.deps.bus.emit("recording-changed", false);
+            },
+            error: (e) => {
+                Logger.error(ErrorMessages.callRecordingStopFailed(attempt), e);
+                if (attempt < 2) {
+                    Logger.setStatus(ErrorMessages.CALL_RECORDING_STOP_RETRYING);
+                    window.setTimeout(() => this.disableRecording(attempt + 1), this.recordingRetryDelayMs);
+                    return;
+                }
+                this.endCallOnRecordingFailure("stop failed after retry", e);
+            }
+        });
+    }
+}
 // import { HttpClient } from "../core/http/HttpClient";
 // import { ImsClient } from "../core/clients/ims/ImsClient";
 class CallController {
@@ -3989,9 +4150,6 @@ class CallController {
         this.screenEnabled = false;
         this.vbEnabled = false;
         this.screenManager = new ScreenShareManager();
-        // Ã¢Å“â€¦ CLEAN recording state
-        this.recording = false;
-        this.currentRecordingId = null;
         this.currentRoomId = null;
         this.participantSyncTimer = null;
         this.participantSyncInFlight = false;
@@ -4005,7 +4163,6 @@ class CallController {
         this.suppressRemoteFeedRetry = false;
         this.participantSyncRequestTimer = null;
         this.participantSyncRequestSeq = 0;
-        this.recordingRetryDelayMs = 700;
         this.cameraStreamOrientation = null;
         this.publisherPc = null;
         this.subscriberPcs = new Map();
@@ -4046,6 +4203,17 @@ class CallController {
             onModeChanged: async (_mode, videoCfg) => {
                 await this.applyAdaptiveVideoConfig(videoCfg);
             }
+        });
+        this.recordingController = new RecordingController({
+            bus: this.bus,
+            getPlugin: () => this.plugin,
+            getJoinedRoom: () => this.joinedRoom,
+            getCurrentRoomId: () => this.currentRoomId,
+            getParticipantId: () => this.activeJoinCfg?.participantId,
+            getServer: () => UrlConfig.getVcxServer(),
+            isLeaving: () => this.isLeaving,
+            leave: () => this.leave(),
+            canRecord: () => this.userType === "agent"
         });
         this.bus.emit("connection-status", this.connectionEngine.getStatus());
         this.gateway.init();
@@ -4171,11 +4339,9 @@ class CallController {
         this.videoToggleBusy = false;
         this.screenToggleBusy = false;
         this.vbToggleBusy = false;
-        this.recording = false;
-        this.currentRecordingId = null;
         this.currentRoomId = null;
         this.roster.reset();
-        this.bus.emit("recording-changed", false);
+        this.recordingController.reset();
         this.bus.emit("joined", false);
         this.bus.emit("mute-changed", false);
         this.suppressPublisherCleanupRetry = true;
@@ -4242,10 +4408,7 @@ class CallController {
             this.subscriberPcs.clear();
             this.roster.reset();
             this.stopParticipantSync();
-            // reset recording
-            this.recording = false;
-            this.currentRecordingId = null;
-            this.bus.emit("recording-changed", false);
+            this.recordingController.reset();
             this.connectionEngine.onPublisherAttached();
             Logger.setStatus(ErrorMessages.CALL_PLUGIN_ATTACHED_CHECKING_ROOM);
             this.ensureRoomThenJoin(cfg);
@@ -5200,68 +5363,17 @@ class CallController {
     // =====================================
     // RECORDING
     // =====================================
-    endCallOnRecordingFailure(message, err) {
-        Logger.error(ErrorMessages.callRecordingLog(message), err);
-        Logger.setStatus(ErrorMessages.CALL_RECORDING_FAILED_ENDING);
-        this.recording = false;
-        this.currentRecordingId = null;
-        this.bus.emit("recording-changed", false);
-        if (!this.isLeaving)
-            this.leave();
+    setRecordingMeetingContext(groupId, meetingId) {
+        this.recordingController.setMeetingContext(groupId, meetingId);
     }
-    startRecording(recordingId, attempt = 1) {
-        if (!this.plugin || !this.joinedRoom)
-            return;
-        if (this.recording)
-            return;
-        this.currentRecordingId = recordingId;
-        this.plugin.send({
-            message: {
-                request: "enable_recording",
-                record: true,
-                room: this.currentRoomId,
-                recordingId,
-                participantId: this.activeJoinCfg?.participantId
-            },
-            success: () => {
-                this.recording = true;
-                Logger.setStatus(ErrorMessages.callRecordingStarted(String(recordingId)));
-                this.bus.emit("recording-changed", true);
-            },
-            error: (e) => {
-                Logger.error(ErrorMessages.callRecordingStartFailed(attempt), e);
-                this.recording = false;
-                this.bus.emit("recording-changed", false);
-                if (attempt < 2) {
-                    Logger.setStatus(ErrorMessages.CALL_RECORDING_START_RETRYING);
-                    window.setTimeout(() => this.startRecording(recordingId, attempt + 1), this.recordingRetryDelayMs);
-                    return;
-                }
-                this.endCallOnRecordingFailure("start failed after retry", e);
-            }
-        });
+    clearRecordingMeetingContext() {
+        this.recordingController.clearMeetingContext();
     }
-    stopRecording(attempt = 1) {
-        if (!this.plugin || !this.recording)
-            return;
-        this.plugin.send({
-            message: { request: "enable_recording", record: false, room: this.currentRoomId },
-            success: () => {
-                this.recording = false;
-                this.currentRecordingId = null;
-                Logger.setStatus(ErrorMessages.CALL_RECORDING_STOPPED);
-                this.bus.emit("recording-changed", false);
-            },
-            error: (e) => {
-                Logger.error(ErrorMessages.callRecordingStopFailed(attempt), e);
-                if (attempt < 2) {
-                    Logger.setStatus(ErrorMessages.CALL_RECORDING_STOP_RETRYING);
-                    window.setTimeout(() => this.stopRecording(attempt + 1), this.recordingRetryDelayMs);
-                    return;
-                }
-                this.endCallOnRecordingFailure("stop failed after retry", e);
-            }
-        });
+    async startRecording(source, renderedParticipantCount) {
+        await this.recordingController.start(source, renderedParticipantCount);
+    }
+    stopRecording(source) {
+        this.recordingController.stop(source);
     }
     // =====================================
     // LEAVE
@@ -5280,14 +5392,7 @@ class CallController {
             this.clearRetryTimer();
             this.serverRetryAttempt = 0;
             this.peerRetryAttempt = 0;
-            if (this.recording && this.plugin) {
-                try {
-                    this.plugin.send({ message: { request: "enable_recording", record: false, room: this.currentRoomId } });
-                }
-                catch (e) {
-                    Logger.error(ErrorMessages.CALL_RECORDING_STOP_ON_LEAVE_FAILED, e);
-                }
-            }
+            this.recordingController.stopOnLeave();
             try {
                 if (this.joinedRoom) {
                     this.plugin?.send({ message: { request: "leave" } });
@@ -5304,8 +5409,6 @@ class CallController {
             this.suppressPublisherCleanupRetry = false;
             this.stopParticipantSync();
             this.joinedRoom = false;
-            this.recording = false;
-            this.currentRecordingId = null;
             this.currentRoomId = null;
             this.activeJoinCfg = null;
             this.selfId = null;
@@ -5684,72 +5787,6 @@ class CallController {
         catch { }
     }
 }
-class RecordingController {
-    constructor(callController, canRecord) {
-        this.callController = callController;
-        this.canRecord = canRecord;
-        this.groupId = null;
-        this.meetingId = null;
-        this.createInFlight = false;
-    }
-    setMeetingContext(groupId, meetingId) {
-        this.groupId = groupId;
-        this.meetingId = meetingId;
-    }
-    clearMeetingContext() {
-        this.groupId = null;
-        this.meetingId = null;
-        this.createInFlight = false;
-    }
-    async start(source, renderedParticipantCount, isRecording) {
-        if (!this.canRecord) {
-            Logger.user("Recording blocked for user_type=customer");
-            return;
-        }
-        const requiredParticipants = APP_CONFIG.recording.autoStartParticipantThreshold;
-        if (renderedParticipantCount !== requiredParticipants) {
-            Logger.setStatus("Recording requires both participants on live video.");
-            Logger.user(`Recording blocked: rendered participants=${renderedParticipantCount}, required=${requiredParticipants}`);
-            return;
-        }
-        if (isRecording || this.createInFlight)
-            return;
-        const groupId = this.groupId;
-        const meetingId = this.meetingId;
-        if (!Number.isFinite(groupId) || !Number.isFinite(meetingId)) {
-            Logger.error(ErrorMessages.RMS_RECORDING_CREATE_FAILED, {
-                groupId,
-                meetingId
-            });
-            Logger.setStatus(ErrorMessages.RMS_RECORDING_CREATE_FAILED);
-            return;
-        }
-        this.createInFlight = true;
-        try {
-            const server = UrlConfig.getVcxServer().server;
-            const clientId = UrlConfig.getVcxServer().client_id;
-            const http = new HttpClient(server, clientId);
-            const rms = new RmsClient(http);
-            const recordingId = await rms.createRecording(groupId, meetingId);
-            Logger.user(`[rms] recording created groupId=${groupId} meetingId=${meetingId} recordingId=${recordingId}`);
-            Logger.user(`${source} start recording`);
-            this.callController.startRecording(recordingId);
-        }
-        catch (e) {
-            Logger.error(ErrorMessages.RMS_RECORDING_CREATE_FAILED, e);
-            Logger.setStatus(ErrorMessages.RMS_RECORDING_CREATE_FAILED);
-        }
-        finally {
-            this.createInFlight = false;
-        }
-    }
-    stop(source, isRecording) {
-        if (!isRecording)
-            return;
-        Logger.user(`${source} stop recording`);
-        this.callController.stopRecording();
-    }
-}
 // import {Dom} from "./Dom";
 // import {CallController} from "../managers/CallController";
 class UIController {
@@ -5825,7 +5862,6 @@ class UIController {
         const localVideo = this.localVideoEl;
         const remoteVideo = this.remoteVideoEl;
         this.controller = new CallController(this.bus, localVideo, remoteVideo);
-        this.recordingController = new RecordingController(this.controller, this.canRecord);
         this.applyRecordingAccess();
         this.bus.on("joined", j => {
             this.setJoinedState(j);
@@ -6015,10 +6051,10 @@ class UIController {
         }
     }
     async startRecording(source) {
-        await this.recordingController.start(source, this.renderedParticipantCount, this.recording);
+        await this.controller.startRecording(source, this.renderedParticipantCount);
     }
     stopRecording(source) {
-        this.recordingController.stop(source, this.recording);
+        this.controller.stopRecording(source);
     }
     updateRecordUI() {
         if (!this.btnRecord)
@@ -6060,7 +6096,7 @@ class UIController {
         }
         const joinSeq = ++this.autoJoinSeq;
         this.lastGroupId = req.groupId;
-        this.recordingController.clearMeetingContext();
+        this.controller.clearRecordingMeetingContext();
         this.recording = false;
         this.renderedParticipantCount = 0;
         this.lastRemoteVideoTime = 0;
@@ -6084,7 +6120,7 @@ class UIController {
                 participantId: req.participantId
             };
             this.lastCfg = cfg;
-            this.recordingController.setMeetingContext(req.groupId, cfg.roomId);
+            this.controller.setRecordingMeetingContext(req.groupId, cfg.roomId);
             this.renderCallMeta(cfg.display, cfg.participantId, cfg.roomId);
             this.updateDebugState({
                 groupId: req.groupId,
