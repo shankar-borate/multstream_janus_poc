@@ -76,6 +76,14 @@ type ParticipantNetworkDirectionSnapshot = {
   tier: ParticipantNetworkTier;
   slowLink: boolean;
 };
+type ParticipantNetworkQualitySnapshot = {
+  localRttMs: number | null;
+  localJitterMs: number | null;
+  localLossPct: number | null;
+  remoteRttMs: number | null;
+  remoteJitterMs: number | null;
+  remoteLossPct: number | null;
+};
 type ParticipantNetworkRow = {
   participantId: number | null;
   label: string;
@@ -83,6 +91,7 @@ type ParticipantNetworkRow = {
   download: ParticipantNetworkDirectionSnapshot;
   remoteUpload: ParticipantNetworkDirectionSnapshot;
   remoteDownload: ParticipantNetworkDirectionSnapshot;
+  quality: ParticipantNetworkQualitySnapshot;
   likelyBottleneck: "You" | "Remote" | "Both" | "Unknown";
 };
 type ParticipantNetworkSnapshot = {

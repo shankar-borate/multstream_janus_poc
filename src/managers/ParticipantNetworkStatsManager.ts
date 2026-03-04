@@ -1,6 +1,9 @@
 type ParticipantPeerRates = {
   sentKbps: number | null;
   receivedKbps: number | null;
+  rttMs: number | null;
+  jitterMs: number | null;
+  lossPct: number | null;
 };
 
 class ParticipantNetworkStatsManager {
@@ -68,7 +71,7 @@ class ParticipantNetworkStatsManager {
 
     const localRates = peers.publisher
       ? await this.collectPeerRates("publisher", peers.publisher)
-      : { sentKbps: null, receivedKbps: null };
+      : { sentKbps: null, receivedKbps: null, rttMs: null, jitterMs: null, lossPct: null };
 
     const remoteRates = await Promise.all(peers.subscribers.map(async (sub) => {
       const rates = await this.collectPeerRates(`subscriber-${sub.feedId}`, sub.pc);
@@ -82,6 +85,15 @@ class ParticipantNetworkStatsManager {
     const remoteDownloadsKnown = remoteRates
       .map((entry) => entry.remoteTelemetry?.downloadKbps ?? null)
       .filter((v): v is number => v !== null && Number.isFinite(v));
+    const remoteJitterKnown = remoteRates
+      .map((entry) => entry.remoteTelemetry?.jitterMs ?? entry.rates.jitterMs)
+      .filter((v): v is number => v !== null && Number.isFinite(v));
+    const remoteLossKnown = remoteRates
+      .map((entry) => entry.remoteTelemetry?.lossPct ?? entry.rates.lossPct)
+      .filter((v): v is number => v !== null && Number.isFinite(v));
+    const remoteRttKnown = remoteRates
+      .map((entry) => entry.rates.rttMs)
+      .filter((v): v is number => v !== null && Number.isFinite(v));
     const localDownloadKbps = remoteCount === 0
       ? 0
       : (
@@ -89,6 +101,9 @@ class ParticipantNetworkStatsManager {
           ? remoteUploadsKnown.reduce((sum, v) => sum + v, 0)
           : null
       );
+    const aggregateRemoteJitterMs = remoteCount === 0 ? null : this.averageKnown(remoteJitterKnown);
+    const aggregateRemoteLossPct = remoteCount === 0 ? null : this.averageKnown(remoteLossKnown);
+    const aggregateRemoteRttMs = remoteCount === 0 ? null : this.averageKnown(remoteRttKnown);
 
     const localUploadKbps = localRates.sentKbps;
     const remoteDownloadSumKbps = remoteCount === 0
@@ -122,6 +137,14 @@ class ParticipantNetworkStatsManager {
       download: localDownloadDirection,
       remoteUpload: aggregateRemoteUploadDirection,
       remoteDownload: aggregateRemoteDownloadDirection,
+      quality: {
+        localRttMs: localRates.rttMs,
+        localJitterMs: localRates.jitterMs,
+        localLossPct: localRates.lossPct,
+        remoteRttMs: aggregateRemoteRttMs,
+        remoteJitterMs: aggregateRemoteJitterMs,
+        remoteLossPct: aggregateRemoteLossPct
+      },
       likelyBottleneck: this.classifyBottleneck(
         localUploadDirection,
         localDownloadDirection,
@@ -147,6 +170,14 @@ class ParticipantNetworkStatsManager {
         download: remoteDownloadDirection,
         remoteUpload: localUploadDirection,
         remoteDownload: localDownloadDirection,
+        quality: {
+          localRttMs: localRates.rttMs,
+          localJitterMs: localRates.jitterMs,
+          localLossPct: localRates.lossPct,
+          remoteRttMs: rates.rttMs,
+          remoteJitterMs: remoteTelemetry?.jitterMs ?? rates.jitterMs,
+          remoteLossPct: remoteTelemetry?.lossPct ?? rates.lossPct
+        },
         likelyBottleneck: this.classifyBottleneck(
           localUploadDirection,
           localDownloadDirection,
@@ -218,6 +249,12 @@ class ParticipantNetworkStatsManager {
     return "Unknown";
   }
 
+  private averageKnown(values: number[]): number | null {
+    if (!values || values.length === 0) return null;
+    const sum = values.reduce((acc, value) => acc + value, 0);
+    return sum / values.length;
+  }
+
   private isSlowLinkActive(key: string, direction: "uplink" | "downlink"): boolean {
     const entry = this.slowLinks.get(key);
     if (!entry) return false;
@@ -230,21 +267,64 @@ class ParticipantNetworkStatsManager {
     const report = await pc.getStats();
     let sentBytes = 0;
     let receivedBytes = 0;
+    let rttMs: number | null = null;
+    let jitterMs: number | null = null;
+    let lost = 0;
+    let total = 0;
 
     report.forEach((s: RTCStats) => {
-      if (s.type !== "outbound-rtp" && s.type !== "inbound-rtp") return;
       const anyS = s as any;
       const kind = anyS.kind || anyS.mediaType;
+      if (s.type === "candidate-pair" && (anyS.selected || anyS.nominated) && typeof anyS.currentRoundTripTime === "number") {
+        const nextRtt = anyS.currentRoundTripTime * 1000;
+        rttMs = rttMs === null ? nextRtt : Math.max(rttMs, nextRtt);
+      }
+      if (s.type === "remote-inbound-rtp" && typeof anyS.roundTripTime === "number") {
+        const nextRtt = anyS.roundTripTime * 1000;
+        rttMs = rttMs === null ? nextRtt : Math.max(rttMs, nextRtt);
+      }
+
       if (kind !== "audio" && kind !== "video") return;
 
-      if (typeof anyS.bytesSent === "number") sentBytes += anyS.bytesSent;
-      if (typeof anyS.bytesReceived === "number") receivedBytes += anyS.bytesReceived;
+      if (s.type === "outbound-rtp" || s.type === "inbound-rtp") {
+        if (typeof anyS.bytesSent === "number") sentBytes += anyS.bytesSent;
+        if (typeof anyS.bytesReceived === "number") receivedBytes += anyS.bytesReceived;
+      }
+
+      if (s.type === "inbound-rtp" || s.type === "remote-inbound-rtp") {
+        if (typeof anyS.jitter === "number") {
+          const nextJitterMs = anyS.jitter * 1000;
+          jitterMs = jitterMs === null ? nextJitterMs : Math.max(jitterMs, nextJitterMs);
+        }
+        const packetsLost = typeof anyS.packetsLost === "number" ? anyS.packetsLost : 0;
+        const packetsReceivedOrSent = typeof anyS.packetsReceived === "number"
+          ? anyS.packetsReceived
+          : (typeof anyS.packetsSent === "number" ? anyS.packetsSent : 0);
+        if (packetsLost > 0 || packetsReceivedOrSent > 0) {
+          lost += packetsLost;
+          total += packetsLost + packetsReceivedOrSent;
+        }
+      }
     });
 
-    return this.computeRatesKbps(key, sentBytes, receivedBytes);
+    return this.computeRatesKbps(
+      key,
+      sentBytes,
+      receivedBytes,
+      rttMs,
+      jitterMs,
+      total > 0 ? (lost / total) * 100 : null
+    );
   }
 
-  private computeRatesKbps(key: string, sentBytes: number, receivedBytes: number): ParticipantPeerRates {
+  private computeRatesKbps(
+    key: string,
+    sentBytes: number,
+    receivedBytes: number,
+    rttMs: number | null,
+    jitterMs: number | null,
+    lossPct: number | null
+  ): ParticipantPeerRates {
     const now = Date.now();
     const prev = this.previousCounters.get(key);
     this.previousCounters.set(key, { sentBytes, receivedBytes, at: now });
@@ -252,7 +332,10 @@ class ParticipantNetworkStatsManager {
     if (!prev || now <= prev.at) {
       return {
         sentKbps: null,
-        receivedKbps: null
+        receivedKbps: null,
+        rttMs,
+        jitterMs,
+        lossPct
       };
     }
 
@@ -260,7 +343,10 @@ class ParticipantNetworkStatsManager {
     if (seconds <= 0) {
       return {
         sentKbps: null,
-        receivedKbps: null
+        receivedKbps: null,
+        rttMs,
+        jitterMs,
+        lossPct
       };
     }
 
@@ -268,7 +354,10 @@ class ParticipantNetworkStatsManager {
     const receivedDelta = Math.max(0, receivedBytes - prev.receivedBytes);
     return {
       sentKbps: (sentDelta * 8) / 1000 / seconds,
-      receivedKbps: (receivedDelta * 8) / 1000 / seconds
+      receivedKbps: (receivedDelta * 8) / 1000 / seconds,
+      rttMs,
+      jitterMs,
+      lossPct
     };
   }
 }

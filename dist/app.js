@@ -216,8 +216,8 @@ const APP_CONFIG = {
             slowLinkHoldMs: 12000,
             popupBreakpointPx: 900,
             thresholdsKbps: {
-                lowMax: 180,
-                mediumMax: 700
+                lowMax: 50,
+                mediumMax: 100
             }
         },
         simulated: {
@@ -1947,7 +1947,7 @@ class ParticipantNetworkStatsManager {
         const remoteCount = peers.subscribers.length;
         const localRates = peers.publisher
             ? await this.collectPeerRates("publisher", peers.publisher)
-            : { sentKbps: null, receivedKbps: null };
+            : { sentKbps: null, receivedKbps: null, rttMs: null, jitterMs: null, lossPct: null };
         const remoteRates = await Promise.all(peers.subscribers.map(async (sub) => {
             const rates = await this.collectPeerRates(`subscriber-${sub.feedId}`, sub.pc);
             const remoteTelemetry = this.getFreshRemoteTelemetry(sub.feedId);
@@ -1959,11 +1959,23 @@ class ParticipantNetworkStatsManager {
         const remoteDownloadsKnown = remoteRates
             .map((entry) => entry.remoteTelemetry?.downloadKbps ?? null)
             .filter((v) => v !== null && Number.isFinite(v));
+        const remoteJitterKnown = remoteRates
+            .map((entry) => entry.remoteTelemetry?.jitterMs ?? entry.rates.jitterMs)
+            .filter((v) => v !== null && Number.isFinite(v));
+        const remoteLossKnown = remoteRates
+            .map((entry) => entry.remoteTelemetry?.lossPct ?? entry.rates.lossPct)
+            .filter((v) => v !== null && Number.isFinite(v));
+        const remoteRttKnown = remoteRates
+            .map((entry) => entry.rates.rttMs)
+            .filter((v) => v !== null && Number.isFinite(v));
         const localDownloadKbps = remoteCount === 0
             ? 0
             : (remoteUploadsKnown.length > 0
                 ? remoteUploadsKnown.reduce((sum, v) => sum + v, 0)
                 : null);
+        const aggregateRemoteJitterMs = remoteCount === 0 ? null : this.averageKnown(remoteJitterKnown);
+        const aggregateRemoteLossPct = remoteCount === 0 ? null : this.averageKnown(remoteLossKnown);
+        const aggregateRemoteRttMs = remoteCount === 0 ? null : this.averageKnown(remoteRttKnown);
         const localUploadKbps = localRates.sentKbps;
         const remoteDownloadSumKbps = remoteCount === 0
             ? 0
@@ -1986,6 +1998,14 @@ class ParticipantNetworkStatsManager {
             download: localDownloadDirection,
             remoteUpload: aggregateRemoteUploadDirection,
             remoteDownload: aggregateRemoteDownloadDirection,
+            quality: {
+                localRttMs: localRates.rttMs,
+                localJitterMs: localRates.jitterMs,
+                localLossPct: localRates.lossPct,
+                remoteRttMs: aggregateRemoteRttMs,
+                remoteJitterMs: aggregateRemoteJitterMs,
+                remoteLossPct: aggregateRemoteLossPct
+            },
             likelyBottleneck: this.classifyBottleneck(localUploadDirection, localDownloadDirection, aggregateRemoteUploadDirection, aggregateRemoteDownloadDirection)
         });
         remoteRates.forEach(({ feedId, rates, remoteTelemetry }) => {
@@ -1999,6 +2019,14 @@ class ParticipantNetworkStatsManager {
                 download: remoteDownloadDirection,
                 remoteUpload: localUploadDirection,
                 remoteDownload: localDownloadDirection,
+                quality: {
+                    localRttMs: localRates.rttMs,
+                    localJitterMs: localRates.jitterMs,
+                    localLossPct: localRates.lossPct,
+                    remoteRttMs: rates.rttMs,
+                    remoteJitterMs: remoteTelemetry?.jitterMs ?? rates.jitterMs,
+                    remoteLossPct: remoteTelemetry?.lossPct ?? rates.lossPct
+                },
                 likelyBottleneck: this.classifyBottleneck(localUploadDirection, localDownloadDirection, remoteUploadDirection, remoteDownloadDirection)
             });
         });
@@ -2061,6 +2089,12 @@ class ParticipantNetworkStatsManager {
             return "Remote";
         return "Unknown";
     }
+    averageKnown(values) {
+        if (!values || values.length === 0)
+            return null;
+        const sum = values.reduce((acc, value) => acc + value, 0);
+        return sum / values.length;
+    }
     isSlowLinkActive(key, direction) {
         const entry = this.slowLinks.get(key);
         if (!entry)
@@ -2074,42 +2108,77 @@ class ParticipantNetworkStatsManager {
         const report = await pc.getStats();
         let sentBytes = 0;
         let receivedBytes = 0;
+        let rttMs = null;
+        let jitterMs = null;
+        let lost = 0;
+        let total = 0;
         report.forEach((s) => {
-            if (s.type !== "outbound-rtp" && s.type !== "inbound-rtp")
-                return;
             const anyS = s;
             const kind = anyS.kind || anyS.mediaType;
+            if (s.type === "candidate-pair" && (anyS.selected || anyS.nominated) && typeof anyS.currentRoundTripTime === "number") {
+                const nextRtt = anyS.currentRoundTripTime * 1000;
+                rttMs = rttMs === null ? nextRtt : Math.max(rttMs, nextRtt);
+            }
+            if (s.type === "remote-inbound-rtp" && typeof anyS.roundTripTime === "number") {
+                const nextRtt = anyS.roundTripTime * 1000;
+                rttMs = rttMs === null ? nextRtt : Math.max(rttMs, nextRtt);
+            }
             if (kind !== "audio" && kind !== "video")
                 return;
-            if (typeof anyS.bytesSent === "number")
-                sentBytes += anyS.bytesSent;
-            if (typeof anyS.bytesReceived === "number")
-                receivedBytes += anyS.bytesReceived;
+            if (s.type === "outbound-rtp" || s.type === "inbound-rtp") {
+                if (typeof anyS.bytesSent === "number")
+                    sentBytes += anyS.bytesSent;
+                if (typeof anyS.bytesReceived === "number")
+                    receivedBytes += anyS.bytesReceived;
+            }
+            if (s.type === "inbound-rtp" || s.type === "remote-inbound-rtp") {
+                if (typeof anyS.jitter === "number") {
+                    const nextJitterMs = anyS.jitter * 1000;
+                    jitterMs = jitterMs === null ? nextJitterMs : Math.max(jitterMs, nextJitterMs);
+                }
+                const packetsLost = typeof anyS.packetsLost === "number" ? anyS.packetsLost : 0;
+                const packetsReceivedOrSent = typeof anyS.packetsReceived === "number"
+                    ? anyS.packetsReceived
+                    : (typeof anyS.packetsSent === "number" ? anyS.packetsSent : 0);
+                if (packetsLost > 0 || packetsReceivedOrSent > 0) {
+                    lost += packetsLost;
+                    total += packetsLost + packetsReceivedOrSent;
+                }
+            }
         });
-        return this.computeRatesKbps(key, sentBytes, receivedBytes);
+        return this.computeRatesKbps(key, sentBytes, receivedBytes, rttMs, jitterMs, total > 0 ? (lost / total) * 100 : null);
     }
-    computeRatesKbps(key, sentBytes, receivedBytes) {
+    computeRatesKbps(key, sentBytes, receivedBytes, rttMs, jitterMs, lossPct) {
         const now = Date.now();
         const prev = this.previousCounters.get(key);
         this.previousCounters.set(key, { sentBytes, receivedBytes, at: now });
         if (!prev || now <= prev.at) {
             return {
                 sentKbps: null,
-                receivedKbps: null
+                receivedKbps: null,
+                rttMs,
+                jitterMs,
+                lossPct
             };
         }
         const seconds = (now - prev.at) / 1000;
         if (seconds <= 0) {
             return {
                 sentKbps: null,
-                receivedKbps: null
+                receivedKbps: null,
+                rttMs,
+                jitterMs,
+                lossPct
             };
         }
         const sentDelta = Math.max(0, sentBytes - prev.sentBytes);
         const receivedDelta = Math.max(0, receivedBytes - prev.receivedBytes);
         return {
             sentKbps: (sentDelta * 8) / 1000 / seconds,
-            receivedKbps: (receivedDelta * 8) / 1000 / seconds
+            receivedKbps: (receivedDelta * 8) / 1000 / seconds,
+            rttMs,
+            jitterMs,
+            lossPct
         };
     }
 }
@@ -6251,11 +6320,13 @@ class UIController {
         const download = this.renderParticipantMetric("Download", row.download);
         const remoteUpload = this.renderParticipantMetric("Remote Upload", row.remoteUpload);
         const remoteDownload = this.renderParticipantMetric("Remote Download", row.remoteDownload);
+        const quality = this.renderParticipantQualityGrid(row);
         return (`<div class="network-row">` +
             `<div class="network-row-header">${label}</div>` +
             `<div class="network-row-grid">` +
             upload + download + remoteUpload + remoteDownload +
             `</div>` +
+            quality +
             this.renderSlowLinkSummary(row) +
             this.renderBottleneckSummary(row.likelyBottleneck) +
             `<div class="network-row-strip">` +
@@ -6295,6 +6366,64 @@ class UIController {
             `<div class="network-metric-label">${label}</div>` +
             `<div class="network-metric-value ${cls}">${kbps} (${direction.tier}${slowTag})</div>` +
             `</div>`);
+    }
+    renderParticipantQualityGrid(row) {
+        const q = row.quality;
+        const localRtt = this.renderParticipantQualityMetric("Local RTT", q.localRttMs, "ms", this.classifyRttTier(q.localRttMs));
+        const localJitter = this.renderParticipantQualityMetric("Local Jitter", q.localJitterMs, "ms", this.classifyJitterTier(q.localJitterMs));
+        const localLoss = this.renderParticipantQualityMetric("Local Loss", q.localLossPct, "%", this.classifyLossTier(q.localLossPct));
+        const remoteRtt = this.renderParticipantQualityMetric("Remote RTT", q.remoteRttMs, "ms", this.classifyRttTier(q.remoteRttMs));
+        const remoteJitter = this.renderParticipantQualityMetric("Remote Jitter", q.remoteJitterMs, "ms", this.classifyJitterTier(q.remoteJitterMs));
+        const remoteLoss = this.renderParticipantQualityMetric("Remote Loss", q.remoteLossPct, "%", this.classifyLossTier(q.remoteLossPct));
+        return (`<div class="network-row-grid network-row-grid-quality">` +
+            localRtt + localJitter + localLoss + remoteRtt + remoteJitter + remoteLoss +
+            `</div>`);
+    }
+    renderParticipantQualityMetric(label, value, unit, tier) {
+        const cls = this.tierClass(tier);
+        const rendered = this.formatParticipantQualityValue(value, unit);
+        return (`<div class="network-metric">` +
+            `<div class="network-metric-label">${label}</div>` +
+            `<div class="network-metric-value ${cls}">${rendered}${value !== null ? ` (${tier})` : ""}</div>` +
+            `</div>`);
+    }
+    classifyJitterTier(value) {
+        if (value === null || !Number.isFinite(value))
+            return "Pending";
+        const goodMax = APP_CONFIG.networkQuality.thresholds.jitterGoodMs;
+        const mediumMax = goodMax * 2;
+        if (value <= goodMax)
+            return "Good";
+        if (value <= mediumMax)
+            return "Medium";
+        return "Low";
+    }
+    classifyRttTier(value) {
+        if (value === null || !Number.isFinite(value))
+            return "Pending";
+        const goodMax = APP_CONFIG.networkQuality.thresholds.rttGoodMs;
+        const mediumMax = goodMax * 2;
+        if (value <= goodMax)
+            return "Good";
+        if (value <= mediumMax)
+            return "Medium";
+        return "Low";
+    }
+    classifyLossTier(value) {
+        if (value === null || !Number.isFinite(value))
+            return "Pending";
+        const goodMax = APP_CONFIG.networkQuality.thresholds.lossGoodPct;
+        const mediumMax = goodMax * 2;
+        if (value <= goodMax)
+            return "Good";
+        if (value <= mediumMax)
+            return "Medium";
+        return "Low";
+    }
+    formatParticipantQualityValue(value, unit) {
+        if (value === null || !Number.isFinite(value))
+            return "Pending";
+        return `${value.toFixed(1)} ${unit}`;
     }
     formatParticipantSpeed(kbps) {
         if (kbps === null || !Number.isFinite(kbps))

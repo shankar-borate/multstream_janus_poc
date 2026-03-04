@@ -766,6 +766,7 @@ class UIController {
     const download = this.renderParticipantMetric("Download", row.download);
     const remoteUpload = this.renderParticipantMetric("Remote Upload", row.remoteUpload);
     const remoteDownload = this.renderParticipantMetric("Remote Download", row.remoteDownload);
+    const quality = this.renderParticipantQualityGrid(row);
 
     return (
       `<div class="network-row">` +
@@ -773,6 +774,7 @@ class UIController {
       `<div class="network-row-grid">` +
       upload + download + remoteUpload + remoteDownload +
       `</div>` +
+      quality +
       this.renderSlowLinkSummary(row) +
       this.renderBottleneckSummary(row.likelyBottleneck) +
       `<div class="network-row-strip">` +
@@ -817,6 +819,99 @@ class UIController {
       `<div class="network-metric-value ${cls}">${kbps} (${direction.tier}${slowTag})</div>` +
       `</div>`
     );
+  }
+
+  private renderParticipantQualityGrid(row: ParticipantNetworkRow): string {
+    const q = row.quality;
+    const localRtt = this.renderParticipantQualityMetric(
+      "Local RTT",
+      q.localRttMs,
+      "ms",
+      this.classifyRttTier(q.localRttMs)
+    );
+    const localJitter = this.renderParticipantQualityMetric(
+      "Local Jitter",
+      q.localJitterMs,
+      "ms",
+      this.classifyJitterTier(q.localJitterMs)
+    );
+    const localLoss = this.renderParticipantQualityMetric(
+      "Local Loss",
+      q.localLossPct,
+      "%",
+      this.classifyLossTier(q.localLossPct)
+    );
+    const remoteRtt = this.renderParticipantQualityMetric(
+      "Remote RTT",
+      q.remoteRttMs,
+      "ms",
+      this.classifyRttTier(q.remoteRttMs)
+    );
+    const remoteJitter = this.renderParticipantQualityMetric(
+      "Remote Jitter",
+      q.remoteJitterMs,
+      "ms",
+      this.classifyJitterTier(q.remoteJitterMs)
+    );
+    const remoteLoss = this.renderParticipantQualityMetric(
+      "Remote Loss",
+      q.remoteLossPct,
+      "%",
+      this.classifyLossTier(q.remoteLossPct)
+    );
+    return (
+      `<div class="network-row-grid network-row-grid-quality">` +
+      localRtt + localJitter + localLoss + remoteRtt + remoteJitter + remoteLoss +
+      `</div>`
+    );
+  }
+
+  private renderParticipantQualityMetric(
+    label: string,
+    value: number | null,
+    unit: "ms" | "%",
+    tier: ParticipantNetworkTier
+  ): string {
+    const cls = this.tierClass(tier);
+    const rendered = this.formatParticipantQualityValue(value, unit);
+    return (
+      `<div class="network-metric">` +
+      `<div class="network-metric-label">${label}</div>` +
+      `<div class="network-metric-value ${cls}">${rendered}${value !== null ? ` (${tier})` : ""}</div>` +
+      `</div>`
+    );
+  }
+
+  private classifyJitterTier(value: number | null): ParticipantNetworkTier {
+    if (value === null || !Number.isFinite(value)) return "Pending";
+    const goodMax = APP_CONFIG.networkQuality.thresholds.jitterGoodMs;
+    const mediumMax = goodMax * 2;
+    if (value <= goodMax) return "Good";
+    if (value <= mediumMax) return "Medium";
+    return "Low";
+  }
+
+  private classifyRttTier(value: number | null): ParticipantNetworkTier {
+    if (value === null || !Number.isFinite(value)) return "Pending";
+    const goodMax = APP_CONFIG.networkQuality.thresholds.rttGoodMs;
+    const mediumMax = goodMax * 2;
+    if (value <= goodMax) return "Good";
+    if (value <= mediumMax) return "Medium";
+    return "Low";
+  }
+
+  private classifyLossTier(value: number | null): ParticipantNetworkTier {
+    if (value === null || !Number.isFinite(value)) return "Pending";
+    const goodMax = APP_CONFIG.networkQuality.thresholds.lossGoodPct;
+    const mediumMax = goodMax * 2;
+    if (value <= goodMax) return "Good";
+    if (value <= mediumMax) return "Medium";
+    return "Low";
+  }
+
+  private formatParticipantQualityValue(value: number | null, unit: "ms" | "%"): string {
+    if (value === null || !Number.isFinite(value)) return "Pending";
+    return `${value.toFixed(1)} ${unit}`;
   }
 
   private formatParticipantSpeed(kbps: number | null): string {

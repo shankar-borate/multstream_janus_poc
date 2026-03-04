@@ -1,0 +1,58 @@
+You (12)
+Your own participant row (ID 12).
+
+Upload
+Your outgoing bitrate right now.
+Example: 63 kbps means you’re sending ~63 kbps.
+
+Download
+Your incoming bitrate right now.
+Example: 68 kbps means you’re receiving ~68 kbps.
+
+Remote Upload
+Other side’s outgoing bitrate (as seen/derived by your side).
+Example: 68 kbps means remote is sending ~68 kbps toward you.
+
+Remote Download
+Other side’s incoming bitrate (as seen/derived by your side).
+Example: 62 kbps means remote is receiving ~62 kbps.
+
+Local RTT
+Round-trip latency for your path. Lower is better.
+Example: 9.0 ms is very good.
+
+Local Jitter
+Variation in packet arrival timing on your path. Lower is better.
+Example: 6.4 ms is good/stable.
+
+Local Loss
+Packet loss % for your local path.
+Example: Pending = stats not available yet.
+If it were 2.5%, packets are dropping and call quality may suffer.
+
+Remote RTT
+Latency measured for remote-side path info available to you.
+Example: 9.0 ms good.
+
+Remote Jitter
+Remote-side timing variation.
+Example: 5.0 ms good.
+
+Remote Loss
+Remote-side packet loss %.
+Example: 0.1% almost no loss.
+
+SlowLink: None
+Janus slow-link alarm not active recently.
+If active, it means Janus detected packet-loss stress (Uplink, Downlink, or both).
+
+Likely bottleneck: Unknown
+Heuristic result for where issue likely is (You, Remote, Both, Unknown).
+Unknown here means no strong low-tier/slowlink pattern to blame one side.
+
+Color tiers
+
+Good = green
+Medium = yellow
+Low = red
+For kbps: based on your configured thresholds (lowMax, mediumMax).
