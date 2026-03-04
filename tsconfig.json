@@ -35,6 +35,8 @@
     "src/managers/VirtualBackgroundManager.ts",
     "src/managers/ScreenShareManager.ts",
     "src/managers/NetworkQualityManager.ts",
+    "src/managers/ParticipantNetworkStatsManager.ts",
+    "src/managers/AdaptiveNetworkManager.ts",
     "src/managers/ConnectionStatusEngine.ts",
     "src/managers/CallMonitoringStat.ts",
     "src/managers/JanusGateway.ts",

@@ -178,11 +178,30 @@ class RemoteFeedManager {
         if (!payload || typeof payload !== "string") return;
         try {
           const parsed = JSON.parse(payload);
-          if (parsed?.type !== "vcx-peer-telemetry") return;
-          this.observer?.onRemoteTelemetry?.(feedId, parsed as PeerPlaybackTelemetry);
+          if (parsed?.type === "vcx-peer-telemetry") {
+            this.observer?.onRemoteTelemetry?.(feedId, parsed as PeerPlaybackTelemetry);
+            return;
+          }
+          if (parsed?.type === "vcx-peer-network") {
+            this.observer?.onRemoteNetworkTelemetry?.(feedId, parsed as PeerNetworkTelemetry);
+          }
         } catch (e: any) {
           Logger.error(ErrorMessages.remoteFeedTelemetryParseFailed(feedId), e);
         }
+      },
+      slowLink: (uplink: boolean, lost: number, mid: string) => {
+        this.observer?.onSlowLink?.(feedId, {
+          uplink: !!uplink,
+          lost: Number.isFinite(lost) ? Number(lost) : 0,
+          mid: typeof mid === "string" ? mid : null
+        });
+      },
+      onslowlink: (uplink: boolean, lost: number, mid: string) => {
+        this.observer?.onSlowLink?.(feedId, {
+          uplink: !!uplink,
+          lost: Number.isFinite(lost) ? Number(lost) : 0,
+          mid: typeof mid === "string" ? mid : null
+        });
       },
       onlocaltrack:()=>{},
       onremotetrack:(track:MediaStreamTrack,_mid:string,on:boolean)=>{

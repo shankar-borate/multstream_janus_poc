@@ -51,9 +51,16 @@ class CallController {
   private vbToggleBusy = false;
   private monitoringStat: CallMonitoringStat;
   private peerTelemetryByFeed = new Map<number, PeerPlaybackTelemetry>();
+  private peerNetworkTelemetryByFeed = new Map<number, PeerNetworkTelemetry>();
   private mixedAudioContext: AudioContext | null = null;
   private mixedAudioTrack: MediaStreamTrack | null = null;
   private callId: string | null = null;
+  private readonly userType: "agent" | "customer" = this.resolveUserType();
+  private adaptiveNetwork: AdaptiveNetworkManager;
+  private cameraProfileKey = "";
+  private suppressSessionDestroyedRetryUntil = 0;
+  private lastPublisherTransportErrorReason: string | null = null;
+  private lastPublisherTransportErrorAt = 0;
 
   constructor(
     private bus: EventBus,
@@ -73,6 +80,14 @@ class CallController {
     this.connectionEngine = new ConnectionStatusEngine((status: ConnectionStatusView) => {
       this.bus.emit("connection-status", status);
     });
+    this.adaptiveNetwork = new AdaptiveNetworkManager(this.userType, {
+      onRiskSignal: (signal: NetworkRiskSignal) => {
+        this.bus.emit("network-risk", signal);
+      },
+      onModeChanged: async (_mode: "normal" | "low", videoCfg: VcxVideoConfig) => {
+        await this.applyAdaptiveVideoConfig(videoCfg);
+      }
+    });
     this.bus.emit("connection-status", this.connectionEngine.getStatus());
     this.gateway.init();
     this.monitoringStat = new CallMonitoringStat(this.bus, this.remoteVideo, {
@@ -89,8 +104,19 @@ class CallController {
         return !this.localAudioEnabled;
       },
       getPeerTelemetry: (now: number) => this.pickFreshPeerTelemetry(now),
-      emitPeerTelemetry: (payload: PeerPlaybackTelemetry) => this.sendPeerTelemetry(payload)
+      emitPeerTelemetry: (payload: PeerPlaybackTelemetry) => this.sendPeerTelemetry(payload),
+      emitPeerNetworkTelemetry: (payload: PeerNetworkTelemetry) => this.sendPeerTelemetry(payload)
     });
+  }
+
+  private resolveUserType(): "agent" | "customer" {
+    const qs = new URLSearchParams(window.location.search);
+    const raw =
+      qs.get("user_type") ??
+      qs.get("usertpye") ??
+      qs.get("usertype") ??
+      "";
+    return raw.trim().toLowerCase() === "agent" ? "agent" : "customer";
   }
 
   async join(cfg: JoinConfig, opts?: { internalRetry?: boolean }) {
@@ -102,6 +128,9 @@ class CallController {
     this.localAudioEnabled = true;
     this.localVideoEnabled = true;
     this.suppressPublisherCleanupRetry = false;
+    this.adaptiveNetwork.resetForJoin();
+    this.lastPublisherTransportErrorReason = null;
+    this.lastPublisherTransportErrorAt = 0;
     if (!opts?.internalRetry) {
       this.serverRetryAttempt = 0;
       this.peerRetryAttempt = 0;
@@ -121,6 +150,7 @@ class CallController {
       const http: HttpClient = new HttpClient(server, clientId);
       const ims = new ImsClient(http);
       const payload = await ims.getMediaConstraints();
+      this.adaptiveNetwork.resetForJoin(payload);
 
       this.gateway.createSession(
         cfg.server,
@@ -131,6 +161,10 @@ class CallController {
         },
         () => {
           this.connectionEngine.onSessionDestroyed();
+          if (this.isLeaving || Date.now() < this.suppressSessionDestroyedRetryUntil) {
+            Logger.user("[call] Janus session destroyed after controlled teardown; retry skipped.");
+            return;
+          }
           this.scheduleServerRetry("Janus session destroyed");
         },
         (e: any) => {
@@ -158,8 +192,14 @@ class CallController {
     }
   }
 
+  private destroyGatewayControlled() {
+    this.suppressSessionDestroyedRetryUntil = Date.now() + 5000;
+    this.gateway.destroy();
+  }
+
   private cleanupForRetry() {
     this.suppressRemoteFeedRetry = true;
+    this.stopAdaptiveNetworkMonitor();
     this.stopMediaStatsLoop();
     this.clearMixedAudioResources();
     this.vbManager.disable();
@@ -167,6 +207,7 @@ class CallController {
     this.screenManager.stop();
     this.screenEnabled = false;
     this.peerTelemetryByFeed.clear();
+    this.peerNetworkTelemetryByFeed.clear();
     this.remoteFeeds?.cleanupAll();
     this.remoteFeeds = null;
     this.plugin = null;
@@ -177,6 +218,8 @@ class CallController {
     this.selfId = null;
     this.publisherPc = null;
     this.subscriberPcs.clear();
+    this.lastPublisherTransportErrorReason = null;
+    this.lastPublisherTransportErrorAt = 0;
     this.localAudioEnabled = true;
     this.localVideoEnabled = true;
     this.audioToggleBusy = false;
@@ -192,7 +235,7 @@ class CallController {
     this.bus.emit("mute-changed", false);
 
     this.suppressPublisherCleanupRetry = true;
-    this.gateway.destroy();
+    this.destroyGatewayControlled();
   }
 
   private scheduleServerRetry(reason: string) {
@@ -227,17 +270,18 @@ class CallController {
     }
 
     if (attempt > maxAttempts) {
-      this.connectionEngine.onFailed();
+      this.logFinalFailure(kind, reason);
+      this.connectionEngine.onFailed(reason);
       Logger.setStatus(ErrorMessages.callRetryLimitStatus(kind));
       Logger.error(ErrorMessages.callRetryExhausted(kind, this.callId ?? "n/a", cfg.roomId, reason));
       return;
     }
 
     if (kind === "server") {
-      this.connectionEngine.onServerRetrying(attempt, maxAttempts);
+      this.connectionEngine.onServerRetrying(attempt, maxAttempts, reason);
       Logger.setStatus(ErrorMessages.callServerRetrying(attempt, maxAttempts));
     } else {
-      this.connectionEngine.onPeerRetrying(attempt, maxAttempts);
+      this.connectionEngine.onPeerRetrying(attempt, maxAttempts, reason);
       Logger.setStatus(ErrorMessages.callPeerRetrying(attempt, maxAttempts));
     }
     Logger.warn(ErrorMessages.callRetryScheduled(kind, attempt, maxAttempts, this.callId ?? "n/a", cfg.roomId, reason));
@@ -280,12 +324,27 @@ class CallController {
       },
       () => {
         if (this.isLeaving || this.suppressPublisherCleanupRetry) return;
-        this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts);
+        this.connectionEngine.onPeerRetrying(
+          this.peerRetryAttempt + 1,
+          APP_CONFIG.call.retry.peerMaxAttempts,
+          "Publisher cleanup"
+        );
         Logger.setStatus(ErrorMessages.CALL_PUBLISHER_CLEANUP_RECOVERING);
         this.schedulePeerRetry("Publisher cleanup");
       },
       (e: any) => {
         this.scheduleServerRetry(`Attach publisher failed: ${JSON.stringify(e)}`);
+      },
+      (payload: JanusSlowLinkEvent) => {
+        this.bus.emit("janus-slowlink", {
+          participantId: this.selfId,
+          feedId: null,
+          source: "publisher",
+          direction: payload.uplink ? "uplink" : "downlink",
+          lost: payload.lost,
+          mid: payload.mid,
+          at: Date.now()
+        } as JanusSlowLinkSignal);
       }
     );
   }
@@ -423,9 +482,11 @@ class CallController {
   private onPublisherMessage(cfg: JoinConfig, msg: any, jsep: any) {
     if (msg?.janus === "hangup") {
       const reason = String(msg?.reason || "Peer hangup");
-      Logger.error(ErrorMessages.callPublisherHangup(reason));
-      if (reason.toLowerCase().includes("ice")) {
-        this.schedulePeerRetry(`Publisher hangup: ${reason}`);
+      Logger.user(`[transport-info] ${ErrorMessages.callPublisherHangup(reason)}`);
+      if (this.isPeerTransportFailureText(reason)) {
+        const failureReason = this.buildPeerFailureReason(`Publisher hangup: ${reason}`, this.publisherPc);
+        this.rememberPublisherTransportError(failureReason);
+        this.schedulePeerRetry(failureReason);
       }
       return;
     }
@@ -434,8 +495,18 @@ class CallController {
     const event = data["videoroom"];
     const errorCode = data["error_code"];
     if (data?.error || errorCode) {
-      Logger.error(ErrorMessages.callPublisherPluginError(data));
+      Logger.user(`[transport-info] ${ErrorMessages.callPublisherPluginError(data)}`);
       if (!this.joinedRoom && this.handlePublisherJoinError(cfg, data, errorCode)) {
+        return;
+      }
+      if (this.joinedRoom) {
+        const runtimeIssue = this.classifyPublisherRuntimeIssue(data);
+        if (runtimeIssue.kind === "peer") {
+          this.rememberPublisherTransportError(runtimeIssue.reason);
+          this.schedulePeerRetry(runtimeIssue.reason);
+        } else {
+          this.scheduleServerRetry(runtimeIssue.reason);
+        }
         return;
       }
     }
@@ -475,9 +546,25 @@ class CallController {
           onRemoteTelemetry: (feedId: number, payload: PeerPlaybackTelemetry) => {
             this.peerTelemetryByFeed.set(feedId, payload);
           },
+          onRemoteNetworkTelemetry: (feedId: number, payload: PeerNetworkTelemetry) => {
+            this.peerNetworkTelemetryByFeed.set(feedId, payload);
+            this.bus.emit("peer-network-telemetry", { feedId, payload });
+          },
+          onSlowLink: (feedId: number, payload: JanusSlowLinkEvent) => {
+            this.bus.emit("janus-slowlink", {
+              participantId: feedId,
+              feedId,
+              source: "subscriber",
+              direction: payload.uplink ? "uplink" : "downlink",
+              lost: payload.lost,
+              mid: payload.mid,
+              at: Date.now()
+            } as JanusSlowLinkSignal);
+          },
           onRemoteFeedCleanup: (feedId: number) => {
             this.subscriberPcs.delete(feedId);
             this.peerTelemetryByFeed.delete(feedId);
+            this.peerNetworkTelemetryByFeed.delete(feedId);
             this.connectionEngine.unregisterSubscriber(feedId);
             if (this.isLeaving || this.suppressRemoteFeedRetry) {
               Logger.warn(`Remote feed ${feedId} cleanup ignored (controlled cleanup)`);
@@ -560,9 +647,14 @@ class CallController {
   private startParticipantSync(cfg: JoinConfig) {
     this.stopParticipantSync();
     this.syncParticipantsFromServer(cfg);
+    const intervalMs = this.getParticipantSyncIntervalMs();
     this.participantSyncTimer = window.setInterval(() => {
       this.syncParticipantsFromServer(cfg);
-    }, APP_CONFIG.call.participantSyncIntervalMs);
+    }, intervalMs);
+  }
+
+  private getParticipantSyncIntervalMs(): number {
+    return this.adaptiveNetwork.getParticipantSyncIntervalMs();
   }
 
   private stopParticipantSync() {
@@ -638,6 +730,7 @@ class CallController {
     this.roster.remove(feedId);
     this.subscriberPcs.delete(feedId);
     this.peerTelemetryByFeed.delete(feedId);
+    this.peerNetworkTelemetryByFeed.delete(feedId);
     this.remoteFeeds?.removeFeed(feedId);
     this.publishParticipants(cfg);
   }
@@ -647,15 +740,15 @@ class CallController {
   // =====================================
 
   private getVideoConfig(): VcxVideoConfig {
-    const cfg = UrlConfig.getVcxVideoConfig();
-    const bitrateBps = Number.isFinite(cfg.bitrate_bps) ? Math.floor(cfg.bitrate_bps) : APP_CONFIG.media.bitrateBps;
-    const maxFramerate = Number.isFinite(cfg.max_framerate) ? Math.floor(cfg.max_framerate) : APP_CONFIG.media.maxFramerate;
+    return this.adaptiveNetwork.getVideoConfig();
+  }
 
-    return {
-      bitrate_bps: Math.max(APP_CONFIG.media.minBitrateBps, Math.min(APP_CONFIG.media.maxBitrateBps, bitrateBps)),
-      bitrate_cap: cfg.bitrate_cap !== false,
-      max_framerate: Math.max(APP_CONFIG.media.minFramerate, Math.min(APP_CONFIG.media.maxFramerateCap, maxFramerate))
-    };
+  private getCurrentCameraProfileKey(): string {
+    return this.adaptiveNetwork.getCameraProfileKey();
+  }
+
+  private buildVideoConstraintsForCurrentProfile(orientation: "portrait" | "landscape"): MediaTrackConstraints {
+    return this.adaptiveNetwork.buildCameraConstraints(orientation, this.isIOSDevice());
   }
 
   private tuneVideoSenderBitrate(pc: RTCPeerConnection, bitrateBps: number, maxFramerate: number) {
@@ -677,6 +770,50 @@ class CallController {
     }
   }
 
+  private startAdaptiveNetworkMonitor(pc: RTCPeerConnection | null) {
+    this.adaptiveNetwork.start(pc);
+  }
+
+  private stopAdaptiveNetworkMonitor() {
+    this.adaptiveNetwork.stop();
+  }
+
+  private async applyAdaptiveVideoConfig(videoCfg: VcxVideoConfig): Promise<void> {
+    try {
+      if (this.publisherPc) {
+        this.tuneVideoSenderBitrate(this.publisherPc, videoCfg.bitrate_bps, videoCfg.max_framerate);
+      }
+      try {
+        this.plugin?.send({
+          message: {
+            request: "configure",
+            audio: this.localAudioEnabled,
+            video: this.localVideoEnabled,
+            bitrate: videoCfg.bitrate_bps,
+            bitrate_cap: videoCfg.bitrate_cap
+          }
+        });
+      } catch (e: any) {
+        Logger.error(ErrorMessages.CALL_MEDIA_SETUP_SET_PARAMETERS_ERROR, e);
+      }
+
+      if (this.activeJoinCfg && this.joinedRoom) {
+        this.startParticipantSync(this.activeJoinCfg);
+      }
+
+      if (!this.screenEnabled && !this.vbEnabled && this.plugin) {
+        const cam = await this.ensureCameraStream();
+        const track = cam.getVideoTracks()[0];
+        if (track) {
+          track.enabled = this.localVideoEnabled;
+          this.replaceVideoTrack(track);
+        }
+      }
+    } catch (e: any) {
+      Logger.error(ErrorMessages.CALL_MEDIA_SETUP_SET_PARAMETERS_HOOK_ERROR, e);
+    }
+  }
+
   private isIOSDevice(): boolean {
     const ua = navigator.userAgent || "";
     const isiPhoneFamily = /iPad|iPhone|iPod/i.test(ua);
@@ -686,23 +823,6 @@ class CallController {
 
   private getViewportOrientation(): "portrait" | "landscape" {
     return window.innerHeight >= window.innerWidth ? "portrait" : "landscape";
-  }
-
-  private buildIOSVideoConstraints(orientation: "portrait" | "landscape"): MediaTrackConstraints {
-    if (orientation === "portrait") {
-      return {
-        facingMode: "user",
-        width: { ideal: 480 },
-        height: { ideal: 640 },
-        frameRate: { ideal: 15, max: 20 }
-      };
-    }
-    return {
-      facingMode: "user",
-      width: { ideal: 640 },
-      height: { ideal: 480 },
-      frameRate: { ideal: 15, max: 20 }
-    };
   }
 
   private async getPublishTracks(): Promise<any[]> {
@@ -844,6 +964,7 @@ class CallController {
         this.publisherPc = pc;
         this.connectionEngine.registerPublisherPc(pc);
         this.tuneVideoSenderBitrate(pc, videoCfg.bitrate_bps, videoCfg.max_framerate);
+        this.startAdaptiveNetworkMonitor(pc);
         const emit = () => {
           const payload = {
             ice: pc.iceConnectionState,
@@ -860,11 +981,23 @@ class CallController {
         // emit once immediately
         emit();
 
+        (pc as any).onicecandidateerror = (evt: RTCPeerConnectionIceErrorEvent) => {
+          const parsed = this.parseIceCandidateError(evt);
+          this.rememberPublisherTransportError(parsed.reason, false, evt);
+        };
+
         pc.oniceconnectionstatechange = () => {
           console.log("VCX_ICE=" + pc.iceConnectionState);
           emit();
+          if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+            this.lastPublisherTransportErrorReason = null;
+            this.lastPublisherTransportErrorAt = 0;
+            return;
+          }
           if (pc.iceConnectionState === "failed") {
-            this.schedulePeerRetry("Publisher ICE state failed");
+            const reason = this.buildPeerFailureReason("Publisher ICE state failed", pc);
+            this.rememberPublisherTransportError(reason);
+            this.schedulePeerRetry(reason);
           }
         };
 
@@ -877,8 +1010,20 @@ class CallController {
         (pc as any).onconnectionstatechange = () => {
           console.log("VCX_CONNECTION=" + ((pc as any).connectionState ?? "n/a"));
           emit();
-          if ((pc as any).connectionState === "failed") {
-            this.schedulePeerRetry("Publisher connection state failed");
+          const connectionState = String((pc as any).connectionState ?? "");
+          if (connectionState === "connected") {
+            this.lastPublisherTransportErrorReason = null;
+            this.lastPublisherTransportErrorAt = 0;
+            return;
+          }
+          if (connectionState === "failed") {
+            const dtlsHint = this.inferDtlsFailureHint(pc);
+            const trigger = dtlsHint
+              ? `Publisher connection state failed (${dtlsHint})`
+              : "Publisher connection state failed";
+            const reason = this.buildPeerFailureReason(trigger, pc);
+            this.rememberPublisherTransportError(reason);
+            this.schedulePeerRetry(reason);
           }
         };
 
@@ -888,6 +1033,9 @@ class CallController {
         };
       } else {
         this.publisherPc = null;
+        this.lastPublisherTransportErrorReason = null;
+        this.lastPublisherTransportErrorAt = 0;
+        this.stopAdaptiveNetworkMonitor();
         console.log("VCX_CONNECTIVITY=pc_not_available");
         this.bus.emit("connectivity", {
           ice: "n/a",
@@ -902,6 +1050,170 @@ class CallController {
     }
   }
 
+  private normalizeFailureReason(reason: string): string {
+    const normalized = String(reason || "").replace(/\s+/g, " ").trim();
+    if (!normalized) return "unknown failure";
+    const maxLen = 240;
+    if (normalized.length <= maxLen) return normalized;
+    return `${normalized.slice(0, maxLen - 3)}...`;
+  }
+
+  private rememberPublisherTransportError(reason: string, severe: boolean = false, rawErr?: unknown) {
+    const normalized = this.normalizeFailureReason(reason);
+    this.lastPublisherTransportErrorReason = normalized;
+    this.lastPublisherTransportErrorAt = Date.now();
+    const tag = severe ? "VCX_TRANSPORT_ERROR" : "VCX_TRANSPORT_INFO";
+    const tagStyle = severe
+      ? "background:#991b1b;color:#ffffff;padding:2px 6px;font-weight:700;border-radius:3px"
+      : "background:#1d4ed8;color:#ffffff;padding:2px 6px;font-weight:700;border-radius:3px";
+    console.log(`%c${tag}%c ${normalized}`, tagStyle, "color:#111827;font-weight:600");
+    if (rawErr) {
+      if (severe) {
+        console.error(rawErr);
+      } else {
+        console.log(rawErr);
+      }
+    }
+    if (severe) {
+      Logger.error(normalized);
+    } else {
+      Logger.user(`[transport-info] ${normalized}`);
+    }
+  }
+
+  private getRecentPublisherTransportHint(): string | null {
+    if (!this.lastPublisherTransportErrorReason) return null;
+    const ageMs = Date.now() - this.lastPublisherTransportErrorAt;
+    if (ageMs > 30000) return null;
+    return this.lastPublisherTransportErrorReason;
+  }
+
+  private inferDtlsFailureHint(pc: RTCPeerConnection): string | null {
+    const sctpTransportState = String((pc as any)?.sctp?.transport?.state || "").toLowerCase();
+    if (sctpTransportState === "failed") {
+      return "DTLS transport failed";
+    }
+
+    const senderTransportState = pc.getSenders()
+      .map((s: RTCRtpSender) => String((s as any)?.transport?.state || "").toLowerCase())
+      .find((state: string) => state.length > 0);
+    if (senderTransportState === "failed") {
+      return "DTLS sender transport failed";
+    }
+
+    const receiverTransportState = pc.getReceivers()
+      .map((r: RTCRtpReceiver) => String((r as any)?.transport?.state || "").toLowerCase())
+      .find((state: string) => state.length > 0);
+    if (receiverTransportState === "failed") {
+      return "DTLS receiver transport failed";
+    }
+
+    const connectionState = String((pc as any).connectionState ?? "");
+    if (
+      connectionState === "failed" &&
+      (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed")
+    ) {
+      return "DTLS/SRTP likely failed after ICE connected";
+    }
+
+    return null;
+  }
+
+  private buildPeerFailureReason(trigger: string, pc: RTCPeerConnection | null): string {
+    const parts: string[] = [this.normalizeFailureReason(trigger)];
+    if (!navigator.onLine) {
+      parts.push("browser offline");
+    }
+    if (pc) {
+      const connectionState = String((pc as any).connectionState ?? "n/a");
+      parts.push(`ice=${pc.iceConnectionState}, connection=${connectionState}, signaling=${pc.signalingState}`);
+      const dtlsHint = this.inferDtlsFailureHint(pc);
+      if (dtlsHint) {
+        parts.push(dtlsHint);
+      }
+    }
+    const transportHint = this.getRecentPublisherTransportHint();
+    if (transportHint && !trigger.includes(transportHint) && !trigger.includes("hint=")) {
+      parts.push(`hint=${transportHint}`);
+    }
+    return this.normalizeFailureReason(parts.join(" | "));
+  }
+
+  private logFinalFailure(kind: "server" | "peer", reason: string) {
+    const normalized = this.normalizeFailureReason(reason);
+    const tag = kind === "peer" ? "VCX_TRANSPORT_FINAL_ERROR" : "VCX_SERVER_FINAL_ERROR";
+    const tagStyle = "background:#7f1d1d;color:#ffffff;padding:2px 6px;font-weight:700;border-radius:3px";
+    console.log(`%c${tag}%c ${normalized}`, tagStyle, "color:#111827;font-weight:600");
+  }
+
+  private parseIceCandidateError(evt: RTCPeerConnectionIceErrorEvent): { reason: string; severe: boolean } {
+    const anyEvt = evt as any;
+    const url = String(anyEvt?.url || "unknown");
+    const lowerUrl = url.toLowerCase();
+    const isTurn = lowerUrl.startsWith("turn:") || lowerUrl.startsWith("turns:");
+    const codeRaw = Number(anyEvt?.errorCode);
+    const code = Number.isFinite(codeRaw) ? codeRaw : NaN;
+    const text = String(anyEvt?.errorText || "").trim();
+    const lowerText = text.toLowerCase();
+
+    let label = isTurn ? "TURN candidate negotiation error" : "ICE candidate negotiation error";
+    let severe = false;
+
+    if (code === 401 || code === 438 || lowerText.includes("unauth") || lowerText.includes("credential")) {
+      label = "TURN authentication failed";
+      severe = true;
+    } else if (lowerUrl.startsWith("turns:") || lowerText.includes("tls")) {
+      label = "TURN TLS connection failed";
+      severe = true;
+    } else if (lowerText.includes("dtls")) {
+      label = "DTLS handshake failed";
+      severe = true;
+    } else if (
+      code === 701 ||
+      lowerText.includes("unreachable") ||
+      lowerText.includes("timed out") ||
+      lowerText.includes("timeout") ||
+      lowerText.includes("host lookup")
+    ) {
+      label = isTurn ? "TURN server unreachable" : "STUN/ICE server unreachable";
+      severe = true;
+    }
+
+    const codeText = Number.isFinite(code) ? String(code) : "n/a";
+    const detailText = text || "n/a";
+    return {
+      reason: this.normalizeFailureReason(`${label} (url=${url}, code=${codeText}, text=${detailText})`),
+      severe
+    };
+  }
+
+  private isPeerTransportFailureText(reason: string): boolean {
+    const lower = reason.toLowerCase();
+    return lower.includes("ice") ||
+      lower.includes("turn") ||
+      lower.includes("dtls") ||
+      lower.includes("tls") ||
+      lower.includes("webrtc") ||
+      lower.includes("peer") ||
+      lower.includes("srtp");
+  }
+
+  private classifyPublisherRuntimeIssue(data: any): { kind: "peer" | "server"; reason: string } {
+    const errorCodeRaw = Number(data?.error_code);
+    const errorCode = Number.isFinite(errorCodeRaw) ? String(errorCodeRaw) : "n/a";
+    const detail = this.normalizeFailureReason(JoinErrorUtils.extractErrorText(data) || JSON.stringify(data));
+    if (this.isPeerTransportFailureText(detail)) {
+      return {
+        kind: "peer",
+        reason: this.normalizeFailureReason(`Publisher runtime media error code=${errorCode} detail=${detail}`)
+      };
+    }
+    return {
+      kind: "server",
+      reason: this.normalizeFailureReason(`Publisher runtime signaling error code=${errorCode} detail=${detail}`)
+    };
+  }
+
   private handlePublishFailure(e: unknown) {
     const classified = MediaErrorUtils.classifyPublishError(e);
     console.error(ErrorMessages.CALL_OFFER_ERROR_CONSOLE_TAG, e);
@@ -914,7 +1226,11 @@ class CallController {
       );
       return;
     }
-    this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts);
+    this.connectionEngine.onPeerRetrying(
+      this.peerRetryAttempt + 1,
+      APP_CONFIG.call.retry.peerMaxAttempts,
+      ErrorMessages.callOfferErrorReason(e)
+    );
     Logger.setStatus(ErrorMessages.CALL_OFFER_ERROR_RECOVERING);
     this.schedulePeerRetry(ErrorMessages.callOfferErrorReason(e));
   }
@@ -1040,6 +1356,14 @@ class CallController {
     };
   }
 
+  public getParticipantNetworkPeers(): ParticipantNetworkPeers {
+    return {
+      selfId: this.selfId,
+      publisher: this.publisherPc,
+      subscribers: Array.from(this.subscriberPcs.entries()).map(([feedId, pc]) => ({ feedId, pc }))
+    };
+  }
+
   stopVideo() {
     void this.setVideoEnabled(false);
   }
@@ -1124,6 +1448,7 @@ class CallController {
     try {
       this.isLeaving = true;
       this.suppressRemoteFeedRetry = true;
+      this.stopAdaptiveNetworkMonitor();
       this.stopMediaStatsLoop();
       this.clearMixedAudioResources();
       this.vbManager.disable();
@@ -1155,7 +1480,7 @@ class CallController {
 
       this.plugin = null;
       this.suppressPublisherCleanupRetry = true;
-      this.gateway.destroy();
+      this.destroyGatewayControlled();
       this.suppressPublisherCleanupRetry = false;
       this.stopParticipantSync();
 
@@ -1167,7 +1492,10 @@ class CallController {
       this.selfId = null;
       this.publisherPc = null;
       this.subscriberPcs.clear();
+      this.lastPublisherTransportErrorReason = null;
+      this.lastPublisherTransportErrorAt = 0;
       this.peerTelemetryByFeed.clear();
+      this.peerNetworkTelemetryByFeed.clear();
       this.localAudioEnabled = true;
       this.localVideoEnabled = true;
       this.audioToggleBusy = false;
@@ -1186,6 +1514,7 @@ class CallController {
       this.media.clearRemote(this.remoteVideo);
       this.cameraStream = null;
       this.cameraStreamOrientation = null;
+      this.cameraProfileKey = "";
       this.callId = null;
 
       Logger.setStatus(ErrorMessages.CALL_LEFT);
@@ -1290,6 +1619,7 @@ class CallController {
   private async ensureCameraStream(): Promise<MediaStream> {
     try {
       const desiredOrientation = this.getViewportOrientation();
+      const desiredProfileKey = this.getCurrentCameraProfileKey();
       const currentStream = this.cameraStream;
       const hasLiveVideo = !!currentStream?.getVideoTracks().some(t => t.readyState === "live");
       const hasLiveAudio = !!currentStream?.getAudioTracks().some(t => t.readyState === "live");
@@ -1297,12 +1627,11 @@ class CallController {
         !currentStream ||
         !hasLiveVideo ||
         !hasLiveAudio ||
-        (this.isIOSDevice() && this.cameraStreamOrientation !== desiredOrientation);
+        (this.isIOSDevice() && this.cameraStreamOrientation !== desiredOrientation) ||
+        this.cameraProfileKey !== desiredProfileKey;
 
       if (needsRecreate) {
-        const videoConstraints = this.isIOSDevice()
-          ? this.buildIOSVideoConstraints(desiredOrientation)
-          : true;
+        const videoConstraints = this.buildVideoConstraintsForCurrentProfile(desiredOrientation);
         const nextStream = await navigator.mediaDevices.getUserMedia({
           video: videoConstraints,
           audio: true
@@ -1310,6 +1639,7 @@ class CallController {
         const previous = this.cameraStream;
         this.cameraStream = nextStream;
         this.cameraStreamOrientation = desiredOrientation;
+        this.cameraProfileKey = desiredProfileKey;
 
         const nextAudio = nextStream.getAudioTracks()[0];
         if (nextAudio && (!this.screenEnabled || !this.mixedAudioTrack)) {
@@ -1336,6 +1666,9 @@ class CallController {
 
       if (!this.cameraStream) {
         throw new Error(ErrorMessages.CALL_CAMERA_STREAM_UNAVAILABLE_AFTER_INIT);
+      }
+      if (!this.cameraProfileKey) {
+        this.cameraProfileKey = desiredProfileKey;
       }
       return this.cameraStream;
     } catch (e: any) {
@@ -1517,7 +1850,7 @@ class CallController {
     return latest;
   }
 
-  private sendPeerTelemetry(payload: PeerPlaybackTelemetry) {
+  private sendPeerTelemetry(payload: PeerPlaybackTelemetry | PeerNetworkTelemetry) {
     if (!APP_CONFIG.mediaTelemetry.enablePeerTelemetry) return;
     const channel = this.plugin?.data;
     if (typeof channel !== "function") return;

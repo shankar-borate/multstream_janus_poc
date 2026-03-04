@@ -29,6 +29,7 @@ class UIController {
 
   private bridge = new ParentBridge();
   private net = new NetworkQualityManager();
+  private participantNet = new ParticipantNetworkStatsManager();
   private localVideoEl = document.getElementById("localVideo") as HTMLVideoElement;
   private remoteVideoEl = document.getElementById("remoteVideo") as HTMLVideoElement;
   private remoteFallback = document.getElementById("remoteFallback") as HTMLDivElement;
@@ -41,6 +42,11 @@ class UIController {
   private remoteQ = document.getElementById("remoteQuality") as HTMLDivElement;
   private localQD = document.getElementById("localQualityDetails") as HTMLDivElement;
   private remoteQD = document.getElementById("remoteQualityDetails") as HTMLDivElement;
+  private networkSidePanel = document.getElementById("networkSidePanel") as HTMLDivElement;
+  private networkPanelBtn = document.getElementById("networkPanelBtn") as HTMLButtonElement;
+  private networkPanelPopup = document.getElementById("networkPanelPopup") as HTMLDivElement;
+  private networkPanelClose = document.getElementById("networkPanelClose") as HTMLButtonElement;
+  private networkPopupBody = document.getElementById("networkPopupBody") as HTMLDivElement;
   private callMeta = document.getElementById("callMeta") as HTMLDivElement;
   private mediaIoBytes = document.getElementById("mediaIoBytes") as HTMLDivElement;
   private mediaIoIssues = document.getElementById("mediaIoIssues") as HTMLDivElement;
@@ -163,6 +169,12 @@ class UIController {
     this.bus.on<MediaIoSnapshot>("media-io", (stats) => {
       this.renderMediaIo(stats);
     });
+    this.bus.on<JanusSlowLinkSignal>("janus-slowlink", (signal) => {
+      this.participantNet.recordSlowLink(signal);
+    });
+    this.bus.on<{ feedId: number; payload: PeerNetworkTelemetry }>("peer-network-telemetry", (evt) => {
+      this.participantNet.recordRemoteNetworkTelemetry(evt.feedId, evt.payload);
+    });
     this.bus.on<any>("call-ended", (payload) => {
       Logger.user(`Call ended event received: ${payload?.reason || "unknown"}`);
       this.setEndedState(true);
@@ -170,6 +182,7 @@ class UIController {
 
     this.wire();
     this.setupNetworkUI();
+    this.setupParticipantNetworkPanel();
     this.setupParentBridge();
     this.setupRemoteFallbackMonitor();
     this.autoJoin();
@@ -680,6 +693,152 @@ class UIController {
         remote: r
       });
     }, () => this.controller.getNetworkQualityPeers());
+  }
+
+  private setupParticipantNetworkPanel() {
+    if (
+      !this.networkSidePanel ||
+      !this.networkPanelBtn ||
+      !this.networkPanelPopup ||
+      !this.networkPopupBody ||
+      !this.networkPanelClose
+    ) {
+      return;
+    }
+
+    const closePopup = () => {
+      this.networkPanelPopup.classList.remove("show");
+    };
+    const openPopup = () => {
+      this.networkPanelPopup.classList.add("show");
+    };
+
+    this.networkPanelBtn.onclick = () => {
+      if (!this.isParticipantNetworkPopupMode()) return;
+      if (this.networkPanelPopup.classList.contains("show")) {
+        closePopup();
+      } else {
+        openPopup();
+      }
+    };
+    this.networkPanelClose.onclick = closePopup;
+    this.networkPanelPopup.onclick = (ev: MouseEvent) => {
+      if (ev.target === this.networkPanelPopup) closePopup();
+    };
+    window.addEventListener("resize", () => {
+      if (!this.isParticipantNetworkPopupMode()) {
+        closePopup();
+      }
+    });
+
+    this.participantNet.start(
+      (snapshot: ParticipantNetworkSnapshot) => this.renderParticipantNetwork(snapshot),
+      () => this.controller.getParticipantNetworkPeers()
+    );
+  }
+
+  private isParticipantNetworkPopupMode(): boolean {
+    return window.innerWidth <= APP_CONFIG.networkQuality.participantPanel.popupBreakpointPx;
+  }
+
+  private renderParticipantNetwork(snapshot: ParticipantNetworkSnapshot) {
+    if (!this.networkSidePanel || !this.networkPopupBody) return;
+    const updated = new Date(snapshot.updatedAt).toLocaleTimeString();
+    const content = this.renderParticipantNetworkRows(snapshot.rows);
+    const html =
+      `<div class="network-panel-title">Participant Network</div>` +
+      `<div class="network-panel-updated">Updated: ${updated}</div>` +
+      content;
+    this.networkSidePanel.innerHTML = html;
+    this.networkPopupBody.innerHTML = html;
+  }
+
+  private renderParticipantNetworkRows(rows: ParticipantNetworkRow[]): string {
+    if (!rows || rows.length === 0) {
+      return '<div class="network-empty">Pending stats...</div>';
+    }
+    return rows.map((row) => this.renderParticipantNetworkRow(row)).join("");
+  }
+
+  private renderParticipantNetworkRow(row: ParticipantNetworkRow): string {
+    const label = this.escapeHtml(row.label || "Participant");
+    const upload = this.renderParticipantMetric("Upload", row.upload);
+    const download = this.renderParticipantMetric("Download", row.download);
+    const remoteUpload = this.renderParticipantMetric("Remote Upload", row.remoteUpload);
+    const remoteDownload = this.renderParticipantMetric("Remote Download", row.remoteDownload);
+
+    return (
+      `<div class="network-row">` +
+      `<div class="network-row-header">${label}</div>` +
+      `<div class="network-row-grid">` +
+      upload + download + remoteUpload + remoteDownload +
+      `</div>` +
+      this.renderSlowLinkSummary(row) +
+      this.renderBottleneckSummary(row.likelyBottleneck) +
+      `<div class="network-row-strip">` +
+      `<span class="network-strip-seg ${this.tierClass(row.upload.tier)}"></span>` +
+      `<span class="network-strip-seg ${this.tierClass(row.download.tier)}"></span>` +
+      `<span class="network-strip-seg ${this.tierClass(row.remoteUpload.tier)}"></span>` +
+      `<span class="network-strip-seg ${this.tierClass(row.remoteDownload.tier)}"></span>` +
+      `</div>` +
+      `<div class="network-strip-legend">U | D | RU | RD</div>` +
+      `</div>`
+    );
+  }
+
+  private renderBottleneckSummary(value: "You" | "Remote" | "Both" | "Unknown"): string {
+    const cls =
+      value === "You" ? "bneck-you" :
+      value === "Remote" ? "bneck-remote" :
+      value === "Both" ? "bneck-both" :
+      "bneck-unknown";
+    return `<div class="network-bottleneck ${cls}">Likely bottleneck: ${value}</div>`;
+  }
+
+  private renderSlowLinkSummary(row: ParticipantNetworkRow): string {
+    const uplink = row.upload.slowLink || row.remoteDownload.slowLink;
+    const downlink = row.download.slowLink || row.remoteUpload.slowLink;
+    if (!uplink && !downlink) {
+      return '<div class="network-slowlink network-slowlink-none">SlowLink: None</div>';
+    }
+    const parts: string[] = [];
+    if (uplink) parts.push("Uplink");
+    if (downlink) parts.push("Downlink");
+    return `<div class="network-slowlink network-slowlink-active">SlowLink: ${parts.join(" + ")}</div>`;
+  }
+
+  private renderParticipantMetric(label: string, direction: ParticipantNetworkDirectionSnapshot): string {
+    const cls = this.tierClass(direction.tier);
+    const kbps = this.formatParticipantSpeed(direction.kbps);
+    const slowTag = direction.slowLink ? " SlowLink" : "";
+    return (
+      `<div class="network-metric">` +
+      `<div class="network-metric-label">${label}</div>` +
+      `<div class="network-metric-value ${cls}">${kbps} (${direction.tier}${slowTag})</div>` +
+      `</div>`
+    );
+  }
+
+  private formatParticipantSpeed(kbps: number | null): string {
+    if (kbps === null || !Number.isFinite(kbps)) return "Pending";
+    if (kbps >= 1000) return `${(kbps / 1000).toFixed(2)} Mbps`;
+    return `${kbps.toFixed(0)} kbps`;
+  }
+
+  private tierClass(tier: ParticipantNetworkTier): string {
+    if (tier === "Good") return "tier-good";
+    if (tier === "Medium") return "tier-medium";
+    if (tier === "Low") return "tier-low";
+    return "tier-pending";
+  }
+
+  private escapeHtml(text: string): string {
+    return String(text)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   private setupParentBridge() {

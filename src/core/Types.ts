@@ -34,12 +34,66 @@ type RemoteFeedObserver = {
   onRemoteFeedCleanup?: (feedId: number) => void;
   onRemoteFeedRetryExhausted?: (feedId: number, attempts: number) => void;
   onRemoteTelemetry?: (feedId: number, payload: PeerPlaybackTelemetry) => void;
+  onRemoteNetworkTelemetry?: (feedId: number, payload: PeerNetworkTelemetry) => void;
+  onSlowLink?: (feedId: number, payload: JanusSlowLinkEvent) => void;
 };
 type PeerPlaybackTelemetry = {
   type: "vcx-peer-telemetry";
   ts: number;
   audioPlaybackStatus: PlaybackState;
   videoPlaybackStatus: PlaybackState;
+};
+type PeerNetworkTelemetry = {
+  type: "vcx-peer-network";
+  ts: number;
+  uploadKbps: number | null;
+  downloadKbps: number | null;
+  lossPct: number | null;
+  jitterMs: number | null;
+};
+type JanusSlowLinkEvent = {
+  uplink: boolean;
+  lost: number;
+  mid: string | null;
+};
+type JanusSlowLinkSignal = {
+  participantId: number | null;
+  feedId: number | null;
+  source: "publisher" | "subscriber";
+  direction: "uplink" | "downlink";
+  lost: number;
+  mid: string | null;
+  at: number;
+};
+type ParticipantNetworkPeers = {
+  selfId: number | null;
+  publisher: RTCPeerConnection | null;
+  subscribers: Array<{ feedId: number; pc: RTCPeerConnection }>;
+};
+type ParticipantNetworkTier = "Good" | "Medium" | "Low" | "Pending";
+type ParticipantNetworkDirectionSnapshot = {
+  kbps: number | null;
+  tier: ParticipantNetworkTier;
+  slowLink: boolean;
+};
+type ParticipantNetworkRow = {
+  participantId: number | null;
+  label: string;
+  upload: ParticipantNetworkDirectionSnapshot;
+  download: ParticipantNetworkDirectionSnapshot;
+  remoteUpload: ParticipantNetworkDirectionSnapshot;
+  remoteDownload: ParticipantNetworkDirectionSnapshot;
+  likelyBottleneck: "You" | "Remote" | "Both" | "Unknown";
+};
+type ParticipantNetworkSnapshot = {
+  rows: ParticipantNetworkRow[];
+  updatedAt: number;
+};
+type NetworkRiskSignal = {
+  mode: "normal" | "low";
+  uploadKbps: number | null;
+  likelyDisconnect: boolean;
+  message: string;
 };
 type MediaStatusMatrix = {
   remoteReceivingYourVideo: YesNoUnknown;

@@ -133,6 +133,50 @@ const APP_CONFIG = {
     videoCodecPreferenceOrder: ["vp8","vp9"] as const,
     enableVideoCodecFallback: true
   },
+  adaptiveVideo: {
+    enabled: true,
+    sampleIntervalMs: 3000,
+    lowEnterKbps: 60,
+    lowExitKbps: 110,
+    lowEnterSamples: 2,
+    lowExitSamples: 4,
+    likelyDisconnectKbps: 35,
+    likelyDisconnectSamples: 3,
+    wsProtection: {
+      participantSyncIntervalMsNormal: 8000,
+      participantSyncIntervalMsLow: 20000
+    },
+    profiles: {
+      customer: {
+        normal: {
+          width: 640,
+          height: 480,
+          maxFramerate: 10,
+          bitrateBps: 110000
+        },
+        low: {
+          width: 640,
+          height: 480,
+          maxFramerate: 10,
+          bitrateBps: 80000
+        }
+      },
+      agent: {
+        normal: {
+          width: 480,
+          height: 360,
+          maxFramerate: 5,
+          bitrateBps: 90000
+        },
+        low: {
+          width: 320,
+          height: 240,
+          maxFramerate: 5,
+          bitrateBps: 50000
+        }
+      }
+    }
+  },
   call: {
     reconnectDelayMs: 1000,
     participantSyncIntervalMs: 5000,
@@ -169,6 +213,15 @@ const APP_CONFIG = {
   networkQuality: {
     sampleIntervalMs: 3000,
     useSimulatedFallback: false,
+    participantPanel: {
+      sampleIntervalMs: 2000,
+      slowLinkHoldMs: 12000,
+      popupBreakpointPx: 900,
+      thresholdsKbps: {
+        lowMax: 50,
+        mediumMax: 100
+      }
+    },
     simulated: {
       rttBaseMs: 30,
       rttSpreadMs: 200,
@@ -187,6 +240,8 @@ const APP_CONFIG = {
   },
   mediaTelemetry: {
     sampleIntervalMs: 1000,
+    enablePeerNetworkTelemetry: true,
+    networkTelemetryIntervalMs: 5000,
     stallWindowMs: 3500,
     peerTelemetryFreshnessMs: 6000,
     enablePeerTelemetry: true

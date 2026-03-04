@@ -7,6 +7,7 @@ type CallMonitoringStatCallbacks = {
   isLocalAudioMuted: () => boolean;
   getPeerTelemetry: (now: number) => PeerPlaybackTelemetry | null;
   emitPeerTelemetry: (payload: PeerPlaybackTelemetry) => void;
+  emitPeerNetworkTelemetry: (payload: PeerNetworkTelemetry) => void;
 };
 
 class CallMonitoringStat {
@@ -24,6 +25,7 @@ class CallMonitoringStat {
   private remoteVideoPlaybackAt = 0;
   private lastRemoteVideoTime = 0;
   private localAudioPlaybackAt = 0;
+  private lastPeerNetworkTelemetryAt = 0;
 
   constructor(
     private bus: EventBus,
@@ -46,6 +48,7 @@ class CallMonitoringStat {
     this.remoteVideoPlaybackAt = 0;
     this.lastRemoteVideoTime = 0;
     this.localAudioPlaybackAt = 0;
+    this.lastPeerNetworkTelemetryAt = 0;
 
     this.mediaStatsTimer = window.setInterval(() => {
       void this.sample();
@@ -59,6 +62,7 @@ class CallMonitoringStat {
       this.mediaStatsTimer = null;
     }
     this.mediaStatsStartedAt = 0;
+    this.lastPeerNetworkTelemetryAt = 0;
     this.bus.emit("media-io", {
       bytes: { audioSent: 0, audioReceived: 0, videoSent: 0, videoReceived: 0 },
       quality: { localJitterMs: null, localLossPct: null, remoteJitterMs: null, remoteLossPct: null },
@@ -266,12 +270,29 @@ class CallMonitoringStat {
     };
     this.bus.emit("media-io", snapshot);
     if (prevAt > 0) {
+      const seconds = (now - prevAt) / 1000;
+      const totalSentDelta = audioSentDelta + videoSentDelta;
+      const totalRecvDelta = audioRecvDelta + videoRecvDelta;
       this.callbacks.emitPeerTelemetry({
         type: "vcx-peer-telemetry",
         ts: now,
         audioPlaybackStatus: localAudioPlaybackStatus,
         videoPlaybackStatus: localVideoPlaybackStatus
       });
+      const canSendPeerNetwork =
+        APP_CONFIG.mediaTelemetry.enablePeerNetworkTelemetry &&
+        now - this.lastPeerNetworkTelemetryAt >= APP_CONFIG.mediaTelemetry.networkTelemetryIntervalMs;
+      if (canSendPeerNetwork) {
+        this.lastPeerNetworkTelemetryAt = now;
+        this.callbacks.emitPeerNetworkTelemetry({
+          type: "vcx-peer-network",
+          ts: now,
+          uploadKbps: seconds > 0 ? (totalSentDelta * 8) / 1000 / seconds : null,
+          downloadKbps: seconds > 0 ? (totalRecvDelta * 8) / 1000 / seconds : null,
+          lossPct: subscriberMetrics.remoteLossPct,
+          jitterMs: subscriberMetrics.remoteJitterMs
+        });
+      }
     }
   }
 

@@ -46,6 +46,9 @@ class ConnectionStatusEngine {
   private peerRetryMax = 0;
   private lastStatsErrorLogAt = 0;
   private fatalError: { primary: string; secondary: string } | null = null;
+  private serverRetryReason = "";
+  private peerRetryReason = "";
+  private failedReason = "";
 
   constructor(private onUpdate?: (status: ConnectionStatusView) => void) {
     this.transition("INIT", true);
@@ -87,6 +90,9 @@ class ConnectionStatusEngine {
     this.serverRetryMax = 0;
     this.peerRetryAttempt = 0;
     this.peerRetryMax = 0;
+    this.serverRetryReason = "";
+    this.peerRetryReason = "";
+    this.failedReason = "";
     this.publisherPc = null;
     this.localIceState = "new";
     this.localConnState = "new";
@@ -112,19 +118,24 @@ class ConnectionStatusEngine {
     this.transition("RETRYING", true);
   }
 
-  onServerRetrying(attempt: number, maxAttempts: number) {
+  onServerRetrying(attempt: number, maxAttempts: number, reason?: string) {
     this.serverRetryAttempt = Math.max(0, attempt);
     this.serverRetryMax = Math.max(0, maxAttempts);
+    this.serverRetryReason = this.formatFailureReason(reason);
+    this.failedReason = "";
     this.transition("SERVER_RETRYING", true);
   }
 
-  onPeerRetrying(attempt: number, maxAttempts: number) {
+  onPeerRetrying(attempt: number, maxAttempts: number, reason?: string) {
     this.peerRetryAttempt = Math.max(0, attempt);
     this.peerRetryMax = Math.max(0, maxAttempts);
+    this.peerRetryReason = this.formatFailureReason(reason);
+    this.failedReason = "";
     this.transition("PEER_RETRYING", true);
   }
 
-  onFailed() {
+  onFailed(reason?: string) {
+    this.failedReason = this.formatFailureReason(reason);
     this.transition("FAILED", true);
   }
 
@@ -157,6 +168,9 @@ class ConnectionStatusEngine {
     this.serverRetryMax = 0;
     this.peerRetryAttempt = 0;
     this.peerRetryMax = 0;
+    this.serverRetryReason = "";
+    this.peerRetryReason = "";
+    this.failedReason = "";
     this.transition("INIT", true);
   }
 
@@ -596,9 +610,18 @@ class ConnectionStatusEngine {
 
     if (nextStatus.state === "SERVER_RETRYING" && this.serverRetryMax > 0) {
       nextStatus.secondaryText = `Retry ${this.serverRetryAttempt}/${this.serverRetryMax}. Reconnecting to video server.`;
+      if (this.serverRetryReason) {
+        nextStatus.secondaryText += ` Reason: ${this.serverRetryReason}`;
+      }
     }
     if (nextStatus.state === "PEER_RETRYING" && this.peerRetryMax > 0) {
       nextStatus.secondaryText = `Retry ${this.peerRetryAttempt}/${this.peerRetryMax}. Recovering TURN/peer connection.`;
+      if (this.peerRetryReason) {
+        nextStatus.secondaryText += ` Reason: ${this.peerRetryReason}`;
+      }
+    }
+    if (nextStatus.state === "FAILED" && this.failedReason) {
+      nextStatus.secondaryText = `Reason: ${this.failedReason}`;
     }
 
     if (cfg.rotate) {
@@ -654,5 +677,13 @@ class ConnectionStatusEngine {
     if (now - this.lastStatsErrorLogAt < 5000) return;
     this.lastStatsErrorLogAt = now;
     Logger.error(ErrorMessages.connectionStatusStatsError(message), err);
+  }
+
+  private formatFailureReason(reason?: string): string {
+    const raw = String(reason ?? "").replace(/\s+/g, " ").trim();
+    if (!raw) return "";
+    const maxLen = 220;
+    if (raw.length <= maxLen) return raw;
+    return `${raw.slice(0, maxLen - 3)}...`;
   }
 }

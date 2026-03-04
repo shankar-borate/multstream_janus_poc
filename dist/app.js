@@ -131,6 +131,50 @@ const APP_CONFIG = {
         videoCodecPreferenceOrder: ["vp8", "vp9"],
         enableVideoCodecFallback: true
     },
+    adaptiveVideo: {
+        enabled: true,
+        sampleIntervalMs: 3000,
+        lowEnterKbps: 60,
+        lowExitKbps: 110,
+        lowEnterSamples: 2,
+        lowExitSamples: 4,
+        likelyDisconnectKbps: 35,
+        likelyDisconnectSamples: 3,
+        wsProtection: {
+            participantSyncIntervalMsNormal: 8000,
+            participantSyncIntervalMsLow: 20000
+        },
+        profiles: {
+            customer: {
+                normal: {
+                    width: 640,
+                    height: 480,
+                    maxFramerate: 10,
+                    bitrateBps: 110000
+                },
+                low: {
+                    width: 640,
+                    height: 480,
+                    maxFramerate: 10,
+                    bitrateBps: 80000
+                }
+            },
+            agent: {
+                normal: {
+                    width: 480,
+                    height: 360,
+                    maxFramerate: 5,
+                    bitrateBps: 90000
+                },
+                low: {
+                    width: 320,
+                    height: 240,
+                    maxFramerate: 5,
+                    bitrateBps: 50000
+                }
+            }
+        }
+    },
     call: {
         reconnectDelayMs: 1000,
         participantSyncIntervalMs: 5000,
@@ -167,6 +211,15 @@ const APP_CONFIG = {
     networkQuality: {
         sampleIntervalMs: 3000,
         useSimulatedFallback: false,
+        participantPanel: {
+            sampleIntervalMs: 2000,
+            slowLinkHoldMs: 12000,
+            popupBreakpointPx: 900,
+            thresholdsKbps: {
+                lowMax: 180,
+                mediumMax: 700
+            }
+        },
         simulated: {
             rttBaseMs: 30,
             rttSpreadMs: 200,
@@ -185,6 +238,8 @@ const APP_CONFIG = {
     },
     mediaTelemetry: {
         sampleIntervalMs: 1000,
+        enablePeerNetworkTelemetry: true,
+        networkTelemetryIntervalMs: 5000,
         stallWindowMs: 3500,
         peerTelemetryFreshnessMs: 6000,
         enablePeerTelemetry: true
@@ -1830,6 +1885,503 @@ class NetworkQualityManager {
         };
     }
 }
+class ParticipantNetworkStatsManager {
+    constructor() {
+        this.timer = null;
+        this.sampleBusy = false;
+        this.previousCounters = new Map();
+        this.slowLinks = new Map();
+        this.remoteTelemetryByFeed = new Map();
+    }
+    start(cb, peersProvider) {
+        this.stop();
+        const sample = async () => {
+            if (this.sampleBusy)
+                return;
+            this.sampleBusy = true;
+            try {
+                const snapshot = await this.buildSnapshot(peersProvider());
+                cb(snapshot);
+            }
+            catch (e) {
+                Logger.error("participant network sampling failed", e);
+            }
+            finally {
+                this.sampleBusy = false;
+            }
+        };
+        this.timer = window.setInterval(() => {
+            void sample();
+        }, APP_CONFIG.networkQuality.participantPanel.sampleIntervalMs);
+        void sample();
+    }
+    stop() {
+        if (this.timer !== null) {
+            window.clearInterval(this.timer);
+            this.timer = null;
+        }
+        this.sampleBusy = false;
+        this.previousCounters.clear();
+        this.slowLinks.clear();
+        this.remoteTelemetryByFeed.clear();
+    }
+    recordSlowLink(signal) {
+        const key = signal.source === "publisher"
+            ? "self"
+            : `feed:${signal.feedId ?? signal.participantId ?? -1}`;
+        const prev = this.slowLinks.get(key) ?? { uplinkAt: 0, downlinkAt: 0 };
+        if (signal.direction === "uplink") {
+            prev.uplinkAt = signal.at || Date.now();
+        }
+        else {
+            prev.downlinkAt = signal.at || Date.now();
+        }
+        this.slowLinks.set(key, prev);
+    }
+    recordRemoteNetworkTelemetry(feedId, payload) {
+        if (!Number.isFinite(feedId))
+            return;
+        this.remoteTelemetryByFeed.set(feedId, payload);
+    }
+    async buildSnapshot(peers) {
+        const remoteCount = peers.subscribers.length;
+        const localRates = peers.publisher
+            ? await this.collectPeerRates("publisher", peers.publisher)
+            : { sentKbps: null, receivedKbps: null };
+        const remoteRates = await Promise.all(peers.subscribers.map(async (sub) => {
+            const rates = await this.collectPeerRates(`subscriber-${sub.feedId}`, sub.pc);
+            const remoteTelemetry = this.getFreshRemoteTelemetry(sub.feedId);
+            return { feedId: sub.feedId, rates, remoteTelemetry };
+        }));
+        const remoteUploadsKnown = remoteRates
+            .map((entry) => entry.remoteTelemetry?.uploadKbps ?? entry.rates.receivedKbps)
+            .filter((v) => v !== null && Number.isFinite(v));
+        const remoteDownloadsKnown = remoteRates
+            .map((entry) => entry.remoteTelemetry?.downloadKbps ?? null)
+            .filter((v) => v !== null && Number.isFinite(v));
+        const localDownloadKbps = remoteCount === 0
+            ? 0
+            : (remoteUploadsKnown.length > 0
+                ? remoteUploadsKnown.reduce((sum, v) => sum + v, 0)
+                : null);
+        const localUploadKbps = localRates.sentKbps;
+        const remoteDownloadSumKbps = remoteCount === 0
+            ? 0
+            : (remoteDownloadsKnown.length > 0
+                ? remoteDownloadsKnown.reduce((sum, v) => sum + v, 0)
+                : localUploadKbps);
+        const perRemoteDownloadKbps = remoteCount > 0 && localUploadKbps !== null
+            ? localUploadKbps / remoteCount
+            : null;
+        const localUploadDirection = this.createDirection(localUploadKbps, this.isSlowLinkActive("self", "uplink"));
+        const localDownloadDirection = this.createDirection(localDownloadKbps, this.isSlowLinkActive("self", "downlink"));
+        const aggregateRemoteUploadDirection = this.createDirection(remoteCount === 0 ? 0 : localDownloadKbps, remoteCount > 0 && remoteRates.some((entry) => this.isSlowLinkActive(`feed:${entry.feedId}`, "uplink")));
+        const aggregateRemoteDownloadDirection = this.createDirection(remoteCount === 0 ? 0 : remoteDownloadSumKbps, remoteCount > 0 && remoteRates.some((entry) => this.isSlowLinkActive(`feed:${entry.feedId}`, "downlink")));
+        const rows = [];
+        const selfLabel = peers.selfId !== null ? `You (${peers.selfId})` : "You";
+        rows.push({
+            participantId: peers.selfId,
+            label: selfLabel,
+            upload: localUploadDirection,
+            download: localDownloadDirection,
+            remoteUpload: aggregateRemoteUploadDirection,
+            remoteDownload: aggregateRemoteDownloadDirection,
+            likelyBottleneck: this.classifyBottleneck(localUploadDirection, localDownloadDirection, aggregateRemoteUploadDirection, aggregateRemoteDownloadDirection)
+        });
+        remoteRates.forEach(({ feedId, rates, remoteTelemetry }) => {
+            const key = `feed:${feedId}`;
+            const remoteUploadDirection = this.createDirection(remoteTelemetry?.uploadKbps ?? rates.receivedKbps, this.isSlowLinkActive(key, "uplink"));
+            const remoteDownloadDirection = this.createDirection(remoteTelemetry?.downloadKbps ?? perRemoteDownloadKbps, this.isSlowLinkActive(key, "downlink"));
+            rows.push({
+                participantId: feedId,
+                label: `Participant ${feedId}`,
+                upload: remoteUploadDirection,
+                download: remoteDownloadDirection,
+                remoteUpload: localUploadDirection,
+                remoteDownload: localDownloadDirection,
+                likelyBottleneck: this.classifyBottleneck(localUploadDirection, localDownloadDirection, remoteUploadDirection, remoteDownloadDirection)
+            });
+        });
+        return {
+            rows,
+            updatedAt: Date.now()
+        };
+    }
+    createDirection(kbps, forceLowBySlowLink) {
+        const normalized = kbps !== null && Number.isFinite(kbps) ? Math.max(0, kbps) : null;
+        return {
+            kbps: normalized,
+            tier: this.classifyTier(normalized),
+            slowLink: forceLowBySlowLink
+        };
+    }
+    classifyTier(kbps) {
+        if (kbps === null || !Number.isFinite(kbps))
+            return "Pending";
+        const lowMax = APP_CONFIG.networkQuality.participantPanel.thresholdsKbps.lowMax;
+        const mediumMax = APP_CONFIG.networkQuality.participantPanel.thresholdsKbps.mediumMax;
+        if (kbps <= lowMax)
+            return "Low";
+        if (kbps <= mediumMax)
+            return "Medium";
+        return "Good";
+    }
+    getFreshRemoteTelemetry(feedId) {
+        const payload = this.remoteTelemetryByFeed.get(feedId) ?? null;
+        if (!payload)
+            return null;
+        if (Date.now() - payload.ts > APP_CONFIG.mediaTelemetry.peerTelemetryFreshnessMs)
+            return null;
+        return payload;
+    }
+    classifyBottleneck(localUpload, localDownload, remoteUpload, remoteDownload) {
+        const localSlow = localUpload.slowLink || localDownload.slowLink;
+        const remoteSlow = remoteUpload.slowLink || remoteDownload.slowLink;
+        if (localSlow && remoteSlow)
+            return "Both";
+        if (localSlow)
+            return "You";
+        if (remoteSlow)
+            return "Remote";
+        const localUplinkBad = localUpload.tier === "Low";
+        const localDownlinkBad = localDownload.tier === "Low";
+        const remoteUplinkBad = remoteUpload.tier === "Low";
+        const remoteDownlinkBad = remoteDownload.tier === "Low";
+        const uploadPathBad = localUplinkBad && remoteDownlinkBad;
+        const downloadPathBad = remoteUplinkBad && localDownlinkBad;
+        if (uploadPathBad && downloadPathBad)
+            return "Both";
+        if (uploadPathBad)
+            return "You";
+        if (downloadPathBad)
+            return "Remote";
+        if ((localUplinkBad || localDownlinkBad) && !(remoteUplinkBad || remoteDownlinkBad))
+            return "You";
+        if ((remoteUplinkBad || remoteDownlinkBad) && !(localUplinkBad || localDownlinkBad))
+            return "Remote";
+        return "Unknown";
+    }
+    isSlowLinkActive(key, direction) {
+        const entry = this.slowLinks.get(key);
+        if (!entry)
+            return false;
+        const at = direction === "uplink" ? entry.uplinkAt : entry.downlinkAt;
+        if (!at)
+            return false;
+        return Date.now() - at <= APP_CONFIG.networkQuality.participantPanel.slowLinkHoldMs;
+    }
+    async collectPeerRates(key, pc) {
+        const report = await pc.getStats();
+        let sentBytes = 0;
+        let receivedBytes = 0;
+        report.forEach((s) => {
+            if (s.type !== "outbound-rtp" && s.type !== "inbound-rtp")
+                return;
+            const anyS = s;
+            const kind = anyS.kind || anyS.mediaType;
+            if (kind !== "audio" && kind !== "video")
+                return;
+            if (typeof anyS.bytesSent === "number")
+                sentBytes += anyS.bytesSent;
+            if (typeof anyS.bytesReceived === "number")
+                receivedBytes += anyS.bytesReceived;
+        });
+        return this.computeRatesKbps(key, sentBytes, receivedBytes);
+    }
+    computeRatesKbps(key, sentBytes, receivedBytes) {
+        const now = Date.now();
+        const prev = this.previousCounters.get(key);
+        this.previousCounters.set(key, { sentBytes, receivedBytes, at: now });
+        if (!prev || now <= prev.at) {
+            return {
+                sentKbps: null,
+                receivedKbps: null
+            };
+        }
+        const seconds = (now - prev.at) / 1000;
+        if (seconds <= 0) {
+            return {
+                sentKbps: null,
+                receivedKbps: null
+            };
+        }
+        const sentDelta = Math.max(0, sentBytes - prev.sentBytes);
+        const receivedDelta = Math.max(0, receivedBytes - prev.receivedBytes);
+        return {
+            sentKbps: (sentDelta * 8) / 1000 / seconds,
+            receivedKbps: (receivedDelta * 8) / 1000 / seconds
+        };
+    }
+}
+class AdaptiveNetworkManager {
+    constructor(userType, callbacks) {
+        this.userType = userType;
+        this.callbacks = callbacks;
+        this.mode = "normal";
+        this.timer = null;
+        this.prevUpload = { bytes: 0, at: 0 };
+        this.lowSamples = 0;
+        this.recoverSamples = 0;
+        this.likelyDisconnectSamples = 0;
+        this.applyBusy = false;
+        this.defaultProfile = this.getFallbackProfile();
+    }
+    resetForJoin(payload) {
+        this.stop();
+        this.mode = "normal";
+        this.defaultProfile = this.resolveDefaultProfile(payload ?? null);
+        this.emitRisk(null, false, "");
+    }
+    start(pc) {
+        this.stop();
+        if (!APP_CONFIG.adaptiveVideo.enabled || !pc)
+            return;
+        const intervalMs = Math.max(1000, APP_CONFIG.adaptiveVideo.sampleIntervalMs);
+        this.timer = window.setInterval(() => {
+            void this.sample(pc);
+        }, intervalMs);
+    }
+    stop() {
+        if (this.timer !== null) {
+            window.clearInterval(this.timer);
+            this.timer = null;
+        }
+        this.prevUpload = { bytes: 0, at: 0 };
+        this.lowSamples = 0;
+        this.recoverSamples = 0;
+        this.likelyDisconnectSamples = 0;
+        this.applyBusy = false;
+    }
+    getParticipantSyncIntervalMs() {
+        if (!APP_CONFIG.adaptiveVideo.enabled)
+            return APP_CONFIG.call.participantSyncIntervalMs;
+        return this.mode === "low"
+            ? APP_CONFIG.adaptiveVideo.wsProtection.participantSyncIntervalMsLow
+            : APP_CONFIG.adaptiveVideo.wsProtection.participantSyncIntervalMsNormal;
+    }
+    getVideoConfig() {
+        const profile = this.getActiveProfile();
+        const bitrateBps = Number.isFinite(profile.bitrateBps) ? Math.floor(profile.bitrateBps) : APP_CONFIG.media.bitrateBps;
+        const maxFramerate = Number.isFinite(profile.maxFramerate) ? Math.floor(profile.maxFramerate) : APP_CONFIG.media.maxFramerate;
+        return {
+            bitrate_bps: Math.max(APP_CONFIG.media.minBitrateBps, Math.min(APP_CONFIG.media.maxBitrateBps, bitrateBps)),
+            bitrate_cap: Boolean(APP_CONFIG.media.bitrateCap),
+            max_framerate: Math.max(APP_CONFIG.media.minFramerate, Math.min(APP_CONFIG.media.maxFramerateCap, maxFramerate))
+        };
+    }
+    getCameraProfileKey() {
+        const profile = this.getActiveProfile();
+        return `${this.userType}:${this.mode}:${profile.width}x${profile.height}@${profile.maxFramerate}`;
+    }
+    buildCameraConstraints(orientation, isIOS) {
+        const profile = this.getActiveProfile();
+        let width = profile.width;
+        let height = profile.height;
+        if (isIOS) {
+            if (orientation === "portrait" && width > height) {
+                [width, height] = [height, width];
+            }
+            else if (orientation === "landscape" && height > width) {
+                [width, height] = [height, width];
+            }
+        }
+        return {
+            facingMode: "user",
+            width: { ideal: width, max: width },
+            height: { ideal: height, max: height },
+            frameRate: { ideal: profile.maxFramerate, max: profile.maxFramerate }
+        };
+    }
+    getActiveProfile() {
+        if (!APP_CONFIG.adaptiveVideo.enabled || this.mode === "normal") {
+            return this.defaultProfile;
+        }
+        const low = APP_CONFIG.adaptiveVideo.profiles[this.userType].low;
+        if (this.userType === "agent") {
+            return {
+                width: low.width,
+                height: low.height,
+                maxFramerate: low.maxFramerate,
+                bitrateBps: low.bitrateBps
+            };
+        }
+        return {
+            width: this.defaultProfile.width,
+            height: this.defaultProfile.height,
+            maxFramerate: low.maxFramerate,
+            bitrateBps: low.bitrateBps
+        };
+    }
+    async sample(pc) {
+        if (!APP_CONFIG.adaptiveVideo.enabled)
+            return;
+        const uploadKbps = await this.getUploadKbps(pc);
+        if (uploadKbps === null) {
+            this.emitRisk(null, false, "Pending");
+            return;
+        }
+        const cfg = APP_CONFIG.adaptiveVideo;
+        if (uploadKbps <= cfg.likelyDisconnectKbps) {
+            this.likelyDisconnectSamples += 1;
+        }
+        else {
+            this.likelyDisconnectSamples = 0;
+        }
+        let nextMode = this.mode;
+        if (this.mode === "normal") {
+            if (uploadKbps <= cfg.lowEnterKbps) {
+                this.lowSamples += 1;
+            }
+            else {
+                this.lowSamples = 0;
+            }
+            this.recoverSamples = 0;
+            if (this.lowSamples >= cfg.lowEnterSamples) {
+                nextMode = "low";
+            }
+        }
+        else {
+            if (uploadKbps >= cfg.lowExitKbps) {
+                this.recoverSamples += 1;
+            }
+            else {
+                this.recoverSamples = 0;
+            }
+            if (this.recoverSamples >= cfg.lowExitSamples) {
+                nextMode = "normal";
+            }
+        }
+        if (nextMode !== this.mode) {
+            await this.applyMode(nextMode);
+        }
+        const likelyDisconnect = this.likelyDisconnectSamples >= cfg.likelyDisconnectSamples;
+        const modeMessage = this.mode === "low" ? "Low bandwidth mode active" : "Network normal";
+        this.emitRisk(uploadKbps, likelyDisconnect, likelyDisconnect ? "Likely disconnect due to very low upload" : modeMessage);
+    }
+    async applyMode(nextMode) {
+        if (nextMode === this.mode || this.applyBusy)
+            return;
+        this.applyBusy = true;
+        try {
+            this.mode = nextMode;
+            this.lowSamples = 0;
+            this.recoverSamples = 0;
+            await this.callbacks.onModeChanged(this.mode, this.getVideoConfig());
+        }
+        finally {
+            this.applyBusy = false;
+        }
+    }
+    emitRisk(uploadKbps, likelyDisconnect, message) {
+        this.callbacks.onRiskSignal({
+            mode: this.mode,
+            uploadKbps,
+            likelyDisconnect,
+            message
+        });
+    }
+    async getUploadKbps(pc) {
+        try {
+            const report = await pc.getStats();
+            let bytesTotal = 0;
+            let found = false;
+            report.forEach((s) => {
+                if (s.type !== "outbound-rtp" || s.isRemote)
+                    return;
+                const kind = s.kind || s.mediaType;
+                if (kind !== "video")
+                    return;
+                const bytes = Number(s.bytesSent);
+                if (!Number.isFinite(bytes))
+                    return;
+                bytesTotal += bytes;
+                found = true;
+            });
+            if (!found) {
+                report.forEach((s) => {
+                    if (s.type !== "outbound-rtp" || s.isRemote)
+                        return;
+                    const bytes = Number(s.bytesSent);
+                    if (!Number.isFinite(bytes))
+                        return;
+                    bytesTotal += bytes;
+                    found = true;
+                });
+            }
+            if (!found)
+                return null;
+            const now = Date.now();
+            if (this.prevUpload.at <= 0 || bytesTotal < this.prevUpload.bytes) {
+                this.prevUpload = { bytes: bytesTotal, at: now };
+                return null;
+            }
+            const deltaBytes = bytesTotal - this.prevUpload.bytes;
+            const deltaMs = now - this.prevUpload.at;
+            this.prevUpload = { bytes: bytesTotal, at: now };
+            if (deltaMs <= 0)
+                return null;
+            return (deltaBytes * 8) / deltaMs;
+        }
+        catch {
+            return null;
+        }
+    }
+    resolveDefaultProfile(payload) {
+        const fallback = this.getFallbackProfile();
+        if (!payload)
+            return fallback;
+        const isMobile = this.isMobileDevice();
+        const picked = pickMediaConstraints(payload, isMobile);
+        const pickedVideo = picked?.video;
+        const chimeRole = this.userType === "agent" ? "employee" : "customer";
+        const chimeNode = payload.chimeMediaConstraints?.[chimeRole]?.[isMobile ? "mobile" : "desktop"] ?? null;
+        const width = this.readNumericConstraint(pickedVideo?.width) ??
+            this.readNumericConstraint(chimeNode?.width) ??
+            fallback.width;
+        const height = this.readNumericConstraint(pickedVideo?.height) ??
+            this.readNumericConstraint(chimeNode?.height) ??
+            fallback.height;
+        const maxFramerate = this.readNumericConstraint(pickedVideo?.frameRate) ??
+            this.readNumericConstraint(chimeNode?.frameRate) ??
+            fallback.maxFramerate;
+        const bitrateBps = this.readNumericConstraint(payload?.videochat?.videoBandwidth) ?? fallback.bitrateBps;
+        return {
+            width: Math.max(1, Math.floor(width)),
+            height: Math.max(1, Math.floor(height)),
+            maxFramerate: Math.max(APP_CONFIG.media.minFramerate, Math.floor(maxFramerate)),
+            bitrateBps: Math.max(APP_CONFIG.media.minBitrateBps, Math.floor(bitrateBps))
+        };
+    }
+    getFallbackProfile() {
+        const normal = APP_CONFIG.adaptiveVideo.profiles[this.userType].normal;
+        return {
+            width: Math.max(1, Math.floor(normal.width)),
+            height: Math.max(1, Math.floor(normal.height)),
+            maxFramerate: Math.max(APP_CONFIG.media.minFramerate, Math.floor(APP_CONFIG.media.maxFramerate)),
+            bitrateBps: Math.max(APP_CONFIG.media.minBitrateBps, Math.floor(APP_CONFIG.media.bitrateBps))
+        };
+    }
+    readNumericConstraint(value) {
+        if (typeof value === "number" && Number.isFinite(value))
+            return value;
+        if (typeof value !== "object" || !value)
+            return null;
+        const keys = ["exact", "ideal", "max", "min"];
+        for (const key of keys) {
+            const candidate = value[key];
+            if (typeof candidate === "number" && Number.isFinite(candidate)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+    isMobileDevice() {
+        const ua = navigator.userAgent || "";
+        const mobileUa = /Android|iPhone|iPad|iPod/i.test(ua);
+        const iPadDesktopUa = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+        return mobileUa || iPadDesktopUa;
+    }
+}
 class ConnectionStatusEngine {
     constructor(onUpdate) {
         this.onUpdate = onUpdate;
@@ -1876,6 +2428,9 @@ class ConnectionStatusEngine {
         this.peerRetryMax = 0;
         this.lastStatsErrorLogAt = 0;
         this.fatalError = null;
+        this.serverRetryReason = "";
+        this.peerRetryReason = "";
+        this.failedReason = "";
         this.transition("INIT", true);
         this.tickTimer = window.setInterval(() => this.tick(), APP_CONFIG.connectionStatus.tickIntervalMs);
     }
@@ -1912,6 +2467,9 @@ class ConnectionStatusEngine {
         this.serverRetryMax = 0;
         this.peerRetryAttempt = 0;
         this.peerRetryMax = 0;
+        this.serverRetryReason = "";
+        this.peerRetryReason = "";
+        this.failedReason = "";
         this.publisherPc = null;
         this.localIceState = "new";
         this.localConnState = "new";
@@ -1932,17 +2490,22 @@ class ConnectionStatusEngine {
     onReconnect() {
         this.transition("RETRYING", true);
     }
-    onServerRetrying(attempt, maxAttempts) {
+    onServerRetrying(attempt, maxAttempts, reason) {
         this.serverRetryAttempt = Math.max(0, attempt);
         this.serverRetryMax = Math.max(0, maxAttempts);
+        this.serverRetryReason = this.formatFailureReason(reason);
+        this.failedReason = "";
         this.transition("SERVER_RETRYING", true);
     }
-    onPeerRetrying(attempt, maxAttempts) {
+    onPeerRetrying(attempt, maxAttempts, reason) {
         this.peerRetryAttempt = Math.max(0, attempt);
         this.peerRetryMax = Math.max(0, maxAttempts);
+        this.peerRetryReason = this.formatFailureReason(reason);
+        this.failedReason = "";
         this.transition("PEER_RETRYING", true);
     }
-    onFailed() {
+    onFailed(reason) {
+        this.failedReason = this.formatFailureReason(reason);
         this.transition("FAILED", true);
     }
     onLeft() {
@@ -1974,6 +2537,9 @@ class ConnectionStatusEngine {
         this.serverRetryMax = 0;
         this.peerRetryAttempt = 0;
         this.peerRetryMax = 0;
+        this.serverRetryReason = "";
+        this.peerRetryReason = "";
+        this.failedReason = "";
         this.transition("INIT", true);
     }
     setFatalError(primary, secondary = "") {
@@ -2367,9 +2933,18 @@ class ConnectionStatusEngine {
         };
         if (nextStatus.state === "SERVER_RETRYING" && this.serverRetryMax > 0) {
             nextStatus.secondaryText = `Retry ${this.serverRetryAttempt}/${this.serverRetryMax}. Reconnecting to video server.`;
+            if (this.serverRetryReason) {
+                nextStatus.secondaryText += ` Reason: ${this.serverRetryReason}`;
+            }
         }
         if (nextStatus.state === "PEER_RETRYING" && this.peerRetryMax > 0) {
             nextStatus.secondaryText = `Retry ${this.peerRetryAttempt}/${this.peerRetryMax}. Recovering TURN/peer connection.`;
+            if (this.peerRetryReason) {
+                nextStatus.secondaryText += ` Reason: ${this.peerRetryReason}`;
+            }
+        }
+        if (nextStatus.state === "FAILED" && this.failedReason) {
+            nextStatus.secondaryText = `Reason: ${this.failedReason}`;
         }
         if (cfg.rotate) {
             const span = CONNECTION_ROTATION_MAX_MS - CONNECTION_ROTATION_MIN_MS;
@@ -2424,6 +2999,15 @@ class ConnectionStatusEngine {
         this.lastStatsErrorLogAt = now;
         Logger.error(ErrorMessages.connectionStatusStatsError(message), err);
     }
+    formatFailureReason(reason) {
+        const raw = String(reason ?? "").replace(/\s+/g, " ").trim();
+        if (!raw)
+            return "";
+        const maxLen = 220;
+        if (raw.length <= maxLen)
+            return raw;
+        return `${raw.slice(0, maxLen - 3)}...`;
+    }
 }
 class CallMonitoringStat {
     constructor(bus, remoteVideo, callbacks) {
@@ -2444,6 +3028,7 @@ class CallMonitoringStat {
         this.remoteVideoPlaybackAt = 0;
         this.lastRemoteVideoTime = 0;
         this.localAudioPlaybackAt = 0;
+        this.lastPeerNetworkTelemetryAt = 0;
     }
     start() {
         this.stop();
@@ -2460,6 +3045,7 @@ class CallMonitoringStat {
         this.remoteVideoPlaybackAt = 0;
         this.lastRemoteVideoTime = 0;
         this.localAudioPlaybackAt = 0;
+        this.lastPeerNetworkTelemetryAt = 0;
         this.mediaStatsTimer = window.setInterval(() => {
             void this.sample();
         }, APP_CONFIG.mediaTelemetry.sampleIntervalMs);
@@ -2471,6 +3057,7 @@ class CallMonitoringStat {
             this.mediaStatsTimer = null;
         }
         this.mediaStatsStartedAt = 0;
+        this.lastPeerNetworkTelemetryAt = 0;
         this.bus.emit("media-io", {
             bytes: { audioSent: 0, audioReceived: 0, videoSent: 0, videoReceived: 0 },
             quality: { localJitterMs: null, localLossPct: null, remoteJitterMs: null, remoteLossPct: null },
@@ -2668,12 +3255,28 @@ class CallMonitoringStat {
         };
         this.bus.emit("media-io", snapshot);
         if (prevAt > 0) {
+            const seconds = (now - prevAt) / 1000;
+            const totalSentDelta = audioSentDelta + videoSentDelta;
+            const totalRecvDelta = audioRecvDelta + videoRecvDelta;
             this.callbacks.emitPeerTelemetry({
                 type: "vcx-peer-telemetry",
                 ts: now,
                 audioPlaybackStatus: localAudioPlaybackStatus,
                 videoPlaybackStatus: localVideoPlaybackStatus
             });
+            const canSendPeerNetwork = APP_CONFIG.mediaTelemetry.enablePeerNetworkTelemetry &&
+                now - this.lastPeerNetworkTelemetryAt >= APP_CONFIG.mediaTelemetry.networkTelemetryIntervalMs;
+            if (canSendPeerNetwork) {
+                this.lastPeerNetworkTelemetryAt = now;
+                this.callbacks.emitPeerNetworkTelemetry({
+                    type: "vcx-peer-network",
+                    ts: now,
+                    uploadKbps: seconds > 0 ? (totalSentDelta * 8) / 1000 / seconds : null,
+                    downloadKbps: seconds > 0 ? (totalRecvDelta * 8) / 1000 / seconds : null,
+                    lossPct: subscriberMetrics.remoteLossPct,
+                    jitterMs: subscriberMetrics.remoteJitterMs
+                });
+            }
         }
     }
     async collectPublisherMetrics(pc) {
@@ -2888,7 +3491,7 @@ class JanusGateway {
             success: ok,
             error: (e) => {
                 Logger.setStatus(ErrorMessages.janusErrorStatus(e));
-                Logger.error(ErrorMessages.janusSessionCreateError(e));
+                Logger.user(`[janus-info] ${ErrorMessages.janusSessionCreateError(e)}`);
                 onError?.(e);
             },
             destroyed: () => {
@@ -2897,7 +3500,7 @@ class JanusGateway {
             }
         });
     }
-    attachPublisher(onAttached, onMessage, onLocalTrack, onCleanup, onError) {
+    attachPublisher(onAttached, onMessage, onLocalTrack, onCleanup, onError, onSlowLink) {
         if (!this.janus) {
             Logger.setStatus(ErrorMessages.JANUS_NOT_READY_STATUS);
             Logger.user("attachPublisher called but Janus session is null");
@@ -2915,7 +3518,7 @@ class JanusGateway {
             },
             error: (e) => {
                 Logger.setStatus(ErrorMessages.janusAttachErrorStatus(e));
-                Logger.error(ErrorMessages.janusAttachErrorLog(e));
+                Logger.user(`[janus-info] ${ErrorMessages.janusAttachErrorLog(e)}`);
                 onError?.(e);
             },
             onmessage: (msg, jsep) => {
@@ -2923,6 +3526,20 @@ class JanusGateway {
             },
             onlocaltrack: (track, on) => {
                 onLocalTrack(track, on);
+            },
+            slowLink: (uplink, lost, mid) => {
+                onSlowLink?.({
+                    uplink: !!uplink,
+                    lost: Number.isFinite(lost) ? Number(lost) : 0,
+                    mid: typeof mid === "string" ? mid : null
+                });
+            },
+            onslowlink: (uplink, lost, mid) => {
+                onSlowLink?.({
+                    uplink: !!uplink,
+                    lost: Number.isFinite(lost) ? Number(lost) : 0,
+                    mid: typeof mid === "string" ? mid : null
+                });
             },
             oncleanup: () => {
                 Logger.user("Publisher plugin cleanup");
@@ -3128,13 +3745,31 @@ class RemoteFeedManager {
                     return;
                 try {
                     const parsed = JSON.parse(payload);
-                    if (parsed?.type !== "vcx-peer-telemetry")
+                    if (parsed?.type === "vcx-peer-telemetry") {
+                        this.observer?.onRemoteTelemetry?.(feedId, parsed);
                         return;
-                    this.observer?.onRemoteTelemetry?.(feedId, parsed);
+                    }
+                    if (parsed?.type === "vcx-peer-network") {
+                        this.observer?.onRemoteNetworkTelemetry?.(feedId, parsed);
+                    }
                 }
                 catch (e) {
                     Logger.error(ErrorMessages.remoteFeedTelemetryParseFailed(feedId), e);
                 }
+            },
+            slowLink: (uplink, lost, mid) => {
+                this.observer?.onSlowLink?.(feedId, {
+                    uplink: !!uplink,
+                    lost: Number.isFinite(lost) ? Number(lost) : 0,
+                    mid: typeof mid === "string" ? mid : null
+                });
+            },
+            onslowlink: (uplink, lost, mid) => {
+                this.observer?.onSlowLink?.(feedId, {
+                    uplink: !!uplink,
+                    lost: Number.isFinite(lost) ? Number(lost) : 0,
+                    mid: typeof mid === "string" ? mid : null
+                });
             },
             onlocaltrack: () => { },
             onremotetrack: (track, _mid, on) => {
@@ -3263,9 +3898,15 @@ class CallController {
         this.screenToggleBusy = false;
         this.vbToggleBusy = false;
         this.peerTelemetryByFeed = new Map();
+        this.peerNetworkTelemetryByFeed = new Map();
         this.mixedAudioContext = null;
         this.mixedAudioTrack = null;
         this.callId = null;
+        this.userType = this.resolveUserType();
+        this.cameraProfileKey = "";
+        this.suppressSessionDestroyedRetryUntil = 0;
+        this.lastPublisherTransportErrorReason = null;
+        this.lastPublisherTransportErrorAt = 0;
         this.gateway = new JanusGateway();
         this.media = new MediaManager();
         this.vbManager = new VirtualBackgroundManager();
@@ -3279,6 +3920,14 @@ class CallController {
         });
         this.connectionEngine = new ConnectionStatusEngine((status) => {
             this.bus.emit("connection-status", status);
+        });
+        this.adaptiveNetwork = new AdaptiveNetworkManager(this.userType, {
+            onRiskSignal: (signal) => {
+                this.bus.emit("network-risk", signal);
+            },
+            onModeChanged: async (_mode, videoCfg) => {
+                await this.applyAdaptiveVideoConfig(videoCfg);
+            }
         });
         this.bus.emit("connection-status", this.connectionEngine.getStatus());
         this.gateway.init();
@@ -3296,8 +3945,17 @@ class CallController {
                 return !this.localAudioEnabled;
             },
             getPeerTelemetry: (now) => this.pickFreshPeerTelemetry(now),
-            emitPeerTelemetry: (payload) => this.sendPeerTelemetry(payload)
+            emitPeerTelemetry: (payload) => this.sendPeerTelemetry(payload),
+            emitPeerNetworkTelemetry: (payload) => this.sendPeerTelemetry(payload)
         });
+    }
+    resolveUserType() {
+        const qs = new URLSearchParams(window.location.search);
+        const raw = qs.get("user_type") ??
+            qs.get("usertpye") ??
+            qs.get("usertype") ??
+            "";
+        return raw.trim().toLowerCase() === "agent" ? "agent" : "customer";
     }
     async join(cfg, opts) {
         if (!opts?.internalRetry || !this.callId) {
@@ -3308,6 +3966,9 @@ class CallController {
         this.localAudioEnabled = true;
         this.localVideoEnabled = true;
         this.suppressPublisherCleanupRetry = false;
+        this.adaptiveNetwork.resetForJoin();
+        this.lastPublisherTransportErrorReason = null;
+        this.lastPublisherTransportErrorAt = 0;
         if (!opts?.internalRetry) {
             this.serverRetryAttempt = 0;
             this.peerRetryAttempt = 0;
@@ -3326,11 +3987,16 @@ class CallController {
             const http = new HttpClient(server, clientId);
             const ims = new ImsClient(http);
             const payload = await ims.getMediaConstraints();
+            this.adaptiveNetwork.resetForJoin(payload);
             this.gateway.createSession(cfg.server, payload.PC_CONFIG?.iceServers, () => {
                 this.connectionEngine.onSessionReady();
                 this.attachAndEnsureRoomThenJoin(cfg);
             }, () => {
                 this.connectionEngine.onSessionDestroyed();
+                if (this.isLeaving || Date.now() < this.suppressSessionDestroyedRetryUntil) {
+                    Logger.user("[call] Janus session destroyed after controlled teardown; retry skipped.");
+                    return;
+                }
                 this.scheduleServerRetry("Janus session destroyed");
             }, (e) => {
                 this.scheduleServerRetry(`Janus session create failed: ${JSON.stringify(e)}`);
@@ -3354,8 +4020,13 @@ class CallController {
             this.participantSyncRequestTimer = null;
         }
     }
+    destroyGatewayControlled() {
+        this.suppressSessionDestroyedRetryUntil = Date.now() + 5000;
+        this.gateway.destroy();
+    }
     cleanupForRetry() {
         this.suppressRemoteFeedRetry = true;
+        this.stopAdaptiveNetworkMonitor();
         this.stopMediaStatsLoop();
         this.clearMixedAudioResources();
         this.vbManager.disable();
@@ -3363,6 +4034,7 @@ class CallController {
         this.screenManager.stop();
         this.screenEnabled = false;
         this.peerTelemetryByFeed.clear();
+        this.peerNetworkTelemetryByFeed.clear();
         this.remoteFeeds?.cleanupAll();
         this.remoteFeeds = null;
         this.plugin = null;
@@ -3373,6 +4045,8 @@ class CallController {
         this.selfId = null;
         this.publisherPc = null;
         this.subscriberPcs.clear();
+        this.lastPublisherTransportErrorReason = null;
+        this.lastPublisherTransportErrorAt = 0;
         this.localAudioEnabled = true;
         this.localVideoEnabled = true;
         this.audioToggleBusy = false;
@@ -3387,7 +4061,7 @@ class CallController {
         this.bus.emit("joined", false);
         this.bus.emit("mute-changed", false);
         this.suppressPublisherCleanupRetry = true;
-        this.gateway.destroy();
+        this.destroyGatewayControlled();
     }
     scheduleServerRetry(reason) {
         this.scheduleRetry("server", reason);
@@ -3419,17 +4093,18 @@ class CallController {
             this.serverRetryAttempt = 0;
         }
         if (attempt > maxAttempts) {
-            this.connectionEngine.onFailed();
+            this.logFinalFailure(kind, reason);
+            this.connectionEngine.onFailed(reason);
             Logger.setStatus(ErrorMessages.callRetryLimitStatus(kind));
             Logger.error(ErrorMessages.callRetryExhausted(kind, this.callId ?? "n/a", cfg.roomId, reason));
             return;
         }
         if (kind === "server") {
-            this.connectionEngine.onServerRetrying(attempt, maxAttempts);
+            this.connectionEngine.onServerRetrying(attempt, maxAttempts, reason);
             Logger.setStatus(ErrorMessages.callServerRetrying(attempt, maxAttempts));
         }
         else {
-            this.connectionEngine.onPeerRetrying(attempt, maxAttempts);
+            this.connectionEngine.onPeerRetrying(attempt, maxAttempts, reason);
             Logger.setStatus(ErrorMessages.callPeerRetrying(attempt, maxAttempts));
         }
         Logger.warn(ErrorMessages.callRetryScheduled(kind, attempt, maxAttempts, this.callId ?? "n/a", cfg.roomId, reason));
@@ -3463,11 +4138,21 @@ class CallController {
         }, () => {
             if (this.isLeaving || this.suppressPublisherCleanupRetry)
                 return;
-            this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts);
+            this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts, "Publisher cleanup");
             Logger.setStatus(ErrorMessages.CALL_PUBLISHER_CLEANUP_RECOVERING);
             this.schedulePeerRetry("Publisher cleanup");
         }, (e) => {
             this.scheduleServerRetry(`Attach publisher failed: ${JSON.stringify(e)}`);
+        }, (payload) => {
+            this.bus.emit("janus-slowlink", {
+                participantId: this.selfId,
+                feedId: null,
+                source: "publisher",
+                direction: payload.uplink ? "uplink" : "downlink",
+                lost: payload.lost,
+                mid: payload.mid,
+                at: Date.now()
+            });
         });
     }
     getVideoRoomData(msg) {
@@ -3579,9 +4264,11 @@ class CallController {
     onPublisherMessage(cfg, msg, jsep) {
         if (msg?.janus === "hangup") {
             const reason = String(msg?.reason || "Peer hangup");
-            Logger.error(ErrorMessages.callPublisherHangup(reason));
-            if (reason.toLowerCase().includes("ice")) {
-                this.schedulePeerRetry(`Publisher hangup: ${reason}`);
+            Logger.user(`[transport-info] ${ErrorMessages.callPublisherHangup(reason)}`);
+            if (this.isPeerTransportFailureText(reason)) {
+                const failureReason = this.buildPeerFailureReason(`Publisher hangup: ${reason}`, this.publisherPc);
+                this.rememberPublisherTransportError(failureReason);
+                this.schedulePeerRetry(failureReason);
             }
             return;
         }
@@ -3589,8 +4276,19 @@ class CallController {
         const event = data["videoroom"];
         const errorCode = data["error_code"];
         if (data?.error || errorCode) {
-            Logger.error(ErrorMessages.callPublisherPluginError(data));
+            Logger.user(`[transport-info] ${ErrorMessages.callPublisherPluginError(data)}`);
             if (!this.joinedRoom && this.handlePublisherJoinError(cfg, data, errorCode)) {
+                return;
+            }
+            if (this.joinedRoom) {
+                const runtimeIssue = this.classifyPublisherRuntimeIssue(data);
+                if (runtimeIssue.kind === "peer") {
+                    this.rememberPublisherTransportError(runtimeIssue.reason);
+                    this.schedulePeerRetry(runtimeIssue.reason);
+                }
+                else {
+                    this.scheduleServerRetry(runtimeIssue.reason);
+                }
                 return;
             }
         }
@@ -3618,9 +4316,25 @@ class CallController {
                 onRemoteTelemetry: (feedId, payload) => {
                     this.peerTelemetryByFeed.set(feedId, payload);
                 },
+                onRemoteNetworkTelemetry: (feedId, payload) => {
+                    this.peerNetworkTelemetryByFeed.set(feedId, payload);
+                    this.bus.emit("peer-network-telemetry", { feedId, payload });
+                },
+                onSlowLink: (feedId, payload) => {
+                    this.bus.emit("janus-slowlink", {
+                        participantId: feedId,
+                        feedId,
+                        source: "subscriber",
+                        direction: payload.uplink ? "uplink" : "downlink",
+                        lost: payload.lost,
+                        mid: payload.mid,
+                        at: Date.now()
+                    });
+                },
                 onRemoteFeedCleanup: (feedId) => {
                     this.subscriberPcs.delete(feedId);
                     this.peerTelemetryByFeed.delete(feedId);
+                    this.peerNetworkTelemetryByFeed.delete(feedId);
                     this.connectionEngine.unregisterSubscriber(feedId);
                     if (this.isLeaving || this.suppressRemoteFeedRetry) {
                         Logger.warn(`Remote feed ${feedId} cleanup ignored (controlled cleanup)`);
@@ -3692,9 +4406,13 @@ class CallController {
     startParticipantSync(cfg) {
         this.stopParticipantSync();
         this.syncParticipantsFromServer(cfg);
+        const intervalMs = this.getParticipantSyncIntervalMs();
         this.participantSyncTimer = window.setInterval(() => {
             this.syncParticipantsFromServer(cfg);
-        }, APP_CONFIG.call.participantSyncIntervalMs);
+        }, intervalMs);
+    }
+    getParticipantSyncIntervalMs() {
+        return this.adaptiveNetwork.getParticipantSyncIntervalMs();
     }
     stopParticipantSync() {
         if (this.participantSyncTimer !== null) {
@@ -3771,6 +4489,7 @@ class CallController {
         this.roster.remove(feedId);
         this.subscriberPcs.delete(feedId);
         this.peerTelemetryByFeed.delete(feedId);
+        this.peerNetworkTelemetryByFeed.delete(feedId);
         this.remoteFeeds?.removeFeed(feedId);
         this.publishParticipants(cfg);
     }
@@ -3778,14 +4497,13 @@ class CallController {
     // MEDIA
     // =====================================
     getVideoConfig() {
-        const cfg = UrlConfig.getVcxVideoConfig();
-        const bitrateBps = Number.isFinite(cfg.bitrate_bps) ? Math.floor(cfg.bitrate_bps) : APP_CONFIG.media.bitrateBps;
-        const maxFramerate = Number.isFinite(cfg.max_framerate) ? Math.floor(cfg.max_framerate) : APP_CONFIG.media.maxFramerate;
-        return {
-            bitrate_bps: Math.max(APP_CONFIG.media.minBitrateBps, Math.min(APP_CONFIG.media.maxBitrateBps, bitrateBps)),
-            bitrate_cap: cfg.bitrate_cap !== false,
-            max_framerate: Math.max(APP_CONFIG.media.minFramerate, Math.min(APP_CONFIG.media.maxFramerateCap, maxFramerate))
-        };
+        return this.adaptiveNetwork.getVideoConfig();
+    }
+    getCurrentCameraProfileKey() {
+        return this.adaptiveNetwork.getCameraProfileKey();
+    }
+    buildVideoConstraintsForCurrentProfile(orientation) {
+        return this.adaptiveNetwork.buildCameraConstraints(orientation, this.isIOSDevice());
     }
     tuneVideoSenderBitrate(pc, bitrateBps, maxFramerate) {
         try {
@@ -3805,6 +4523,47 @@ class CallController {
             Logger.error(ErrorMessages.CALL_MEDIA_SETUP_SET_PARAMETERS_HOOK_ERROR, e);
         }
     }
+    startAdaptiveNetworkMonitor(pc) {
+        this.adaptiveNetwork.start(pc);
+    }
+    stopAdaptiveNetworkMonitor() {
+        this.adaptiveNetwork.stop();
+    }
+    async applyAdaptiveVideoConfig(videoCfg) {
+        try {
+            if (this.publisherPc) {
+                this.tuneVideoSenderBitrate(this.publisherPc, videoCfg.bitrate_bps, videoCfg.max_framerate);
+            }
+            try {
+                this.plugin?.send({
+                    message: {
+                        request: "configure",
+                        audio: this.localAudioEnabled,
+                        video: this.localVideoEnabled,
+                        bitrate: videoCfg.bitrate_bps,
+                        bitrate_cap: videoCfg.bitrate_cap
+                    }
+                });
+            }
+            catch (e) {
+                Logger.error(ErrorMessages.CALL_MEDIA_SETUP_SET_PARAMETERS_ERROR, e);
+            }
+            if (this.activeJoinCfg && this.joinedRoom) {
+                this.startParticipantSync(this.activeJoinCfg);
+            }
+            if (!this.screenEnabled && !this.vbEnabled && this.plugin) {
+                const cam = await this.ensureCameraStream();
+                const track = cam.getVideoTracks()[0];
+                if (track) {
+                    track.enabled = this.localVideoEnabled;
+                    this.replaceVideoTrack(track);
+                }
+            }
+        }
+        catch (e) {
+            Logger.error(ErrorMessages.CALL_MEDIA_SETUP_SET_PARAMETERS_HOOK_ERROR, e);
+        }
+    }
     isIOSDevice() {
         const ua = navigator.userAgent || "";
         const isiPhoneFamily = /iPad|iPhone|iPod/i.test(ua);
@@ -3813,22 +4572,6 @@ class CallController {
     }
     getViewportOrientation() {
         return window.innerHeight >= window.innerWidth ? "portrait" : "landscape";
-    }
-    buildIOSVideoConstraints(orientation) {
-        if (orientation === "portrait") {
-            return {
-                facingMode: "user",
-                width: { ideal: 480 },
-                height: { ideal: 640 },
-                frameRate: { ideal: 15, max: 20 }
-            };
-        }
-        return {
-            facingMode: "user",
-            width: { ideal: 640 },
-            height: { ideal: 480 },
-            frameRate: { ideal: 15, max: 20 }
-        };
     }
     async getPublishTracks() {
         const stream = await this.ensureCameraStream();
@@ -3944,6 +4687,7 @@ class CallController {
                 this.publisherPc = pc;
                 this.connectionEngine.registerPublisherPc(pc);
                 this.tuneVideoSenderBitrate(pc, videoCfg.bitrate_bps, videoCfg.max_framerate);
+                this.startAdaptiveNetworkMonitor(pc);
                 const emit = () => {
                     const payload = {
                         ice: pc.iceConnectionState,
@@ -3957,11 +4701,22 @@ class CallController {
                 };
                 // emit once immediately
                 emit();
+                pc.onicecandidateerror = (evt) => {
+                    const parsed = this.parseIceCandidateError(evt);
+                    this.rememberPublisherTransportError(parsed.reason, false, evt);
+                };
                 pc.oniceconnectionstatechange = () => {
                     console.log("VCX_ICE=" + pc.iceConnectionState);
                     emit();
+                    if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+                        this.lastPublisherTransportErrorReason = null;
+                        this.lastPublisherTransportErrorAt = 0;
+                        return;
+                    }
                     if (pc.iceConnectionState === "failed") {
-                        this.schedulePeerRetry("Publisher ICE state failed");
+                        const reason = this.buildPeerFailureReason("Publisher ICE state failed", pc);
+                        this.rememberPublisherTransportError(reason);
+                        this.schedulePeerRetry(reason);
                     }
                 };
                 pc.onsignalingstatechange = () => {
@@ -3972,8 +4727,20 @@ class CallController {
                 pc.onconnectionstatechange = () => {
                     console.log("VCX_CONNECTION=" + (pc.connectionState ?? "n/a"));
                     emit();
-                    if (pc.connectionState === "failed") {
-                        this.schedulePeerRetry("Publisher connection state failed");
+                    const connectionState = String(pc.connectionState ?? "");
+                    if (connectionState === "connected") {
+                        this.lastPublisherTransportErrorReason = null;
+                        this.lastPublisherTransportErrorAt = 0;
+                        return;
+                    }
+                    if (connectionState === "failed") {
+                        const dtlsHint = this.inferDtlsFailureHint(pc);
+                        const trigger = dtlsHint
+                            ? `Publisher connection state failed (${dtlsHint})`
+                            : "Publisher connection state failed";
+                        const reason = this.buildPeerFailureReason(trigger, pc);
+                        this.rememberPublisherTransportError(reason);
+                        this.schedulePeerRetry(reason);
                     }
                 };
                 pc.onicegatheringstatechange = () => {
@@ -3983,6 +4750,9 @@ class CallController {
             }
             else {
                 this.publisherPc = null;
+                this.lastPublisherTransportErrorReason = null;
+                this.lastPublisherTransportErrorAt = 0;
+                this.stopAdaptiveNetworkMonitor();
                 console.log("VCX_CONNECTIVITY=pc_not_available");
                 this.bus.emit("connectivity", {
                     ice: "n/a",
@@ -3997,6 +4767,159 @@ class CallController {
             Logger.error(ErrorMessages.CALL_CONNECTIVITY_HOOK_ERROR, e);
         }
     }
+    normalizeFailureReason(reason) {
+        const normalized = String(reason || "").replace(/\s+/g, " ").trim();
+        if (!normalized)
+            return "unknown failure";
+        const maxLen = 240;
+        if (normalized.length <= maxLen)
+            return normalized;
+        return `${normalized.slice(0, maxLen - 3)}...`;
+    }
+    rememberPublisherTransportError(reason, severe = false, rawErr) {
+        const normalized = this.normalizeFailureReason(reason);
+        this.lastPublisherTransportErrorReason = normalized;
+        this.lastPublisherTransportErrorAt = Date.now();
+        const tag = severe ? "VCX_TRANSPORT_ERROR" : "VCX_TRANSPORT_INFO";
+        const tagStyle = severe
+            ? "background:#991b1b;color:#ffffff;padding:2px 6px;font-weight:700;border-radius:3px"
+            : "background:#1d4ed8;color:#ffffff;padding:2px 6px;font-weight:700;border-radius:3px";
+        console.log(`%c${tag}%c ${normalized}`, tagStyle, "color:#111827;font-weight:600");
+        if (rawErr) {
+            if (severe) {
+                console.error(rawErr);
+            }
+            else {
+                console.log(rawErr);
+            }
+        }
+        if (severe) {
+            Logger.error(normalized);
+        }
+        else {
+            Logger.user(`[transport-info] ${normalized}`);
+        }
+    }
+    getRecentPublisherTransportHint() {
+        if (!this.lastPublisherTransportErrorReason)
+            return null;
+        const ageMs = Date.now() - this.lastPublisherTransportErrorAt;
+        if (ageMs > 30000)
+            return null;
+        return this.lastPublisherTransportErrorReason;
+    }
+    inferDtlsFailureHint(pc) {
+        const sctpTransportState = String(pc?.sctp?.transport?.state || "").toLowerCase();
+        if (sctpTransportState === "failed") {
+            return "DTLS transport failed";
+        }
+        const senderTransportState = pc.getSenders()
+            .map((s) => String(s?.transport?.state || "").toLowerCase())
+            .find((state) => state.length > 0);
+        if (senderTransportState === "failed") {
+            return "DTLS sender transport failed";
+        }
+        const receiverTransportState = pc.getReceivers()
+            .map((r) => String(r?.transport?.state || "").toLowerCase())
+            .find((state) => state.length > 0);
+        if (receiverTransportState === "failed") {
+            return "DTLS receiver transport failed";
+        }
+        const connectionState = String(pc.connectionState ?? "");
+        if (connectionState === "failed" &&
+            (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed")) {
+            return "DTLS/SRTP likely failed after ICE connected";
+        }
+        return null;
+    }
+    buildPeerFailureReason(trigger, pc) {
+        const parts = [this.normalizeFailureReason(trigger)];
+        if (!navigator.onLine) {
+            parts.push("browser offline");
+        }
+        if (pc) {
+            const connectionState = String(pc.connectionState ?? "n/a");
+            parts.push(`ice=${pc.iceConnectionState}, connection=${connectionState}, signaling=${pc.signalingState}`);
+            const dtlsHint = this.inferDtlsFailureHint(pc);
+            if (dtlsHint) {
+                parts.push(dtlsHint);
+            }
+        }
+        const transportHint = this.getRecentPublisherTransportHint();
+        if (transportHint && !trigger.includes(transportHint) && !trigger.includes("hint=")) {
+            parts.push(`hint=${transportHint}`);
+        }
+        return this.normalizeFailureReason(parts.join(" | "));
+    }
+    logFinalFailure(kind, reason) {
+        const normalized = this.normalizeFailureReason(reason);
+        const tag = kind === "peer" ? "VCX_TRANSPORT_FINAL_ERROR" : "VCX_SERVER_FINAL_ERROR";
+        const tagStyle = "background:#7f1d1d;color:#ffffff;padding:2px 6px;font-weight:700;border-radius:3px";
+        console.log(`%c${tag}%c ${normalized}`, tagStyle, "color:#111827;font-weight:600");
+    }
+    parseIceCandidateError(evt) {
+        const anyEvt = evt;
+        const url = String(anyEvt?.url || "unknown");
+        const lowerUrl = url.toLowerCase();
+        const isTurn = lowerUrl.startsWith("turn:") || lowerUrl.startsWith("turns:");
+        const codeRaw = Number(anyEvt?.errorCode);
+        const code = Number.isFinite(codeRaw) ? codeRaw : NaN;
+        const text = String(anyEvt?.errorText || "").trim();
+        const lowerText = text.toLowerCase();
+        let label = isTurn ? "TURN candidate negotiation error" : "ICE candidate negotiation error";
+        let severe = false;
+        if (code === 401 || code === 438 || lowerText.includes("unauth") || lowerText.includes("credential")) {
+            label = "TURN authentication failed";
+            severe = true;
+        }
+        else if (lowerUrl.startsWith("turns:") || lowerText.includes("tls")) {
+            label = "TURN TLS connection failed";
+            severe = true;
+        }
+        else if (lowerText.includes("dtls")) {
+            label = "DTLS handshake failed";
+            severe = true;
+        }
+        else if (code === 701 ||
+            lowerText.includes("unreachable") ||
+            lowerText.includes("timed out") ||
+            lowerText.includes("timeout") ||
+            lowerText.includes("host lookup")) {
+            label = isTurn ? "TURN server unreachable" : "STUN/ICE server unreachable";
+            severe = true;
+        }
+        const codeText = Number.isFinite(code) ? String(code) : "n/a";
+        const detailText = text || "n/a";
+        return {
+            reason: this.normalizeFailureReason(`${label} (url=${url}, code=${codeText}, text=${detailText})`),
+            severe
+        };
+    }
+    isPeerTransportFailureText(reason) {
+        const lower = reason.toLowerCase();
+        return lower.includes("ice") ||
+            lower.includes("turn") ||
+            lower.includes("dtls") ||
+            lower.includes("tls") ||
+            lower.includes("webrtc") ||
+            lower.includes("peer") ||
+            lower.includes("srtp");
+    }
+    classifyPublisherRuntimeIssue(data) {
+        const errorCodeRaw = Number(data?.error_code);
+        const errorCode = Number.isFinite(errorCodeRaw) ? String(errorCodeRaw) : "n/a";
+        const detail = this.normalizeFailureReason(JoinErrorUtils.extractErrorText(data) || JSON.stringify(data));
+        if (this.isPeerTransportFailureText(detail)) {
+            return {
+                kind: "peer",
+                reason: this.normalizeFailureReason(`Publisher runtime media error code=${errorCode} detail=${detail}`)
+            };
+        }
+        return {
+            kind: "server",
+            reason: this.normalizeFailureReason(`Publisher runtime signaling error code=${errorCode} detail=${detail}`)
+        };
+    }
     handlePublishFailure(e) {
         const classified = MediaErrorUtils.classifyPublishError(e);
         console.error(ErrorMessages.CALL_OFFER_ERROR_CONSOLE_TAG, e);
@@ -4006,7 +4929,7 @@ class CallController {
             this.connectionEngine.setFatalError(classified.userMessage, ErrorMessages.CALL_FIX_CAMERA_MIC_AND_RECONNECT);
             return;
         }
-        this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts);
+        this.connectionEngine.onPeerRetrying(this.peerRetryAttempt + 1, APP_CONFIG.call.retry.peerMaxAttempts, ErrorMessages.callOfferErrorReason(e));
         Logger.setStatus(ErrorMessages.CALL_OFFER_ERROR_RECOVERING);
         this.schedulePeerRetry(ErrorMessages.callOfferErrorReason(e));
     }
@@ -4146,6 +5069,13 @@ class CallController {
             subscribers: Array.from(this.subscriberPcs.values())
         };
     }
+    getParticipantNetworkPeers() {
+        return {
+            selfId: this.selfId,
+            publisher: this.publisherPc,
+            subscribers: Array.from(this.subscriberPcs.entries()).map(([feedId, pc]) => ({ feedId, pc }))
+        };
+    }
     stopVideo() {
         void this.setVideoEnabled(false);
     }
@@ -4223,6 +5153,7 @@ class CallController {
         try {
             this.isLeaving = true;
             this.suppressRemoteFeedRetry = true;
+            this.stopAdaptiveNetworkMonitor();
             this.stopMediaStatsLoop();
             this.clearMixedAudioResources();
             this.vbManager.disable();
@@ -4252,7 +5183,7 @@ class CallController {
             this.remoteFeeds = null;
             this.plugin = null;
             this.suppressPublisherCleanupRetry = true;
-            this.gateway.destroy();
+            this.destroyGatewayControlled();
             this.suppressPublisherCleanupRetry = false;
             this.stopParticipantSync();
             this.joinedRoom = false;
@@ -4263,7 +5194,10 @@ class CallController {
             this.selfId = null;
             this.publisherPc = null;
             this.subscriberPcs.clear();
+            this.lastPublisherTransportErrorReason = null;
+            this.lastPublisherTransportErrorAt = 0;
             this.peerTelemetryByFeed.clear();
+            this.peerNetworkTelemetryByFeed.clear();
             this.localAudioEnabled = true;
             this.localVideoEnabled = true;
             this.audioToggleBusy = false;
@@ -4280,6 +5214,7 @@ class CallController {
             this.media.clearRemote(this.remoteVideo);
             this.cameraStream = null;
             this.cameraStreamOrientation = null;
+            this.cameraProfileKey = "";
             this.callId = null;
             Logger.setStatus(ErrorMessages.CALL_LEFT);
         }
@@ -4392,17 +5327,17 @@ class CallController {
     async ensureCameraStream() {
         try {
             const desiredOrientation = this.getViewportOrientation();
+            const desiredProfileKey = this.getCurrentCameraProfileKey();
             const currentStream = this.cameraStream;
             const hasLiveVideo = !!currentStream?.getVideoTracks().some(t => t.readyState === "live");
             const hasLiveAudio = !!currentStream?.getAudioTracks().some(t => t.readyState === "live");
             const needsRecreate = !currentStream ||
                 !hasLiveVideo ||
                 !hasLiveAudio ||
-                (this.isIOSDevice() && this.cameraStreamOrientation !== desiredOrientation);
+                (this.isIOSDevice() && this.cameraStreamOrientation !== desiredOrientation) ||
+                this.cameraProfileKey !== desiredProfileKey;
             if (needsRecreate) {
-                const videoConstraints = this.isIOSDevice()
-                    ? this.buildIOSVideoConstraints(desiredOrientation)
-                    : true;
+                const videoConstraints = this.buildVideoConstraintsForCurrentProfile(desiredOrientation);
                 const nextStream = await navigator.mediaDevices.getUserMedia({
                     video: videoConstraints,
                     audio: true
@@ -4410,6 +5345,7 @@ class CallController {
                 const previous = this.cameraStream;
                 this.cameraStream = nextStream;
                 this.cameraStreamOrientation = desiredOrientation;
+                this.cameraProfileKey = desiredProfileKey;
                 const nextAudio = nextStream.getAudioTracks()[0];
                 if (nextAudio && (!this.screenEnabled || !this.mixedAudioTrack)) {
                     nextAudio.enabled = this.localAudioEnabled;
@@ -4436,6 +5372,9 @@ class CallController {
             }
             if (!this.cameraStream) {
                 throw new Error(ErrorMessages.CALL_CAMERA_STREAM_UNAVAILABLE_AFTER_INIT);
+            }
+            if (!this.cameraProfileKey) {
+                this.cameraProfileKey = desiredProfileKey;
             }
             return this.cameraStream;
         }
@@ -4652,6 +5591,7 @@ class UIController {
         this.lastCfg = null;
         this.bridge = new ParentBridge();
         this.net = new NetworkQualityManager();
+        this.participantNet = new ParticipantNetworkStatsManager();
         this.localVideoEl = document.getElementById("localVideo");
         this.remoteVideoEl = document.getElementById("remoteVideo");
         this.remoteFallback = document.getElementById("remoteFallback");
@@ -4662,6 +5602,11 @@ class UIController {
         this.remoteQ = document.getElementById("remoteQuality");
         this.localQD = document.getElementById("localQualityDetails");
         this.remoteQD = document.getElementById("remoteQualityDetails");
+        this.networkSidePanel = document.getElementById("networkSidePanel");
+        this.networkPanelBtn = document.getElementById("networkPanelBtn");
+        this.networkPanelPopup = document.getElementById("networkPanelPopup");
+        this.networkPanelClose = document.getElementById("networkPanelClose");
+        this.networkPopupBody = document.getElementById("networkPopupBody");
         this.callMeta = document.getElementById("callMeta");
         this.mediaIoBytes = document.getElementById("mediaIoBytes");
         this.mediaIoIssues = document.getElementById("mediaIoIssues");
@@ -4769,12 +5714,19 @@ class UIController {
         this.bus.on("media-io", (stats) => {
             this.renderMediaIo(stats);
         });
+        this.bus.on("janus-slowlink", (signal) => {
+            this.participantNet.recordSlowLink(signal);
+        });
+        this.bus.on("peer-network-telemetry", (evt) => {
+            this.participantNet.recordRemoteNetworkTelemetry(evt.feedId, evt.payload);
+        });
         this.bus.on("call-ended", (payload) => {
             Logger.user(`Call ended event received: ${payload?.reason || "unknown"}`);
             this.setEndedState(true);
         });
         this.wire();
         this.setupNetworkUI();
+        this.setupParticipantNetworkPanel();
         this.setupParentBridge();
         this.setupRemoteFallbackMonitor();
         this.autoJoin();
@@ -5236,6 +6188,137 @@ class UIController {
                 remote: r
             });
         }, () => this.controller.getNetworkQualityPeers());
+    }
+    setupParticipantNetworkPanel() {
+        if (!this.networkSidePanel ||
+            !this.networkPanelBtn ||
+            !this.networkPanelPopup ||
+            !this.networkPopupBody ||
+            !this.networkPanelClose) {
+            return;
+        }
+        const closePopup = () => {
+            this.networkPanelPopup.classList.remove("show");
+        };
+        const openPopup = () => {
+            this.networkPanelPopup.classList.add("show");
+        };
+        this.networkPanelBtn.onclick = () => {
+            if (!this.isParticipantNetworkPopupMode())
+                return;
+            if (this.networkPanelPopup.classList.contains("show")) {
+                closePopup();
+            }
+            else {
+                openPopup();
+            }
+        };
+        this.networkPanelClose.onclick = closePopup;
+        this.networkPanelPopup.onclick = (ev) => {
+            if (ev.target === this.networkPanelPopup)
+                closePopup();
+        };
+        window.addEventListener("resize", () => {
+            if (!this.isParticipantNetworkPopupMode()) {
+                closePopup();
+            }
+        });
+        this.participantNet.start((snapshot) => this.renderParticipantNetwork(snapshot), () => this.controller.getParticipantNetworkPeers());
+    }
+    isParticipantNetworkPopupMode() {
+        return window.innerWidth <= APP_CONFIG.networkQuality.participantPanel.popupBreakpointPx;
+    }
+    renderParticipantNetwork(snapshot) {
+        if (!this.networkSidePanel || !this.networkPopupBody)
+            return;
+        const updated = new Date(snapshot.updatedAt).toLocaleTimeString();
+        const content = this.renderParticipantNetworkRows(snapshot.rows);
+        const html = `<div class="network-panel-title">Participant Network</div>` +
+            `<div class="network-panel-updated">Updated: ${updated}</div>` +
+            content;
+        this.networkSidePanel.innerHTML = html;
+        this.networkPopupBody.innerHTML = html;
+    }
+    renderParticipantNetworkRows(rows) {
+        if (!rows || rows.length === 0) {
+            return '<div class="network-empty">Pending stats...</div>';
+        }
+        return rows.map((row) => this.renderParticipantNetworkRow(row)).join("");
+    }
+    renderParticipantNetworkRow(row) {
+        const label = this.escapeHtml(row.label || "Participant");
+        const upload = this.renderParticipantMetric("Upload", row.upload);
+        const download = this.renderParticipantMetric("Download", row.download);
+        const remoteUpload = this.renderParticipantMetric("Remote Upload", row.remoteUpload);
+        const remoteDownload = this.renderParticipantMetric("Remote Download", row.remoteDownload);
+        return (`<div class="network-row">` +
+            `<div class="network-row-header">${label}</div>` +
+            `<div class="network-row-grid">` +
+            upload + download + remoteUpload + remoteDownload +
+            `</div>` +
+            this.renderSlowLinkSummary(row) +
+            this.renderBottleneckSummary(row.likelyBottleneck) +
+            `<div class="network-row-strip">` +
+            `<span class="network-strip-seg ${this.tierClass(row.upload.tier)}"></span>` +
+            `<span class="network-strip-seg ${this.tierClass(row.download.tier)}"></span>` +
+            `<span class="network-strip-seg ${this.tierClass(row.remoteUpload.tier)}"></span>` +
+            `<span class="network-strip-seg ${this.tierClass(row.remoteDownload.tier)}"></span>` +
+            `</div>` +
+            `<div class="network-strip-legend">U | D | RU | RD</div>` +
+            `</div>`);
+    }
+    renderBottleneckSummary(value) {
+        const cls = value === "You" ? "bneck-you" :
+            value === "Remote" ? "bneck-remote" :
+                value === "Both" ? "bneck-both" :
+                    "bneck-unknown";
+        return `<div class="network-bottleneck ${cls}">Likely bottleneck: ${value}</div>`;
+    }
+    renderSlowLinkSummary(row) {
+        const uplink = row.upload.slowLink || row.remoteDownload.slowLink;
+        const downlink = row.download.slowLink || row.remoteUpload.slowLink;
+        if (!uplink && !downlink) {
+            return '<div class="network-slowlink network-slowlink-none">SlowLink: None</div>';
+        }
+        const parts = [];
+        if (uplink)
+            parts.push("Uplink");
+        if (downlink)
+            parts.push("Downlink");
+        return `<div class="network-slowlink network-slowlink-active">SlowLink: ${parts.join(" + ")}</div>`;
+    }
+    renderParticipantMetric(label, direction) {
+        const cls = this.tierClass(direction.tier);
+        const kbps = this.formatParticipantSpeed(direction.kbps);
+        const slowTag = direction.slowLink ? " SlowLink" : "";
+        return (`<div class="network-metric">` +
+            `<div class="network-metric-label">${label}</div>` +
+            `<div class="network-metric-value ${cls}">${kbps} (${direction.tier}${slowTag})</div>` +
+            `</div>`);
+    }
+    formatParticipantSpeed(kbps) {
+        if (kbps === null || !Number.isFinite(kbps))
+            return "Pending";
+        if (kbps >= 1000)
+            return `${(kbps / 1000).toFixed(2)} Mbps`;
+        return `${kbps.toFixed(0)} kbps`;
+    }
+    tierClass(tier) {
+        if (tier === "Good")
+            return "tier-good";
+        if (tier === "Medium")
+            return "tier-medium";
+        if (tier === "Low")
+            return "tier-low";
+        return "tier-pending";
+    }
+    escapeHtml(text) {
+        return String(text)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
     }
     setupParentBridge() {
         this.bridge.onCommand((cmd) => {

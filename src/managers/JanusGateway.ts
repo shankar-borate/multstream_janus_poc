@@ -39,7 +39,7 @@ class JanusGateway {
       success: ok,
       error: (e: any) => {
         Logger.setStatus(ErrorMessages.janusErrorStatus(e));
-        Logger.error(ErrorMessages.janusSessionCreateError(e));
+        Logger.user(`[janus-info] ${ErrorMessages.janusSessionCreateError(e)}`);
         onError?.(e);
       },
       destroyed: () => {
@@ -54,7 +54,8 @@ class JanusGateway {
     onMessage: (msg: any, jsep: any) => void,
     onLocalTrack: (track: MediaStreamTrack, on: boolean) => void,
     onCleanup: () => void,
-    onError?: (e: any) => void
+    onError?: (e: any) => void,
+    onSlowLink?: (payload: JanusSlowLinkEvent) => void
   ) {
     if (!this.janus) {
       Logger.setStatus(ErrorMessages.JANUS_NOT_READY_STATUS);
@@ -75,7 +76,7 @@ class JanusGateway {
       },
       error: (e: any) => {
         Logger.setStatus(ErrorMessages.janusAttachErrorStatus(e));
-        Logger.error(ErrorMessages.janusAttachErrorLog(e));
+        Logger.user(`[janus-info] ${ErrorMessages.janusAttachErrorLog(e)}`);
         onError?.(e);
       },
       onmessage: (msg: any, jsep: any) => {
@@ -83,6 +84,20 @@ class JanusGateway {
       },
       onlocaltrack: (track: MediaStreamTrack, on: boolean) => {
         onLocalTrack(track, on);
+      },
+      slowLink: (uplink: boolean, lost: number, mid: string) => {
+        onSlowLink?.({
+          uplink: !!uplink,
+          lost: Number.isFinite(lost) ? Number(lost) : 0,
+          mid: typeof mid === "string" ? mid : null
+        });
+      },
+      onslowlink: (uplink: boolean, lost: number, mid: string) => {
+        onSlowLink?.({
+          uplink: !!uplink,
+          lost: Number.isFinite(lost) ? Number(lost) : 0,
+          mid: typeof mid === "string" ? mid : null
+        });
       },
       oncleanup: () => {
         Logger.user("Publisher plugin cleanup");
