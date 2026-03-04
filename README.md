@@ -2,12 +2,12 @@
 
 ## URL params
 
-- roomId
+- groupId
 - name
 - server (optional)
 
 Example:
-http://localhost/janus-videocx-ui-ts-vb-ss/index.html?roomId=1234&name=Shankar&server=wss://janus.conf.meetecho.com/ws
+http://localhost/janus-videocx-ui-ts-vb-ss/index.html?groupId=1234&name=Shankar&server=wss://janus.conf.meetecho.com/ws
 
 ## Build
 

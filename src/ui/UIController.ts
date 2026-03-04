@@ -26,6 +26,8 @@ class UIController {
   private btnRecord = document.getElementById("btnRecord") as HTMLButtonElement;
 
   private lastCfg: JoinConfig | null = null;
+  private lastGroupId: number | null = null;
+  private autoJoinSeq = 0;
 
   private bridge = new ParentBridge();
   private net = new NetworkQualityManager();
@@ -354,30 +356,75 @@ class UIController {
     this.btnLeave.title = "End";
   }
 
-  private autoJoin() {
-    const cfg = UrlConfig.buildJoinConfig();
-    this.lastCfg = cfg;
+  private async autoJoin() {
+    let req: JoinBootstrapConfig;
+    try {
+      req = UrlConfig.buildJoinConfig();
+    } catch (e: any) {
+      Logger.error("Join config parse failed", e);
+      return;
+    }
+    const joinSeq = ++this.autoJoinSeq;
+    this.lastGroupId = req.groupId;
     this.recording = false;
     this.renderedParticipantCount = 0;
     this.lastRemoteVideoTime = 0;
     this.remoteVideoFrameProgressAt = 0;
     this.updateRecordUI();
-    this.renderCallMeta(cfg);
+    this.renderCallMeta(req.display, req.participantId);
 
-    Logger.setStatus(`Joining... roomId=${cfg.roomId}, name=${cfg.display}${cfg.participantId ? `, participantId=${cfg.participantId}` : ""}`);
+    Logger.setStatus(`Creating meeting... groupId=${req.groupId}, name=${req.display}${req.participantId ? `, participantId=${req.participantId}` : ""}`);
+    Logger.user(`[rms] create meeting request groupId=${req.groupId} (payload groupId=null, to=${req.groupId})`);
 
     this.audioMuted = false;
     this.videoMuted = false;
     this.setEndedState(false);
     this.applyConnectionOverlays();
 
-    this.controller.join(cfg);
-    this.bridge.emit({ type: "CALL_STARTED" });
+    try {
+      const roomId = await this.resolveMeetingRoomId(req.groupId);
+      if (joinSeq !== this.autoJoinSeq) return;
+
+      const cfg: JoinConfig = {
+        server: req.server,
+        roomId,
+        display: req.display,
+        participantId: req.participantId
+      };
+      this.lastCfg = cfg;
+      this.renderCallMeta(cfg.display, cfg.participantId, cfg.roomId);
+      this.updateDebugState({
+        groupId: req.groupId,
+        roomId: cfg.roomId
+      });
+
+      Logger.setStatus(`Joining... roomId=${cfg.roomId}, name=${cfg.display}${cfg.participantId ? `, participantId=${cfg.participantId}` : ""}`);
+      this.controller.join(cfg);
+      this.bridge.emit({ type: "CALL_STARTED" });
+    } catch (e: any) {
+      if (joinSeq !== this.autoJoinSeq) return;
+      Logger.error(ErrorMessages.RMS_MEETING_CREATE_FAILED, e);
+      Logger.setStatus(ErrorMessages.RMS_MEETING_CREATE_FAILED);
+    }
   }
 
-  private renderCallMeta(cfg: JoinConfig) {
+  private async resolveMeetingRoomId(groupId: number): Promise<number> {
+    const server = UrlConfig.getVcxServer().server;
+    const clientId = UrlConfig.getVcxServer().client_id;
+    const http = new HttpClient(server, clientId);
+    const rms = new RmsClient(http);
+    const meetingId = await rms.createMeetingByGroup(groupId);
+    Logger.user(`[rms] meeting created groupId=${groupId} -> meetingId(roomId)=${meetingId}`);
+    return meetingId;
+  }
+
+  private renderCallMeta(display: string, participantId?: number, roomId?: number) {
     if (!this.callMeta) return;
-    this.callMeta.textContent = `RoomId: ${cfg.roomId} | Name: ${cfg.display}${cfg.participantId ? ` | ParticipantId: ${cfg.participantId}` : ""}`;
+    const groupText = this.lastGroupId ?? "-";
+    const roomText = Number.isFinite(roomId as number) ? String(roomId) : "Pending";
+    this.callMeta.textContent =
+      `GroupId: ${groupText} | RoomId: ${roomText} | Name: ${display}` +
+      `${participantId ? ` | ParticipantId: ${participantId}` : ""}`;
   }
 
   private reconnect() {
@@ -940,7 +987,11 @@ class UIController {
     this.bridge.onCommand((cmd: any) => {
       switch (cmd.type) {
         case "START_CALL":
-          this.controller.join(this.lastCfg!);
+          if (this.lastCfg) {
+            this.controller.join(this.lastCfg);
+          } else {
+            void this.autoJoin();
+          }
           break;
 
         case "STOP_CALL":

@@ -403,10 +403,12 @@ class ErrorMessages {
             : ErrorMessages.CALL_PEER_RETRY_LIMIT_REACHED;
     }
 }
-ErrorMessages.URL_ROOM_ID_ALERT = "This call link is missing a room ID, so we can't join yet. Please open the full link again or add ?roomId=1234 to the URL.";
-ErrorMessages.URL_ROOM_ID_MISSING = "Missing required query param: roomId";
-ErrorMessages.URL_ROOM_ID_INVALID = "Invalid query param: roomId must be a number";
+ErrorMessages.URL_GROUP_ID_ALERT = "This call link is missing a group ID, so we can't join yet. Please open the full link again or add ?groupId=1234 to the URL.";
+ErrorMessages.URL_GROUP_ID_MISSING = "Missing required query param: groupId";
+ErrorMessages.URL_GROUP_ID_INVALID = "Invalid query param: groupId must be a number";
 ErrorMessages.URL_PARTICIPANT_ID_INVALID = "Invalid query param: participantId must be a positive number";
+ErrorMessages.RMS_MEETING_CREATE_FAILED = "Unable to create meeting from group. Please try again.";
+ErrorMessages.RMS_MEETING_ID_INVALID = "RMS response is missing a valid meetingId";
 ErrorMessages.EVENT_BUS_HANDLER_FAILED_PREFIX = "EventBus handler failed for event=";
 ErrorMessages.PARENT_BRIDGE_POST_MESSAGE_FAILED = "ParentBridge postMessage failed";
 ErrorMessages.JANUS_INITIALIZED = "Janus initialized";
@@ -654,15 +656,15 @@ class UrlConfig {
         };
     }
     static buildJoinConfig() {
-        const roomIdRaw = this.getString("roomId", "");
-        if (!roomIdRaw) {
-            alert(ErrorMessages.URL_ROOM_ID_ALERT);
-            throw new Error(ErrorMessages.URL_ROOM_ID_MISSING);
+        const groupIdRaw = this.getString("groupId", "");
+        if (!groupIdRaw) {
+            alert(ErrorMessages.URL_GROUP_ID_ALERT);
+            throw new Error(ErrorMessages.URL_GROUP_ID_MISSING);
         }
-        const roomId = parseInt(roomIdRaw, 10);
-        if (!Number.isFinite(roomId)) {
-            alert(ErrorMessages.URL_ROOM_ID_ALERT);
-            throw new Error(ErrorMessages.URL_ROOM_ID_INVALID);
+        const groupId = parseInt(groupIdRaw, 10);
+        if (!Number.isFinite(groupId)) {
+            alert(ErrorMessages.URL_GROUP_ID_ALERT);
+            throw new Error(ErrorMessages.URL_GROUP_ID_INVALID);
         }
         const participantIdRaw = this.getString("participantId", "");
         let participantId = undefined;
@@ -675,7 +677,7 @@ class UrlConfig {
         }
         return {
             server: this.getString("server", APP_CONFIG.vcx.defaultJanusServer),
-            roomId,
+            groupId,
             display: this.getString("name", APP_CONFIG.vcx.defaultDisplayName),
             participantId
         };
@@ -1012,6 +1014,32 @@ function pickMediaConstraints(payload, isMobile) {
     }
     const list = mc.WEB_MEDIA_CONSTRAINTS ?? [];
     return list[0] ?? { audio: true, video: true };
+}
+class RmsClient {
+    constructor(http) {
+        this.http = http;
+    }
+    async createMeetingByGroup(groupId) {
+        const body = {
+            groupId: null,
+            meetingType: 1,
+            to: groupId,
+            recordingMethod: 2,
+            autoRecording: false,
+            recordingType: 1,
+            alwaysCreateNewMeeting: true
+        };
+        const res = await this.http.request({
+            method: "POST",
+            path: "/rms/meetings",
+            body
+        });
+        const meetingId = Number(res.data?.meetingId);
+        if (!Number.isFinite(meetingId) || meetingId <= 0) {
+            throw new Error(ErrorMessages.RMS_MEETING_ID_INVALID);
+        }
+        return meetingId;
+    }
 }
 class Cookie {
     /** Get cookie value by name (decoded). Returns null if missing. */
@@ -5658,6 +5686,8 @@ class UIController {
         // ✅ NEW
         this.btnRecord = document.getElementById("btnRecord");
         this.lastCfg = null;
+        this.lastGroupId = null;
+        this.autoJoinSeq = 0;
         this.bridge = new ParentBridge();
         this.net = new NetworkQualityManager();
         this.participantNet = new ParticipantNetworkStatsManager();
@@ -5959,27 +5989,73 @@ class UIController {
         this.btnLeave.innerHTML = '<i class="fa-solid fa-phone-slash"></i>';
         this.btnLeave.title = "End";
     }
-    autoJoin() {
-        const cfg = UrlConfig.buildJoinConfig();
-        this.lastCfg = cfg;
+    async autoJoin() {
+        let req;
+        try {
+            req = UrlConfig.buildJoinConfig();
+        }
+        catch (e) {
+            Logger.error("Join config parse failed", e);
+            return;
+        }
+        const joinSeq = ++this.autoJoinSeq;
+        this.lastGroupId = req.groupId;
         this.recording = false;
         this.renderedParticipantCount = 0;
         this.lastRemoteVideoTime = 0;
         this.remoteVideoFrameProgressAt = 0;
         this.updateRecordUI();
-        this.renderCallMeta(cfg);
-        Logger.setStatus(`Joining... roomId=${cfg.roomId}, name=${cfg.display}${cfg.participantId ? `, participantId=${cfg.participantId}` : ""}`);
+        this.renderCallMeta(req.display, req.participantId);
+        Logger.setStatus(`Creating meeting... groupId=${req.groupId}, name=${req.display}${req.participantId ? `, participantId=${req.participantId}` : ""}`);
+        Logger.user(`[rms] create meeting request groupId=${req.groupId} (payload groupId=null, to=${req.groupId})`);
         this.audioMuted = false;
         this.videoMuted = false;
         this.setEndedState(false);
         this.applyConnectionOverlays();
-        this.controller.join(cfg);
-        this.bridge.emit({ type: "CALL_STARTED" });
+        try {
+            const roomId = await this.resolveMeetingRoomId(req.groupId);
+            if (joinSeq !== this.autoJoinSeq)
+                return;
+            const cfg = {
+                server: req.server,
+                roomId,
+                display: req.display,
+                participantId: req.participantId
+            };
+            this.lastCfg = cfg;
+            this.renderCallMeta(cfg.display, cfg.participantId, cfg.roomId);
+            this.updateDebugState({
+                groupId: req.groupId,
+                roomId: cfg.roomId
+            });
+            Logger.setStatus(`Joining... roomId=${cfg.roomId}, name=${cfg.display}${cfg.participantId ? `, participantId=${cfg.participantId}` : ""}`);
+            this.controller.join(cfg);
+            this.bridge.emit({ type: "CALL_STARTED" });
+        }
+        catch (e) {
+            if (joinSeq !== this.autoJoinSeq)
+                return;
+            Logger.error(ErrorMessages.RMS_MEETING_CREATE_FAILED, e);
+            Logger.setStatus(ErrorMessages.RMS_MEETING_CREATE_FAILED);
+        }
     }
-    renderCallMeta(cfg) {
+    async resolveMeetingRoomId(groupId) {
+        const server = UrlConfig.getVcxServer().server;
+        const clientId = UrlConfig.getVcxServer().client_id;
+        const http = new HttpClient(server, clientId);
+        const rms = new RmsClient(http);
+        const meetingId = await rms.createMeetingByGroup(groupId);
+        Logger.user(`[rms] meeting created groupId=${groupId} -> meetingId(roomId)=${meetingId}`);
+        return meetingId;
+    }
+    renderCallMeta(display, participantId, roomId) {
         if (!this.callMeta)
             return;
-        this.callMeta.textContent = `RoomId: ${cfg.roomId} | Name: ${cfg.display}${cfg.participantId ? ` | ParticipantId: ${cfg.participantId}` : ""}`;
+        const groupText = this.lastGroupId ?? "-";
+        const roomText = Number.isFinite(roomId) ? String(roomId) : "Pending";
+        this.callMeta.textContent =
+            `GroupId: ${groupText} | RoomId: ${roomText} | Name: ${display}` +
+                `${participantId ? ` | ParticipantId: ${participantId}` : ""}`;
     }
     reconnect() {
         if (!this.lastCfg)
@@ -6453,7 +6529,12 @@ class UIController {
         this.bridge.onCommand((cmd) => {
             switch (cmd.type) {
                 case "START_CALL":
-                    this.controller.join(this.lastCfg);
+                    if (this.lastCfg) {
+                        this.controller.join(this.lastCfg);
+                    }
+                    else {
+                        void this.autoJoin();
+                    }
                     break;
                 case "STOP_CALL":
                     this.controller.leave();

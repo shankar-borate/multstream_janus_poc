@@ -25,17 +25,17 @@ class UrlConfig {
     };
   }
 
-  static buildJoinConfig():JoinConfig{
-    const roomIdRaw = this.getString("roomId", "");
-    if(!roomIdRaw){
-      alert(ErrorMessages.URL_ROOM_ID_ALERT);
-      throw new Error(ErrorMessages.URL_ROOM_ID_MISSING);
+  static buildJoinConfig():JoinBootstrapConfig{
+    const groupIdRaw = this.getString("groupId", "");
+    if(!groupIdRaw){
+      alert(ErrorMessages.URL_GROUP_ID_ALERT);
+      throw new Error(ErrorMessages.URL_GROUP_ID_MISSING);
     }
 
-    const roomId = parseInt(roomIdRaw, 10);
-    if(!Number.isFinite(roomId)){
-      alert(ErrorMessages.URL_ROOM_ID_ALERT);
-      throw new Error(ErrorMessages.URL_ROOM_ID_INVALID);
+    const groupId = parseInt(groupIdRaw, 10);
+    if(!Number.isFinite(groupId)){
+      alert(ErrorMessages.URL_GROUP_ID_ALERT);
+      throw new Error(ErrorMessages.URL_GROUP_ID_INVALID);
     }
 
     const participantIdRaw = this.getString("participantId", "");
@@ -50,7 +50,7 @@ class UrlConfig {
 
     return {
       server: this.getString("server", APP_CONFIG.vcx.defaultJanusServer),
-      roomId,
+      groupId,
       display: this.getString("name", APP_CONFIG.vcx.defaultDisplayName),
       participantId
     };

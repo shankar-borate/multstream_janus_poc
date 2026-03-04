@@ -1,9 +1,11 @@
 class ErrorMessages {
-  static readonly URL_ROOM_ID_ALERT =
-    "This call link is missing a room ID, so we can't join yet. Please open the full link again or add ?roomId=1234 to the URL.";
-  static readonly URL_ROOM_ID_MISSING = "Missing required query param: roomId";
-  static readonly URL_ROOM_ID_INVALID = "Invalid query param: roomId must be a number";
+  static readonly URL_GROUP_ID_ALERT =
+    "This call link is missing a group ID, so we can't join yet. Please open the full link again or add ?groupId=1234 to the URL.";
+  static readonly URL_GROUP_ID_MISSING = "Missing required query param: groupId";
+  static readonly URL_GROUP_ID_INVALID = "Invalid query param: groupId must be a number";
   static readonly URL_PARTICIPANT_ID_INVALID = "Invalid query param: participantId must be a positive number";
+  static readonly RMS_MEETING_CREATE_FAILED = "Unable to create meeting from group. Please try again.";
+  static readonly RMS_MEETING_ID_INVALID = "RMS response is missing a valid meetingId";
 
   static domElementNotFound(id: string): string {
     return `[DOM] Element not found: #${id}`;

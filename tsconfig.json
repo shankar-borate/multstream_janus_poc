@@ -23,6 +23,8 @@
     "src/core/http/HttpClient.ts",
     "src/core/clients/ims/ImsClient.ts",
     "src/core/clients/ims/ims.types.ts",
+    "src/core/clients/rms/rms.types.ts",
+    "src/core/clients/rms/RmsClient.ts",
     "src/core/http/Cookie.ts",
     "src/core/http/Correlation.ts",
     "src/core/http/HttpError.ts",

@@ -149,8 +149,8 @@ button:hover {
         <h2>Join Video Room</h2>
 
         <div class="form-group">
-            <label>Room ID</label>
-            <input id="roomId" placeholder="Enter Room ID">
+            <label>Group ID</label>
+            <input id="groupId" placeholder="Enter Group ID">
         </div>
 
         <div class="form-group">
@@ -178,7 +178,7 @@ button:hover {
 
 <!-- ===== RIGHT SIDE INFO ===== -->
 <div id="infoPanel">
-    <div class="info-title">RoomId</div>
+    <div class="info-title">GroupId</div>
     <div class="info-value" id="displayRoom"></div>
 
     <div class="info-title">Name</div>
@@ -194,7 +194,7 @@ button:hover {
 <script>
 function joinCall() {
 
-    const roomId = document.getElementById("roomId").value.trim();
+    const groupId = document.getElementById("groupId").value.trim();
     const name = document.getElementById("name").value.trim();
     const participantId = document.getElementById("participantId").value.trim();
     const userType = document.getElementById("userType").value.trim().toLowerCase();
@@ -202,8 +202,14 @@ function joinCall() {
 
     error.innerText = "";
 
-    if (!roomId || !name || !participantId || !userType) {
-        error.innerText = "Room ID, Name, Participant ID and User Type are required.";
+    if (!groupId || !name || !participantId || !userType) {
+        error.innerText = "Group ID, Name, Participant ID and User Type are required.";
+        return;
+    }
+
+    const groupIdNum = Number(groupId);
+    if (!Number.isInteger(groupIdNum) || groupIdNum <= 0) {
+        error.innerText = "Group ID must be a positive number.";
         return;
     }
 
@@ -220,7 +226,7 @@ function joinCall() {
 
     const url =
       "https://beta.videocx.io/poc/mstream/index.html" +
-      "?roomId=" + encodeURIComponent(roomId) +
+      "?groupId=" + encodeURIComponent(groupId) +
       "&name=" + encodeURIComponent(name) +
       "&participantId=" + encodeURIComponent(participantId) +
       "&user_type=" + encodeURIComponent(userType);
@@ -232,7 +238,7 @@ function joinCall() {
 
     // Keep outer page info panel hidden to avoid overlapping iframe UI.
     // Room/Name is shown inside the call page itself.
-    document.getElementById("displayRoom").innerText = roomId;
+    document.getElementById("displayRoom").innerText = groupId;
     document.getElementById("displayName").innerText = name;
     document.getElementById("infoPanel").style.display = "none";
 
