@@ -7,7 +7,7 @@
  * VCX browser HTTP client:
  * - Sends cookies (credentials: include) by default (needed for IMS/OWB token cookies)
  * - Adds X-Request-Id and X-XSRF-Token (from cookies) automatically when available
- * - Adds client-id header
+ * - Adds client-id header (customer=111, others=101)
  * - Provides timeout via AbortController
  * - Normalizes errors to HttpError
  */
@@ -35,7 +35,7 @@ class HttpClient {
     const headers: Record<string, string> = {
       "accept": "application/json",
       ...(req.body !== undefined ? { "content-type": "application/json; charset=utf-8" } : {}),
-      "client-id": this.clientId,
+      "client-id": this.resolveClientId(),
       "x-request-id": requestId,
       ...(xsrf ? { "x-xsrf-token": xsrf } : {}),
       ...(req.headers ?? {}),
@@ -108,5 +108,15 @@ class HttpClient {
 
   private safeJson(text: string): any {
     try { return JSON.parse(text); } catch { return text; }
+  }
+
+  private resolveClientId(): string {
+    const qs = new URLSearchParams(window.location.search);
+    const raw =
+      qs.get("user_type") ??
+      qs.get("usertpye") ??
+      qs.get("usertype") ??
+      "";
+    return raw.trim().toLowerCase() === "customer" ? "111" : "101";
   }
 }
