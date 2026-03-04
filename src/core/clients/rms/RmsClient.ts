@@ -24,4 +24,26 @@ class RmsClient {
     }
     return meetingId;
   }
+
+  async createRecording(groupId: number, meetingId: number): Promise<number> {
+    const body: RmsCreateRecordingRequest = {
+      to: groupId,
+      meetingId,
+      recordingMethod: 2,
+      recordingType: 1,
+      alwaysCreateNewRecording: true
+    };
+
+    const res = await this.http.request<RmsCreateRecordingResponse>({
+      method: "POST",
+      path: "/rms/meetings/recordings",
+      body
+    });
+
+    const recordingId = Number(res.data?.recordingId);
+    if (!Number.isFinite(recordingId) || recordingId <= 0) {
+      throw new Error(ErrorMessages.RMS_RECORDING_ID_INVALID);
+    }
+    return recordingId;
+  }
 }

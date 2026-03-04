@@ -409,6 +409,8 @@ ErrorMessages.URL_GROUP_ID_INVALID = "Invalid query param: groupId must be a num
 ErrorMessages.URL_PARTICIPANT_ID_INVALID = "Invalid query param: participantId must be a positive number";
 ErrorMessages.RMS_MEETING_CREATE_FAILED = "Unable to create meeting from group. Please try again.";
 ErrorMessages.RMS_MEETING_ID_INVALID = "RMS response is missing a valid meetingId";
+ErrorMessages.RMS_RECORDING_CREATE_FAILED = "Unable to create recording from meeting. Please try again.";
+ErrorMessages.RMS_RECORDING_ID_INVALID = "RMS response is missing a valid recordingId";
 ErrorMessages.EVENT_BUS_HANDLER_FAILED_PREFIX = "EventBus handler failed for event=";
 ErrorMessages.PARENT_BRIDGE_POST_MESSAGE_FAILED = "ParentBridge postMessage failed";
 ErrorMessages.JANUS_INITIALIZED = "Janus initialized";
@@ -1039,6 +1041,25 @@ class RmsClient {
             throw new Error(ErrorMessages.RMS_MEETING_ID_INVALID);
         }
         return meetingId;
+    }
+    async createRecording(groupId, meetingId) {
+        const body = {
+            to: groupId,
+            meetingId,
+            recordingMethod: 2,
+            recordingType: 1,
+            alwaysCreateNewRecording: true
+        };
+        const res = await this.http.request({
+            method: "POST",
+            path: "/rms/meetings/recordings",
+            body
+        });
+        const recordingId = Number(res.data?.recordingId);
+        if (!Number.isFinite(recordingId) || recordingId <= 0) {
+            throw new Error(ErrorMessages.RMS_RECORDING_ID_INVALID);
+        }
+        return recordingId;
     }
 }
 class Cookie {
@@ -5194,18 +5215,17 @@ class CallController {
         if (this.recording)
             return;
         this.currentRecordingId = recordingId;
-        const recordingIdRandom = Math.floor(100000 + Math.random() * 900000);
         this.plugin.send({
             message: {
                 request: "enable_recording",
                 record: true,
                 room: this.currentRoomId,
-                recordingId: recordingIdRandom,
+                recordingId,
                 participantId: this.activeJoinCfg?.participantId
             },
             success: () => {
                 this.recording = true;
-                Logger.setStatus(ErrorMessages.callRecordingStarted(recordingId));
+                Logger.setStatus(ErrorMessages.callRecordingStarted(String(recordingId)));
                 this.bus.emit("recording-changed", true);
             },
             error: (e) => {
@@ -5664,6 +5684,72 @@ class CallController {
         catch { }
     }
 }
+class RecordingController {
+    constructor(callController, canRecord) {
+        this.callController = callController;
+        this.canRecord = canRecord;
+        this.groupId = null;
+        this.meetingId = null;
+        this.createInFlight = false;
+    }
+    setMeetingContext(groupId, meetingId) {
+        this.groupId = groupId;
+        this.meetingId = meetingId;
+    }
+    clearMeetingContext() {
+        this.groupId = null;
+        this.meetingId = null;
+        this.createInFlight = false;
+    }
+    async start(source, renderedParticipantCount, isRecording) {
+        if (!this.canRecord) {
+            Logger.user("Recording blocked for user_type=customer");
+            return;
+        }
+        const requiredParticipants = APP_CONFIG.recording.autoStartParticipantThreshold;
+        if (renderedParticipantCount !== requiredParticipants) {
+            Logger.setStatus("Recording requires both participants on live video.");
+            Logger.user(`Recording blocked: rendered participants=${renderedParticipantCount}, required=${requiredParticipants}`);
+            return;
+        }
+        if (isRecording || this.createInFlight)
+            return;
+        const groupId = this.groupId;
+        const meetingId = this.meetingId;
+        if (!Number.isFinite(groupId) || !Number.isFinite(meetingId)) {
+            Logger.error(ErrorMessages.RMS_RECORDING_CREATE_FAILED, {
+                groupId,
+                meetingId
+            });
+            Logger.setStatus(ErrorMessages.RMS_RECORDING_CREATE_FAILED);
+            return;
+        }
+        this.createInFlight = true;
+        try {
+            const server = UrlConfig.getVcxServer().server;
+            const clientId = UrlConfig.getVcxServer().client_id;
+            const http = new HttpClient(server, clientId);
+            const rms = new RmsClient(http);
+            const recordingId = await rms.createRecording(groupId, meetingId);
+            Logger.user(`[rms] recording created groupId=${groupId} meetingId=${meetingId} recordingId=${recordingId}`);
+            Logger.user(`${source} start recording`);
+            this.callController.startRecording(recordingId);
+        }
+        catch (e) {
+            Logger.error(ErrorMessages.RMS_RECORDING_CREATE_FAILED, e);
+            Logger.setStatus(ErrorMessages.RMS_RECORDING_CREATE_FAILED);
+        }
+        finally {
+            this.createInFlight = false;
+        }
+    }
+    stop(source, isRecording) {
+        if (!isRecording)
+            return;
+        Logger.user(`${source} stop recording`);
+        this.callController.stopRecording();
+    }
+}
 // import {Dom} from "./Dom";
 // import {CallController} from "../managers/CallController";
 class UIController {
@@ -5723,7 +5809,6 @@ class UIController {
         this.ended = false;
         this.userType = this.resolveUserType();
         this.canRecord = this.userType === "agent";
-        this.folderPath = APP_CONFIG.recording.folderPath;
         // ✅ recording state
         this.recording = false;
         this.renderedParticipantCount = 0;
@@ -5740,6 +5825,7 @@ class UIController {
         const localVideo = this.localVideoEl;
         const remoteVideo = this.remoteVideoEl;
         this.controller = new CallController(this.bus, localVideo, remoteVideo);
+        this.recordingController = new RecordingController(this.controller, this.canRecord);
         this.applyRecordingAccess();
         this.bus.on("joined", j => {
             this.setJoinedState(j);
@@ -5898,7 +5984,7 @@ class UIController {
                     this.stopRecording("manual");
                 }
                 else {
-                    this.startRecording("manual");
+                    void this.startRecording("manual");
                 }
             };
         }
@@ -5921,44 +6007,18 @@ class UIController {
     syncAutoRecordingByParticipants(participantCount) {
         const shouldRecord = participantCount === 2;
         if (shouldRecord && !this.recording) {
-            this.startRecording("auto");
+            void this.startRecording("auto");
             return;
         }
         if (!shouldRecord && this.recording) {
             this.stopRecording("auto");
         }
     }
-    startRecording(source) {
-        if (!this.canRecord) {
-            Logger.user(`Recording blocked for user_type=${this.userType}`);
-            return;
-        }
-        if (this.renderedParticipantCount !== 2) {
-            Logger.setStatus("Recording requires both participants on live video.");
-            Logger.user(`Recording blocked: rendered participants=${this.renderedParticipantCount}, required=2`);
-            return;
-        }
-        if (this.recording)
-            return;
-        const rid = this.createRecordingId();
-        Logger.user(`${source} start recording`);
-        this.controller.startRecording(rid);
+    async startRecording(source) {
+        await this.recordingController.start(source, this.renderedParticipantCount, this.recording);
     }
     stopRecording(source) {
-        if (!this.recording)
-            return;
-        Logger.user(`${source} stop recording`);
-        this.controller.stopRecording();
-    }
-    createRecordingId() {
-        const participantId = this.lastCfg?.participantId;
-        const recordingId = Number.isFinite(participantId)
-            ? Number(participantId)
-            : Math.floor(100000 + Math.random() * 900000);
-        // Build Janus recording basename
-        const rid = `${this.folderPath}/${recordingId}/rec_${Date.now()}`;
-        Logger.user(`Recording generated -> id=${recordingId}, rid=${rid}`);
-        return rid;
+        this.recordingController.stop(source, this.recording);
     }
     updateRecordUI() {
         if (!this.btnRecord)
@@ -6000,6 +6060,7 @@ class UIController {
         }
         const joinSeq = ++this.autoJoinSeq;
         this.lastGroupId = req.groupId;
+        this.recordingController.clearMeetingContext();
         this.recording = false;
         this.renderedParticipantCount = 0;
         this.lastRemoteVideoTime = 0;
@@ -6023,6 +6084,7 @@ class UIController {
                 participantId: req.participantId
             };
             this.lastCfg = cfg;
+            this.recordingController.setMeetingContext(req.groupId, cfg.roomId);
             this.renderCallMeta(cfg.display, cfg.participantId, cfg.roomId);
             this.updateDebugState({
                 groupId: req.groupId,
@@ -6551,7 +6613,7 @@ class UIController {
                     break;
                 // ✅ recording events
                 case "START_RECORDING":
-                    this.startRecording("manual");
+                    void this.startRecording("manual");
                     break;
                 case "STOP_RECORDING":
                     this.stopRecording("manual");

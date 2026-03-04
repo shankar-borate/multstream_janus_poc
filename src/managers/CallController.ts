@@ -24,7 +24,7 @@ class CallController {
 
   // Ã¢Å“â€¦ CLEAN recording state
   private recording = false;
-  private currentRecordingId: string | null = null;
+  private currentRecordingId: number | null = null;
   private currentRoomId: number | null = null;
   private participantSyncTimer: number | null = null;
   private participantSyncInFlight = false;
@@ -1381,24 +1381,23 @@ class CallController {
     if (!this.isLeaving) this.leave();
   }
 
-  public startRecording(recordingId: string, attempt: number = 1) {
+  public startRecording(recordingId: number, attempt: number = 1) {
 
     if (!this.plugin || !this.joinedRoom) return;
     if (this.recording) return;
 
     this.currentRecordingId = recordingId;
-    const recordingIdRandom = Math.floor(100000 + Math.random() * 900000);
     this.plugin.send({
     message: {
           request: "enable_recording",
           record: true,
           room: this.currentRoomId,
-          recordingId: recordingIdRandom,
+          recordingId,
           participantId: this.activeJoinCfg?.participantId
       },
       success: () => {
         this.recording = true;
-        Logger.setStatus(ErrorMessages.callRecordingStarted(recordingId));
+        Logger.setStatus(ErrorMessages.callRecordingStarted(String(recordingId)));
         this.bus.emit("recording-changed", true);
       },
       error: (e: any) => {

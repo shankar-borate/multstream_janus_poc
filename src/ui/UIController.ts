@@ -14,6 +14,7 @@ class UIController {
   private logger: Logger;
   private bus = new EventBus();
   private controller: CallController;
+  private recordingController: RecordingController;
 
   private btnMute = document.getElementById("btnMute") as HTMLButtonElement;
   private btnUnpublish = document.getElementById("btnUnpublish") as HTMLButtonElement;
@@ -67,7 +68,6 @@ class UIController {
   private ended = false;
   private readonly userType = this.resolveUserType();
   private readonly canRecord = this.userType === "agent";
-  private folderPath:string = APP_CONFIG.recording.folderPath;
 
   // ✅ recording state
   private recording = false;
@@ -93,6 +93,7 @@ class UIController {
     const remoteVideo = this.remoteVideoEl;
 
     this.controller = new CallController(this.bus, localVideo, remoteVideo);
+    this.recordingController = new RecordingController(this.controller, this.canRecord);
     this.applyRecordingAccess();
 
     this.bus.on<boolean>("joined", j=>{
@@ -257,7 +258,7 @@ class UIController {
         if (this.recording) {
           this.stopRecording("manual");
         } else {
-          this.startRecording("manual");
+          void this.startRecording("manual");
         }
       };
     }
@@ -283,7 +284,7 @@ class UIController {
     const shouldRecord = participantCount === 2;
 
     if (shouldRecord && !this.recording) {
-      this.startRecording("auto");
+      void this.startRecording("auto");
       return;
     }
 
@@ -292,38 +293,12 @@ class UIController {
     }
   }
 
-  private startRecording(source: "manual" | "auto") {
-    if (!this.canRecord) {
-      Logger.user(`Recording blocked for user_type=${this.userType}`);
-      return;
-    }
-    if (this.renderedParticipantCount !== 2) {
-      Logger.setStatus("Recording requires both participants on live video.");
-      Logger.user(`Recording blocked: rendered participants=${this.renderedParticipantCount}, required=2`);
-      return;
-    }
-    if (this.recording) return;
-
-    const rid = this.createRecordingId();
-    Logger.user(`${source} start recording`);
-    this.controller.startRecording(rid);
+  private async startRecording(source: "manual" | "auto") {
+    await this.recordingController.start(source, this.renderedParticipantCount, this.recording);
   }
 
   private stopRecording(source: "manual" | "auto") {
-    if (!this.recording) return;
-
-    Logger.user(`${source} stop recording`);
-    this.controller.stopRecording();
-  }
-  private createRecordingId(): string{
-    const participantId = this.lastCfg?.participantId;
-    const recordingId = Number.isFinite(participantId as number)
-      ? Number(participantId)
-      : Math.floor(100000 + Math.random() * 900000);
-    // Build Janus recording basename
-    const rid = `${this.folderPath}/${recordingId}/rec_${Date.now()}`;
-    Logger.user(`Recording generated -> id=${recordingId}, rid=${rid}`);
-    return rid;
+    this.recordingController.stop(source, this.recording);
   }
 
   private updateRecordUI() {
@@ -366,6 +341,7 @@ class UIController {
     }
     const joinSeq = ++this.autoJoinSeq;
     this.lastGroupId = req.groupId;
+    this.recordingController.clearMeetingContext();
     this.recording = false;
     this.renderedParticipantCount = 0;
     this.lastRemoteVideoTime = 0;
@@ -392,6 +368,7 @@ class UIController {
         participantId: req.participantId
       };
       this.lastCfg = cfg;
+      this.recordingController.setMeetingContext(req.groupId, cfg.roomId);
       this.renderCallMeta(cfg.display, cfg.participantId, cfg.roomId);
       this.updateDebugState({
         groupId: req.groupId,
@@ -1013,7 +990,7 @@ class UIController {
 
         // ✅ recording events
         case "START_RECORDING":
-          this.startRecording("manual");
+          void this.startRecording("manual");
           break;
 
         case "STOP_RECORDING":

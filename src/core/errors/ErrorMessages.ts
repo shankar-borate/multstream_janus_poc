@@ -6,6 +6,8 @@ class ErrorMessages {
   static readonly URL_PARTICIPANT_ID_INVALID = "Invalid query param: participantId must be a positive number";
   static readonly RMS_MEETING_CREATE_FAILED = "Unable to create meeting from group. Please try again.";
   static readonly RMS_MEETING_ID_INVALID = "RMS response is missing a valid meetingId";
+  static readonly RMS_RECORDING_CREATE_FAILED = "Unable to create recording from meeting. Please try again.";
+  static readonly RMS_RECORDING_ID_INVALID = "RMS response is missing a valid recordingId";
 
   static domElementNotFound(id: string): string {
     return `[DOM] Element not found: #${id}`;
