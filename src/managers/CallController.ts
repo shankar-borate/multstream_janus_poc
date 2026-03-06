@@ -74,9 +74,15 @@ class CallController {
         return null;
       }
     });
-    this.connectionEngine = new ConnectionStatusEngine((status: ConnectionStatusView) => {
-      this.bus.emit("connection-status", status);
-    });
+    this.connectionEngine = new ConnectionStatusEngine(
+      (status: ConnectionStatusView) => {
+        this.bus.emit("connection-status", status);
+      },
+      (reason: string) => {
+        if (this.isLeaving) return;
+        this.schedulePeerRetry(reason);
+      }
+    );
     this.adaptiveNetwork = new AdaptiveNetworkManager(this.userType, {
       onRiskSignal: (signal: NetworkRiskSignal) => {
         this.bus.emit("network-risk", signal);
@@ -127,7 +133,21 @@ class CallController {
     return raw.trim().toLowerCase() === "agent" ? "agent" : "customer";
   }
 
+  private hasActiveOrJoiningSession(): boolean {
+    return this.joinedRoom ||
+      !!this.plugin ||
+      !!this.gateway.getJanus() ||
+      this.remoteFeeds !== null ||
+      this.publisherPc !== null ||
+      this.retryTimer !== null ||
+      this.activeJoinCfg !== null;
+  }
+
   async join(cfg: JoinConfig, opts?: { internalRetry?: boolean }) {
+    if (!opts?.internalRetry && this.hasActiveOrJoiningSession()) {
+      Logger.warn("[call] join requested while previous session is active/joining. Restarting session first.");
+      this.leave();
+    }
     if (!opts?.internalRetry || !this.callId) {
       this.callId = Correlation.newId();
     }
@@ -182,7 +202,10 @@ class CallController {
     } catch (e: any) {
       const requestId = String(e?.requestId || "n/a");
       Logger.error(ErrorMessages.callJoinFailed(this.callId ?? "n/a", cfg.roomId, requestId), e);
-      this.scheduleServerRetry(ErrorMessages.callJoinError(e?.message || e));
+      ApiErrorUtils.handle(e);
+      if (!ApiErrorUtils.isUnauthorized(e)) {
+        this.connectionEngine.setFatalError(ErrorMessages.INTERNAL_SERVER_ERROR_RETRY_LATER);
+      }
     }
   }
 
@@ -574,10 +597,8 @@ class CallController {
               return;
             }
             if (this.remoteFeeds && this.roster.has(feedId) && feedId !== this.selfId) {
-              Logger.warn(`Remote feed ${feedId} cleaned up. Scheduling re-subscribe.`);
-              window.setTimeout(() => {
-                this.remoteFeeds?.addFeed(feedId);
-              }, APP_CONFIG.call.remoteFeedRetryDelayMs);
+              Logger.warn(`Remote feed ${feedId} cleaned up. Scheduling bounded re-subscribe.`);
+              this.remoteFeeds.requestReattach(feedId, "Remote feed cleanup");
             }
           },
           onRemoteFeedRetryExhausted: (feedId: number, attempts: number) => {
@@ -968,7 +989,9 @@ class CallController {
         this.connectionEngine.registerPublisherPc(pc);
         this.tuneVideoSenderBitrate(pc, videoCfg.bitrate_bps, videoCfg.max_framerate);
         this.startAdaptiveNetworkMonitor(pc);
+        const isCurrentPublisherPc = () => this.publisherPc === pc && !this.isLeaving;
         const emit = () => {
+          if (!isCurrentPublisherPc()) return;
           const payload = {
             ice: pc.iceConnectionState,
             signaling: pc.signalingState,
@@ -985,11 +1008,13 @@ class CallController {
         emit();
 
         (pc as any).onicecandidateerror = (evt: RTCPeerConnectionIceErrorEvent) => {
+          if (!isCurrentPublisherPc()) return;
           const parsed = this.parseIceCandidateError(evt);
           this.rememberPublisherTransportError(parsed.reason, false, evt);
         };
 
         pc.oniceconnectionstatechange = () => {
+          if (!isCurrentPublisherPc()) return;
           console.log("VCX_ICE=" + pc.iceConnectionState);
           emit();
           if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
@@ -1005,12 +1030,14 @@ class CallController {
         };
 
         pc.onsignalingstatechange = () => {
+          if (!isCurrentPublisherPc()) return;
           console.log("VCX_SIGNALING=" + pc.signalingState);
           emit();
         };
 
         // connectionState exists on modern browsers; not always present everywhere
         (pc as any).onconnectionstatechange = () => {
+          if (!isCurrentPublisherPc()) return;
           console.log("VCX_CONNECTION=" + ((pc as any).connectionState ?? "n/a"));
           emit();
           const connectionState = String((pc as any).connectionState ?? "");
@@ -1031,6 +1058,7 @@ class CallController {
         };
 
         pc.onicegatheringstatechange = () => {
+          if (!isCurrentPublisherPc()) return;
           console.log("VCX_GATHERING=" + pc.iceGatheringState);
           emit();
         };

@@ -60,8 +60,7 @@ class RecordingController {
     const groupId = this.groupId;
     const meetingId = this.meetingId;
     if (!Number.isFinite(groupId as number) || !Number.isFinite(meetingId as number)) {
-      Logger.error(ErrorMessages.RMS_RECORDING_CREATE_FAILED, { groupId, meetingId });
-      Logger.setStatus(ErrorMessages.RMS_RECORDING_CREATE_FAILED);
+      ApiErrorUtils.handle({ message: "recording context missing", details: { groupId, meetingId } });
       return;
     }
 
@@ -77,8 +76,7 @@ class RecordingController {
       Logger.user(`${source} start recording`);
       this.enableRecording(recordingId, 1);
     } catch (e: any) {
-      Logger.error(ErrorMessages.RMS_RECORDING_CREATE_FAILED, e);
-      Logger.setStatus(ErrorMessages.RMS_RECORDING_CREATE_FAILED);
+      ApiErrorUtils.handle(e);
     } finally {
       this.createInFlight = false;
     }

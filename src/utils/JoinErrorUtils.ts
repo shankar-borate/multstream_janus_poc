@@ -28,3 +28,29 @@ class JoinErrorUtils {
     return lower.includes("no such room") || lower.includes("room not found");
   }
 }
+
+class ApiErrorUtils {
+  static isUnauthorized(err: unknown): boolean {
+    const status = Number((err as any)?.status);
+    if (status === 401) return true;
+    const message = String((err as any)?.message || "").toLowerCase();
+    return message.includes("http 401") || message.includes("unauthor");
+  }
+
+  static resolveLoginUrl(): string {
+    const qs = new URLSearchParams(window.location.search);
+    const loginUrl =
+      qs.get("loginUrl") ||
+      qs.get("login_url") ||
+      "";
+    return loginUrl.trim() || "/login";
+  }
+
+  static handle(err: unknown): void {
+    if (this.isUnauthorized(err)) {
+      window.location.assign(this.resolveLoginUrl());
+      return;
+    }
+    Logger.error(ErrorMessages.INTERNAL_SERVER_ERROR_RETRY_LATER, err);
+  }
+}

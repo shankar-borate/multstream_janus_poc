@@ -88,6 +88,11 @@ class RemoteFeedManager {
     this.retryTimers.set(feedId, t);
   }
 
+  requestReattach(feedId: number, reason: string) {
+    if (this.feeds.has(feedId) || this.pendingFeedAttach.has(feedId)) return;
+    this.scheduleReattach(feedId, reason);
+  }
+
   addFeed(feedId:number){
     if(this.feeds.has(feedId) || this.pendingFeedAttach.has(feedId)) return;
     const blockedUntil = this.retryBlockedUntil.get(feedId) ?? 0;

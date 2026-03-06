@@ -399,8 +399,7 @@ class UIController {
       this.bridge.emit({ type: "CALL_STARTED" });
     } catch (e: any) {
       if (joinSeq !== this.autoJoinSeq) return;
-      Logger.error(ErrorMessages.RMS_MEETING_CREATE_FAILED, e);
-      Logger.setStatus(ErrorMessages.RMS_MEETING_CREATE_FAILED);
+      ApiErrorUtils.handle(e);
     }
   }
 
@@ -496,7 +495,7 @@ class UIController {
   private renderConnectionStatus(status: ConnectionStatusView) {
     const resolved = this.resolveVisibleConnectionStatus(status);
     this.connectionStatus = resolved;
-    this.logger.setStatus(resolved.primaryText);
+    this.logger.setStatusBySeverity(resolved.primaryText, resolved.severity);
     this.logger.setInfo(resolved.secondaryText);
     this.applyConnectionOverlays();
     this.renderRemoteFallback();
@@ -698,12 +697,33 @@ class UIController {
 
   private renderMediaIo(stats: MediaIoSnapshot) {
     const prev = this.prevMediaBytes;
-    const audioMinDeltaBytes = 64;
-    const videoMinDeltaBytes = 512;
-    const aSent = this.formatFlowBytes(stats.bytes.audioSent, prev?.audioSent ?? null, audioMinDeltaBytes, this.audioMuted);
-    const aRecv = this.formatFlowBytes(stats.bytes.audioReceived, prev?.audioReceived ?? null, audioMinDeltaBytes, false);
-    const vSent = this.formatFlowBytes(stats.bytes.videoSent, prev?.videoSent ?? null, videoMinDeltaBytes, this.videoMuted);
-    const vRecv = this.formatFlowBytes(stats.bytes.videoReceived, prev?.videoReceived ?? null, videoMinDeltaBytes, false);
+    const audioMinDeltaBytesSent = 64;
+    const videoMinDeltaBytesSent = 512;
+    const audioMinDeltaBytesRecv = APP_CONFIG.mediaTelemetry.minRecvAudioBytesPerSample;
+    const videoMinDeltaBytesRecv = APP_CONFIG.mediaTelemetry.minRecvVideoBytesPerSample;
+    const audioRecvBlocked =
+      stats.matrix.localReceivingYourAudio === "No" ||
+      stats.matrix.localReceivingYourAudio === "Not possible" ||
+      stats.matrix.localAudioPlaybackStatus === "Stalled";
+    const videoRecvBlocked =
+      stats.matrix.localReceivingYourVideo === "No" ||
+      stats.matrix.localReceivingYourVideo === "Not possible" ||
+      stats.matrix.localVideoPlaybackStatus === "Stalled";
+
+    const aSent = this.formatFlowBytes(stats.bytes.audioSent, prev?.audioSent ?? null, audioMinDeltaBytesSent, this.audioMuted);
+    const aRecv = this.formatFlowBytes(
+      stats.bytes.audioReceived,
+      prev?.audioReceived ?? null,
+      audioMinDeltaBytesRecv,
+      audioRecvBlocked
+    );
+    const vSent = this.formatFlowBytes(stats.bytes.videoSent, prev?.videoSent ?? null, videoMinDeltaBytesSent, this.videoMuted);
+    const vRecv = this.formatFlowBytes(
+      stats.bytes.videoReceived,
+      prev?.videoReceived ?? null,
+      videoMinDeltaBytesRecv,
+      videoRecvBlocked
+    );
     this.renderFlowValue(this.diagAudioSent, aSent);
     this.renderFlowValue(this.diagAudioRecv, aRecv);
     this.renderFlowValue(this.diagVideoSent, vSent);

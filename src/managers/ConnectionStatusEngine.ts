@@ -49,8 +49,12 @@ class ConnectionStatusEngine {
   private serverRetryReason = "";
   private peerRetryReason = "";
   private failedReason = "";
+  private disconnectedRetryRaised = false;
 
-  constructor(private onUpdate?: (status: ConnectionStatusView) => void) {
+  constructor(
+    private onUpdate?: (status: ConnectionStatusView) => void,
+    private onPeerRetryNeeded?: (reason: string) => void
+  ) {
     this.transition("INIT", true);
     this.tickTimer = window.setInterval(() => this.tick(), APP_CONFIG.connectionStatus.tickIntervalMs);
   }
@@ -78,6 +82,7 @@ class ConnectionStatusEngine {
     this.relayDetectedAt = null;
     this.candidateSwitchAt = null;
     this.disconnectedSince = null;
+    this.disconnectedRetryRaised = false;
     this.remoteNegotiationReady = false;
     this.selectedPairId = null;
     this.subscriberPcs.clear();
@@ -152,6 +157,7 @@ class ConnectionStatusEngine {
     this.relayDetectedAt = null;
     this.candidateSwitchAt = null;
     this.disconnectedSince = null;
+    this.disconnectedRetryRaised = false;
     this.remoteNegotiationReady = false;
     this.selectedPairId = null;
     this.publisherPc = null;
@@ -480,11 +486,26 @@ class ConnectionStatusEngine {
       Array.from(this.subscriberConnStates.values()).some(s => s === "disconnected");
 
     if (anyDisconnected) {
-      if (this.disconnectedSince === null) this.disconnectedSince = now;
-      this.transition("DEGRADED");
+      if (this.disconnectedSince === null) {
+        this.disconnectedSince = now;
+        this.disconnectedRetryRaised = false;
+      }
+      const disconnectedMs = now - this.disconnectedSince;
+      if (disconnectedMs >= APP_CONFIG.connectionStatus.disconnectedRetryMs) {
+        if (!this.disconnectedRetryRaised) {
+          this.disconnectedRetryRaised = true;
+          this.onPeerRetryNeeded?.(this.formatFailureReason(
+            `Peer disconnected for ${disconnectedMs}ms (threshold=${APP_CONFIG.connectionStatus.disconnectedRetryMs}ms)`
+          ));
+        }
+        this.transition("RETRYING");
+      } else {
+        this.transition("DEGRADED");
+      }
       return;
     }
     this.disconnectedSince = null;
+    this.disconnectedRetryRaised = false;
 
     if (hasRemote && !hasLocalVideo) {
       this.transition("NEGOTIATING");

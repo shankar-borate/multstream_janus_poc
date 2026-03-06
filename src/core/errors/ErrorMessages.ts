@@ -11,6 +11,7 @@ class ErrorMessages {
   static readonly RMS_MEETING_ID_INVALID = "RMS response is missing a valid meetingId";
   static readonly RMS_RECORDING_CREATE_FAILED = "Unable to create recording from meeting. Please try again.";
   static readonly RMS_RECORDING_ID_INVALID = "RMS response is missing a valid recordingId";
+  static readonly INTERNAL_SERVER_ERROR_RETRY_LATER = "Internal server error, please try after some time";
 
   static domElementNotFound(id: string): string {
     return `[DOM] Element not found: #${id}`;

@@ -104,7 +104,7 @@ const APP_CONFIG = {
     },
     ims: {
         mediaConstraintsPath: "/ims/users/media-constraints",
-        useMockMediaConstraints: true,
+        useMockMediaConstraints: false,
         mockMediaConstraintsResponse: {
             name: "VideoConstraint",
             value: JSON.stringify(IMS_MEDIA_CONSTRAINTS_MOCK_PAYLOAD)
@@ -241,6 +241,11 @@ const APP_CONFIG = {
         enablePeerNetworkTelemetry: true,
         networkTelemetryIntervalMs: 5000,
         stallWindowMs: 3500,
+        // Ignore tiny recv deltas that can still appear while remote media is muted.
+        minRecvAudioBytesPerSample: 2048,
+        minRecvAudioPacketsPerSample: 4,
+        minRecvVideoBytesPerSample: 4096,
+        minRecvVideoPacketsPerSample: 2,
         peerTelemetryFreshnessMs: 6000,
         enablePeerTelemetry: true
     },
@@ -413,6 +418,7 @@ ErrorMessages.RMS_MEETING_CREATE_FAILED = "Unable to create meeting from group. 
 ErrorMessages.RMS_MEETING_ID_INVALID = "RMS response is missing a valid meetingId";
 ErrorMessages.RMS_RECORDING_CREATE_FAILED = "Unable to create recording from meeting. Please try again.";
 ErrorMessages.RMS_RECORDING_ID_INVALID = "RMS response is missing a valid recordingId";
+ErrorMessages.INTERNAL_SERVER_ERROR_RETRY_LATER = "Internal server error, please try after some time";
 ErrorMessages.EVENT_BUS_HANDLER_FAILED_PREFIX = "EventBus handler failed for event=";
 ErrorMessages.PARENT_BRIDGE_POST_MESSAGE_FAILED = "ParentBridge postMessage failed";
 ErrorMessages.JANUS_INITIALIZED = "Janus initialized";
@@ -547,6 +553,24 @@ class Logger {
         }
         Logger.user(msg);
     }
+    setWarnStatus(msg) {
+        if (this.statusEl) {
+            this.statusEl.textContent = msg;
+            this.statusEl.style.color = Logger.STATUS_COLOR_WARN;
+        }
+        Logger.user(msg);
+    }
+    setStatusBySeverity(msg, severity) {
+        if (severity === "error") {
+            this.setErrorStatus(msg);
+            return;
+        }
+        if (severity === "warn") {
+            this.setWarnStatus(msg);
+            return;
+        }
+        this.setStatus(msg);
+    }
     // Static UI updates (backward compatible)
     static setStatus(msg) {
         if (Logger.instance) {
@@ -562,11 +586,29 @@ class Logger {
         }
         Logger.flow(msg);
     }
+    static setStatusBySeverity(msg, severity) {
+        if (Logger.instance) {
+            Logger.instance.setStatusBySeverity(msg, severity);
+            return;
+        }
+        if (severity === "error") {
+            Logger.error(msg);
+            return;
+        }
+        if (severity === "warn") {
+            Logger.warn(msg);
+            return;
+        }
+        Logger.setStatus(msg);
+    }
     static info(msg) { Logger.setInfo(msg); }
     static warn(msg) {
         if (!Logger.canLog("warn"))
             return;
         console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#f59e0b;font-weight:bold");
+        if (Logger.instance) {
+            Logger.instance.setWarnStatus(msg);
+        }
     }
     static error(msg, err) {
         if (!Logger.canLog("error"))
@@ -604,6 +646,7 @@ class Logger {
 }
 Logger.instance = null;
 Logger.STATUS_COLOR_DEFAULT = "#111827";
+Logger.STATUS_COLOR_WARN = "#d97706";
 Logger.STATUS_COLOR_ERROR = "#dc2626";
 Logger.userName = "User";
 Logger.remoteName = "Remote";
@@ -1154,6 +1197,29 @@ class JoinErrorUtils {
         return lower.includes("no such room") || lower.includes("room not found");
     }
 }
+class ApiErrorUtils {
+    static isUnauthorized(err) {
+        const status = Number(err?.status);
+        if (status === 401)
+            return true;
+        const message = String(err?.message || "").toLowerCase();
+        return message.includes("http 401") || message.includes("unauthor");
+    }
+    static resolveLoginUrl() {
+        const qs = new URLSearchParams(window.location.search);
+        const loginUrl = qs.get("loginUrl") ||
+            qs.get("login_url") ||
+            "";
+        return loginUrl.trim() || "/login";
+    }
+    static handle(err) {
+        if (this.isUnauthorized(err)) {
+            window.location.assign(this.resolveLoginUrl());
+            return;
+        }
+        Logger.error(ErrorMessages.INTERNAL_SERVER_ERROR_RETRY_LATER, err);
+    }
+}
 class MediaErrorUtils {
     static getErrorName(err) {
         const anyErr = err;
@@ -1309,6 +1375,7 @@ class MediaManager {
     constructor() {
         this.localPreviewStream = null;
         this.remotePlayPromise = null;
+        this.remoteGestureUnmuteBound = false;
     }
     setLocalTrack(video, track) {
         if (!this.localPreviewStream)
@@ -1325,6 +1392,8 @@ class MediaManager {
     }
     setRemoteTrack(video, track) {
         const ms = video.srcObject || new MediaStream();
+        video.autoplay = true;
+        video.playsInline = true;
         // Keep one active track per kind for this single remote renderer.
         ms.getTracks().forEach(t => {
             if (t.kind === track.kind && t.id !== track.id) {
@@ -1341,20 +1410,7 @@ class MediaManager {
         if (video.srcObject !== ms) {
             video.srcObject = ms;
         }
-        if (!video.paused)
-            return;
-        if (this.remotePlayPromise)
-            return;
-        this.remotePlayPromise = video.play()
-            .catch((e) => {
-            // Normal when track/srcObject is reloaded during renegotiation.
-            if (e?.name === "AbortError")
-                return;
-            Logger.error(ErrorMessages.MEDIA_REMOTE_VIDEO_PLAY_FAILED, e);
-        })
-            .finally(() => {
-            this.remotePlayPromise = null;
-        });
+        this.ensureRemotePlayback(video);
     }
     removeRemoteTrack(video, track) {
         const ms = video.srcObject;
@@ -1381,7 +1437,68 @@ class MediaManager {
         const ms = video.srcObject;
         if (ms)
             ms.getTracks().forEach(t => t.stop());
+        video.pause();
         video.srcObject = null;
+    }
+    ensureRemotePlayback(video) {
+        if (!video.paused)
+            return;
+        if (this.remotePlayPromise)
+            return;
+        const playNormal = video.play();
+        this.remotePlayPromise = playNormal;
+        playNormal
+            .catch((e) => {
+            // Normal when track/srcObject is reloaded during renegotiation.
+            if (e?.name === "AbortError")
+                return;
+            if (e?.name !== "NotAllowedError") {
+                Logger.error(ErrorMessages.MEDIA_REMOTE_VIDEO_PLAY_FAILED, e);
+                return;
+            }
+            Logger.warn("Remote autoplay blocked. Retrying muted playback.");
+            if (this.remotePlayPromise === playNormal) {
+                this.remotePlayPromise = null;
+            }
+            if (!video.paused || this.remotePlayPromise !== null)
+                return;
+            video.muted = true;
+            const playMuted = video.play();
+            this.remotePlayPromise = playMuted;
+            playMuted
+                .then(() => this.bindGestureUnmute(video))
+                .catch((inner) => {
+                if (inner?.name === "AbortError")
+                    return;
+                Logger.error(ErrorMessages.MEDIA_REMOTE_VIDEO_PLAY_FAILED, inner);
+            })
+                .finally(() => {
+                if (this.remotePlayPromise === playMuted) {
+                    this.remotePlayPromise = null;
+                }
+            });
+        })
+            .finally(() => {
+            if (this.remotePlayPromise === playNormal) {
+                this.remotePlayPromise = null;
+            }
+        });
+    }
+    bindGestureUnmute(video) {
+        if (this.remoteGestureUnmuteBound)
+            return;
+        this.remoteGestureUnmuteBound = true;
+        const tryUnmute = () => {
+            if (!video.srcObject || !video.muted)
+                return;
+            video.muted = false;
+            void video.play().catch(() => {
+                video.muted = true;
+            });
+        };
+        window.addEventListener("click", tryUnmute, { passive: true });
+        window.addEventListener("touchstart", tryUnmute, { passive: true });
+        window.addEventListener("keydown", tryUnmute);
     }
 }
 class VirtualBackgroundManager {
@@ -2539,8 +2656,9 @@ class AdaptiveNetworkManager {
     }
 }
 class ConnectionStatusEngine {
-    constructor(onUpdate) {
+    constructor(onUpdate, onPeerRetryNeeded) {
         this.onUpdate = onUpdate;
+        this.onPeerRetryNeeded = onPeerRetryNeeded;
         this.status = {
             owner: "SYSTEM",
             primaryText: "",
@@ -2587,6 +2705,7 @@ class ConnectionStatusEngine {
         this.serverRetryReason = "";
         this.peerRetryReason = "";
         this.failedReason = "";
+        this.disconnectedRetryRaised = false;
         this.transition("INIT", true);
         this.tickTimer = window.setInterval(() => this.tick(), APP_CONFIG.connectionStatus.tickIntervalMs);
     }
@@ -2611,6 +2730,7 @@ class ConnectionStatusEngine {
         this.relayDetectedAt = null;
         this.candidateSwitchAt = null;
         this.disconnectedSince = null;
+        this.disconnectedRetryRaised = false;
         this.remoteNegotiationReady = false;
         this.selectedPairId = null;
         this.subscriberPcs.clear();
@@ -2677,6 +2797,7 @@ class ConnectionStatusEngine {
         this.relayDetectedAt = null;
         this.candidateSwitchAt = null;
         this.disconnectedSince = null;
+        this.disconnectedRetryRaised = false;
         this.remoteNegotiationReady = false;
         this.selectedPairId = null;
         this.publisherPc = null;
@@ -2979,12 +3100,25 @@ class ConnectionStatusEngine {
         const anyDisconnected = this.localConnState === "disconnected" ||
             Array.from(this.subscriberConnStates.values()).some(s => s === "disconnected");
         if (anyDisconnected) {
-            if (this.disconnectedSince === null)
+            if (this.disconnectedSince === null) {
                 this.disconnectedSince = now;
-            this.transition("DEGRADED");
+                this.disconnectedRetryRaised = false;
+            }
+            const disconnectedMs = now - this.disconnectedSince;
+            if (disconnectedMs >= APP_CONFIG.connectionStatus.disconnectedRetryMs) {
+                if (!this.disconnectedRetryRaised) {
+                    this.disconnectedRetryRaised = true;
+                    this.onPeerRetryNeeded?.(this.formatFailureReason(`Peer disconnected for ${disconnectedMs}ms (threshold=${APP_CONFIG.connectionStatus.disconnectedRetryMs}ms)`));
+                }
+                this.transition("RETRYING");
+            }
+            else {
+                this.transition("DEGRADED");
+            }
             return;
         }
         this.disconnectedSince = null;
+        this.disconnectedRetryRaised = false;
         if (hasRemote && !hasLocalVideo) {
             this.transition("NEGOTIATING");
             return;
@@ -3285,6 +3419,8 @@ class CallMonitoringStat {
         const audioPacketsRecvDelta = Math.max(0, subscriberMetrics.audioPacketsReceived - this.inboundPacketsPrev.audio);
         const videoPacketsRecvDelta = Math.max(0, subscriberMetrics.videoPacketsReceived - this.inboundPacketsPrev.video);
         const videoFramesDecodedDelta = Math.max(0, subscriberMetrics.videoFramesDecoded - this.inboundVideoFramesDecodedPrev);
+        const audioMeaningfulProgress = this.isMeaningfulAudioReceiveProgress(audioRecvDelta, audioPacketsRecvDelta);
+        const videoMeaningfulProgress = this.isMeaningfulVideoReceiveProgress(videoRecvDelta, videoPacketsRecvDelta, videoFramesDecodedDelta);
         this.outboundPrev = { audio: publisherMetrics.audioBytesSent, video: publisherMetrics.videoBytesSent };
         this.outboundAudioPacketsPrev = publisherMetrics.audioPacketsSent;
         this.inboundPrev = { audio: subscriberMetrics.audioBytesReceived, video: subscriberMetrics.videoBytesReceived };
@@ -3360,16 +3496,16 @@ class CallMonitoringStat {
             audioPackets: publisherMetrics.remoteInboundAudioPacketsReceived ?? this.remoteInboundPrev.audioPackets,
             videoPackets: publisherMetrics.remoteInboundVideoPacketsReceived ?? this.remoteInboundPrev.videoPackets
         };
-        if (videoRecvDelta > 0 || videoPacketsRecvDelta > 0 || videoFramesDecodedDelta > 0) {
+        if (videoMeaningfulProgress) {
             this.localReceiveGrowthAt.video = now;
         }
-        if (audioRecvDelta > 0 || audioPacketsRecvDelta > 0) {
+        if (audioMeaningfulProgress) {
             this.localReceiveGrowthAt.audio = now;
         }
         const localReceivingVideo = this.deriveLocalReceiveStatus(remotePresent, this.localReceiveGrowthAt.video, now, inWarmup);
         const localReceivingAudio = this.deriveLocalReceiveStatus(remotePresent, this.localReceiveGrowthAt.audio, now, inWarmup);
-        const localVideoPlaybackStatus = this.deriveLocalVideoPlaybackStatus(now, remotePresent, inWarmup, videoRecvDelta, videoPacketsRecvDelta, videoFramesDecodedDelta, subscriberMetrics.hasVideoTrack);
-        const localAudioPlaybackStatus = this.deriveLocalAudioPlaybackStatus(now, audioRecvDelta, audioPacketsRecvDelta, subscriberMetrics.hasAudioTrack, remotePresent, inWarmup);
+        const localVideoPlaybackStatus = this.deriveLocalVideoPlaybackStatus(now, remotePresent, inWarmup, videoMeaningfulProgress, subscriberMetrics.hasVideoTrack);
+        const localAudioPlaybackStatus = this.deriveLocalAudioPlaybackStatus(now, audioMeaningfulProgress, subscriberMetrics.hasAudioTrack, remotePresent, inWarmup);
         const peerTelemetry = this.callbacks.getPeerTelemetry(now);
         const remoteAudioPlaybackStatus = peerTelemetry?.audioPlaybackStatus ?? (remotePresent ? "Pending" : "Not possible");
         const remoteVideoPlaybackStatus = peerTelemetry?.videoPlaybackStatus ?? (remotePresent ? "Pending" : "Not possible");
@@ -3569,21 +3705,18 @@ class CallMonitoringStat {
             return "Pending";
         return "No";
     }
-    deriveLocalVideoPlaybackStatus(now, remotePresent, inWarmup, videoRecvDelta, videoPacketsRecvDelta, videoFramesDecodedDelta, hasVideoTrack) {
+    deriveLocalVideoPlaybackStatus(now, remotePresent, inWarmup, hasMeaningfulProgress, hasVideoTrack) {
         if (!remotePresent)
             return "Not possible";
         if (!hasVideoTrack)
             return inWarmup ? "Pending" : "Not possible";
-        const hasTransportProgress = videoRecvDelta > 0 ||
-            videoPacketsRecvDelta > 0 ||
-            videoFramesDecodedDelta > 0;
         const currentTime = Number.isFinite(this.remoteVideo.currentTime) ? this.remoteVideo.currentTime : 0;
         if (currentTime > this.lastRemoteVideoTime + 0.03) {
             this.lastRemoteVideoTime = currentTime;
             this.remoteVideoPlaybackAt = now;
             return "Active";
         }
-        if (hasTransportProgress) {
+        if (hasMeaningfulProgress) {
             this.remoteVideoPlaybackAt = now;
             return "Active";
         }
@@ -3599,12 +3732,12 @@ class CallMonitoringStat {
         }
         return "Stalled";
     }
-    deriveLocalAudioPlaybackStatus(now, audioRecvDelta, audioPacketsRecvDelta, hasAudioTrack, remotePresent, inWarmup) {
+    deriveLocalAudioPlaybackStatus(now, hasMeaningfulProgress, hasAudioTrack, remotePresent, inWarmup) {
         if (!remotePresent)
             return "Not possible";
         if (!hasAudioTrack)
             return inWarmup ? "Pending" : "Not possible";
-        if (audioRecvDelta > 0 || audioPacketsRecvDelta > 0) {
+        if (hasMeaningfulProgress) {
             this.localAudioPlaybackAt = now;
             return "Active";
         }
@@ -3615,6 +3748,15 @@ class CallMonitoringStat {
             return "Active";
         }
         return "Stalled";
+    }
+    isMeaningfulAudioReceiveProgress(audioRecvDelta, audioPacketsRecvDelta) {
+        return audioRecvDelta >= APP_CONFIG.mediaTelemetry.minRecvAudioBytesPerSample ||
+            audioPacketsRecvDelta >= APP_CONFIG.mediaTelemetry.minRecvAudioPacketsPerSample;
+    }
+    isMeaningfulVideoReceiveProgress(videoRecvDelta, videoPacketsRecvDelta, videoFramesDecodedDelta) {
+        return videoFramesDecodedDelta > 0 ||
+            videoRecvDelta >= APP_CONFIG.mediaTelemetry.minRecvVideoBytesPerSample ||
+            videoPacketsRecvDelta >= APP_CONFIG.mediaTelemetry.minRecvVideoPacketsPerSample;
     }
 }
 class JanusGateway {
@@ -3808,6 +3950,11 @@ class RemoteFeedManager {
             this.addFeed(feedId);
         }, delayMs);
         this.retryTimers.set(feedId, t);
+    }
+    requestReattach(feedId, reason) {
+        if (this.feeds.has(feedId) || this.pendingFeedAttach.has(feedId))
+            return;
+        this.scheduleReattach(feedId, reason);
     }
     addFeed(feedId) {
         if (this.feeds.has(feedId) || this.pendingFeedAttach.has(feedId))
@@ -4052,8 +4199,7 @@ class RecordingController {
         const groupId = this.groupId;
         const meetingId = this.meetingId;
         if (!Number.isFinite(groupId) || !Number.isFinite(meetingId)) {
-            Logger.error(ErrorMessages.RMS_RECORDING_CREATE_FAILED, { groupId, meetingId });
-            Logger.setStatus(ErrorMessages.RMS_RECORDING_CREATE_FAILED);
+            ApiErrorUtils.handle({ message: "recording context missing", details: { groupId, meetingId } });
             return;
         }
         this.createInFlight = true;
@@ -4067,8 +4213,7 @@ class RecordingController {
             this.enableRecording(recordingId, 1);
         }
         catch (e) {
-            Logger.error(ErrorMessages.RMS_RECORDING_CREATE_FAILED, e);
-            Logger.setStatus(ErrorMessages.RMS_RECORDING_CREATE_FAILED);
+            ApiErrorUtils.handle(e);
         }
         finally {
             this.createInFlight = false;
@@ -4233,6 +4378,10 @@ class CallController {
         });
         this.connectionEngine = new ConnectionStatusEngine((status) => {
             this.bus.emit("connection-status", status);
+        }, (reason) => {
+            if (this.isLeaving)
+                return;
+            this.schedulePeerRetry(reason);
         });
         this.adaptiveNetwork = new AdaptiveNetworkManager(this.userType, {
             onRiskSignal: (signal) => {
@@ -4281,7 +4430,20 @@ class CallController {
             "";
         return raw.trim().toLowerCase() === "agent" ? "agent" : "customer";
     }
+    hasActiveOrJoiningSession() {
+        return this.joinedRoom ||
+            !!this.plugin ||
+            !!this.gateway.getJanus() ||
+            this.remoteFeeds !== null ||
+            this.publisherPc !== null ||
+            this.retryTimer !== null ||
+            this.activeJoinCfg !== null;
+    }
     async join(cfg, opts) {
+        if (!opts?.internalRetry && this.hasActiveOrJoiningSession()) {
+            Logger.warn("[call] join requested while previous session is active/joining. Restarting session first.");
+            this.leave();
+        }
         if (!opts?.internalRetry || !this.callId) {
             this.callId = Correlation.newId();
         }
@@ -4329,7 +4491,10 @@ class CallController {
         catch (e) {
             const requestId = String(e?.requestId || "n/a");
             Logger.error(ErrorMessages.callJoinFailed(this.callId ?? "n/a", cfg.roomId, requestId), e);
-            this.scheduleServerRetry(ErrorMessages.callJoinError(e?.message || e));
+            ApiErrorUtils.handle(e);
+            if (!ApiErrorUtils.isUnauthorized(e)) {
+                this.connectionEngine.setFatalError(ErrorMessages.INTERNAL_SERVER_ERROR_RETRY_LATER);
+            }
         }
     }
     clearRetryTimer() {
@@ -4660,10 +4825,8 @@ class CallController {
                         return;
                     }
                     if (this.remoteFeeds && this.roster.has(feedId) && feedId !== this.selfId) {
-                        Logger.warn(`Remote feed ${feedId} cleaned up. Scheduling re-subscribe.`);
-                        window.setTimeout(() => {
-                            this.remoteFeeds?.addFeed(feedId);
-                        }, APP_CONFIG.call.remoteFeedRetryDelayMs);
+                        Logger.warn(`Remote feed ${feedId} cleaned up. Scheduling bounded re-subscribe.`);
+                        this.remoteFeeds.requestReattach(feedId, "Remote feed cleanup");
                     }
                 },
                 onRemoteFeedRetryExhausted: (feedId, attempts) => {
@@ -5007,7 +5170,10 @@ class CallController {
                 this.connectionEngine.registerPublisherPc(pc);
                 this.tuneVideoSenderBitrate(pc, videoCfg.bitrate_bps, videoCfg.max_framerate);
                 this.startAdaptiveNetworkMonitor(pc);
+                const isCurrentPublisherPc = () => this.publisherPc === pc && !this.isLeaving;
                 const emit = () => {
+                    if (!isCurrentPublisherPc())
+                        return;
                     const payload = {
                         ice: pc.iceConnectionState,
                         signaling: pc.signalingState,
@@ -5021,10 +5187,14 @@ class CallController {
                 // emit once immediately
                 emit();
                 pc.onicecandidateerror = (evt) => {
+                    if (!isCurrentPublisherPc())
+                        return;
                     const parsed = this.parseIceCandidateError(evt);
                     this.rememberPublisherTransportError(parsed.reason, false, evt);
                 };
                 pc.oniceconnectionstatechange = () => {
+                    if (!isCurrentPublisherPc())
+                        return;
                     console.log("VCX_ICE=" + pc.iceConnectionState);
                     emit();
                     if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
@@ -5039,11 +5209,15 @@ class CallController {
                     }
                 };
                 pc.onsignalingstatechange = () => {
+                    if (!isCurrentPublisherPc())
+                        return;
                     console.log("VCX_SIGNALING=" + pc.signalingState);
                     emit();
                 };
                 // connectionState exists on modern browsers; not always present everywhere
                 pc.onconnectionstatechange = () => {
+                    if (!isCurrentPublisherPc())
+                        return;
                     console.log("VCX_CONNECTION=" + (pc.connectionState ?? "n/a"));
                     emit();
                     const connectionState = String(pc.connectionState ?? "");
@@ -5063,6 +5237,8 @@ class CallController {
                     }
                 };
                 pc.onicegatheringstatechange = () => {
+                    if (!isCurrentPublisherPc())
+                        return;
                     console.log("VCX_GATHERING=" + pc.iceGatheringState);
                     emit();
                 };
@@ -6192,8 +6368,7 @@ class UIController {
         catch (e) {
             if (joinSeq !== this.autoJoinSeq)
                 return;
-            Logger.error(ErrorMessages.RMS_MEETING_CREATE_FAILED, e);
-            Logger.setStatus(ErrorMessages.RMS_MEETING_CREATE_FAILED);
+            ApiErrorUtils.handle(e);
         }
     }
     async resolveMeetingRoomId(groupId) {
@@ -6277,7 +6452,7 @@ class UIController {
     renderConnectionStatus(status) {
         const resolved = this.resolveVisibleConnectionStatus(status);
         this.connectionStatus = resolved;
-        this.logger.setStatus(resolved.primaryText);
+        this.logger.setStatusBySeverity(resolved.primaryText, resolved.severity);
         this.logger.setInfo(resolved.secondaryText);
         this.applyConnectionOverlays();
         this.renderRemoteFallback();
@@ -6460,12 +6635,20 @@ class UIController {
     }
     renderMediaIo(stats) {
         const prev = this.prevMediaBytes;
-        const audioMinDeltaBytes = 64;
-        const videoMinDeltaBytes = 512;
-        const aSent = this.formatFlowBytes(stats.bytes.audioSent, prev?.audioSent ?? null, audioMinDeltaBytes, this.audioMuted);
-        const aRecv = this.formatFlowBytes(stats.bytes.audioReceived, prev?.audioReceived ?? null, audioMinDeltaBytes, false);
-        const vSent = this.formatFlowBytes(stats.bytes.videoSent, prev?.videoSent ?? null, videoMinDeltaBytes, this.videoMuted);
-        const vRecv = this.formatFlowBytes(stats.bytes.videoReceived, prev?.videoReceived ?? null, videoMinDeltaBytes, false);
+        const audioMinDeltaBytesSent = 64;
+        const videoMinDeltaBytesSent = 512;
+        const audioMinDeltaBytesRecv = APP_CONFIG.mediaTelemetry.minRecvAudioBytesPerSample;
+        const videoMinDeltaBytesRecv = APP_CONFIG.mediaTelemetry.minRecvVideoBytesPerSample;
+        const audioRecvBlocked = stats.matrix.localReceivingYourAudio === "No" ||
+            stats.matrix.localReceivingYourAudio === "Not possible" ||
+            stats.matrix.localAudioPlaybackStatus === "Stalled";
+        const videoRecvBlocked = stats.matrix.localReceivingYourVideo === "No" ||
+            stats.matrix.localReceivingYourVideo === "Not possible" ||
+            stats.matrix.localVideoPlaybackStatus === "Stalled";
+        const aSent = this.formatFlowBytes(stats.bytes.audioSent, prev?.audioSent ?? null, audioMinDeltaBytesSent, this.audioMuted);
+        const aRecv = this.formatFlowBytes(stats.bytes.audioReceived, prev?.audioReceived ?? null, audioMinDeltaBytesRecv, audioRecvBlocked);
+        const vSent = this.formatFlowBytes(stats.bytes.videoSent, prev?.videoSent ?? null, videoMinDeltaBytesSent, this.videoMuted);
+        const vRecv = this.formatFlowBytes(stats.bytes.videoReceived, prev?.videoReceived ?? null, videoMinDeltaBytesRecv, videoRecvBlocked);
         this.renderFlowValue(this.diagAudioSent, aSent);
         this.renderFlowValue(this.diagAudioRecv, aRecv);
         this.renderFlowValue(this.diagVideoSent, vSent);

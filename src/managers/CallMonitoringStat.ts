@@ -137,6 +137,12 @@ class CallMonitoringStat {
     const audioPacketsRecvDelta = Math.max(0, subscriberMetrics.audioPacketsReceived - this.inboundPacketsPrev.audio);
     const videoPacketsRecvDelta = Math.max(0, subscriberMetrics.videoPacketsReceived - this.inboundPacketsPrev.video);
     const videoFramesDecodedDelta = Math.max(0, subscriberMetrics.videoFramesDecoded - this.inboundVideoFramesDecodedPrev);
+    const audioMeaningfulProgress = this.isMeaningfulAudioReceiveProgress(audioRecvDelta, audioPacketsRecvDelta);
+    const videoMeaningfulProgress = this.isMeaningfulVideoReceiveProgress(
+      videoRecvDelta,
+      videoPacketsRecvDelta,
+      videoFramesDecodedDelta
+    );
     this.outboundPrev = { audio: publisherMetrics.audioBytesSent, video: publisherMetrics.videoBytesSent };
     this.outboundAudioPacketsPrev = publisherMetrics.audioPacketsSent;
     this.inboundPrev = { audio: subscriberMetrics.audioBytesReceived, video: subscriberMetrics.videoBytesReceived };
@@ -202,10 +208,10 @@ class CallMonitoringStat {
       videoPackets: publisherMetrics.remoteInboundVideoPacketsReceived ?? this.remoteInboundPrev.videoPackets
     };
 
-    if (videoRecvDelta > 0 || videoPacketsRecvDelta > 0 || videoFramesDecodedDelta > 0) {
+    if (videoMeaningfulProgress) {
       this.localReceiveGrowthAt.video = now;
     }
-    if (audioRecvDelta > 0 || audioPacketsRecvDelta > 0) {
+    if (audioMeaningfulProgress) {
       this.localReceiveGrowthAt.audio = now;
     }
     const localReceivingVideo: YesNoUnknown = this.deriveLocalReceiveStatus(remotePresent, this.localReceiveGrowthAt.video, now, inWarmup);
@@ -214,15 +220,12 @@ class CallMonitoringStat {
       now,
       remotePresent,
       inWarmup,
-      videoRecvDelta,
-      videoPacketsRecvDelta,
-      videoFramesDecodedDelta,
+      videoMeaningfulProgress,
       subscriberMetrics.hasVideoTrack
     );
     const localAudioPlaybackStatus = this.deriveLocalAudioPlaybackStatus(
       now,
-      audioRecvDelta,
-      audioPacketsRecvDelta,
+      audioMeaningfulProgress,
       subscriberMetrics.hasAudioTrack,
       remotePresent,
       inWarmup
@@ -450,18 +453,11 @@ class CallMonitoringStat {
     now: number,
     remotePresent: boolean,
     inWarmup: boolean,
-    videoRecvDelta: number,
-    videoPacketsRecvDelta: number,
-    videoFramesDecodedDelta: number,
+    hasMeaningfulProgress: boolean,
     hasVideoTrack: boolean
   ): PlaybackState {
     if (!remotePresent) return "Not possible";
     if (!hasVideoTrack) return inWarmup ? "Pending" : "Not possible";
-
-    const hasTransportProgress =
-      videoRecvDelta > 0 ||
-      videoPacketsRecvDelta > 0 ||
-      videoFramesDecodedDelta > 0;
 
     const currentTime = Number.isFinite(this.remoteVideo.currentTime) ? this.remoteVideo.currentTime : 0;
     if (currentTime > this.lastRemoteVideoTime + 0.03) {
@@ -469,7 +465,7 @@ class CallMonitoringStat {
       this.remoteVideoPlaybackAt = now;
       return "Active";
     }
-    if (hasTransportProgress) {
+    if (hasMeaningfulProgress) {
       this.remoteVideoPlaybackAt = now;
       return "Active";
     }
@@ -488,15 +484,14 @@ class CallMonitoringStat {
 
   private deriveLocalAudioPlaybackStatus(
     now: number,
-    audioRecvDelta: number,
-    audioPacketsRecvDelta: number,
+    hasMeaningfulProgress: boolean,
     hasAudioTrack: boolean,
     remotePresent: boolean,
     inWarmup: boolean
   ): PlaybackState {
     if (!remotePresent) return "Not possible";
     if (!hasAudioTrack) return inWarmup ? "Pending" : "Not possible";
-    if (audioRecvDelta > 0 || audioPacketsRecvDelta > 0) {
+    if (hasMeaningfulProgress) {
       this.localAudioPlaybackAt = now;
       return "Active";
     }
@@ -507,5 +502,20 @@ class CallMonitoringStat {
       return "Active";
     }
     return "Stalled";
+  }
+
+  private isMeaningfulAudioReceiveProgress(audioRecvDelta: number, audioPacketsRecvDelta: number): boolean {
+    return audioRecvDelta >= APP_CONFIG.mediaTelemetry.minRecvAudioBytesPerSample ||
+      audioPacketsRecvDelta >= APP_CONFIG.mediaTelemetry.minRecvAudioPacketsPerSample;
+  }
+
+  private isMeaningfulVideoReceiveProgress(
+    videoRecvDelta: number,
+    videoPacketsRecvDelta: number,
+    videoFramesDecodedDelta: number
+  ): boolean {
+    return videoFramesDecodedDelta > 0 ||
+      videoRecvDelta >= APP_CONFIG.mediaTelemetry.minRecvVideoBytesPerSample ||
+      videoPacketsRecvDelta >= APP_CONFIG.mediaTelemetry.minRecvVideoPacketsPerSample;
   }
 }

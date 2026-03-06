@@ -1,6 +1,7 @@
 class Logger {
   static instance: Logger | null = null;
   private static readonly STATUS_COLOR_DEFAULT = "#111827";
+  private static readonly STATUS_COLOR_WARN = "#d97706";
   private static readonly STATUS_COLOR_ERROR = "#dc2626";
 
   private static userName = "User";
@@ -61,6 +62,26 @@ class Logger {
     Logger.user(msg);
   }
 
+  private setWarnStatus(msg: string): void {
+    if (this.statusEl) {
+      this.statusEl.textContent = msg;
+      this.statusEl.style.color = Logger.STATUS_COLOR_WARN;
+    }
+    Logger.user(msg);
+  }
+
+  setStatusBySeverity(msg: string, severity: "info" | "warn" | "error"): void {
+    if (severity === "error") {
+      this.setErrorStatus(msg);
+      return;
+    }
+    if (severity === "warn") {
+      this.setWarnStatus(msg);
+      return;
+    }
+    this.setStatus(msg);
+  }
+
   // Static UI updates (backward compatible)
   static setStatus(msg: string): void {
     if (Logger.instance) {
@@ -76,10 +97,28 @@ class Logger {
     }
     Logger.flow(msg);
   }
+  static setStatusBySeverity(msg: string, severity: "info" | "warn" | "error"): void {
+    if (Logger.instance) {
+      Logger.instance.setStatusBySeverity(msg, severity);
+      return;
+    }
+    if (severity === "error") {
+      Logger.error(msg);
+      return;
+    }
+    if (severity === "warn") {
+      Logger.warn(msg);
+      return;
+    }
+    Logger.setStatus(msg);
+  }
   static info(msg: string): void { Logger.setInfo(msg); }
   static warn(msg: string): void {
     if (!Logger.canLog("warn")) return;
     console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#f59e0b;font-weight:bold");
+    if (Logger.instance) {
+      Logger.instance.setWarnStatus(msg);
+    }
   }
   static error(msg: string, err?: unknown): void {
     if (!Logger.canLog("error")) return;

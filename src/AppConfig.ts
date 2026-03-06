@@ -106,7 +106,7 @@ const APP_CONFIG = {
   },
   ims: {
     mediaConstraintsPath: "/ims/users/media-constraints",
-    useMockMediaConstraints: true,
+    useMockMediaConstraints: false,
     mockMediaConstraintsResponse: {
       name: "VideoConstraint",
       value: JSON.stringify(IMS_MEDIA_CONSTRAINTS_MOCK_PAYLOAD)
@@ -243,6 +243,11 @@ const APP_CONFIG = {
     enablePeerNetworkTelemetry: true,
     networkTelemetryIntervalMs: 5000,
     stallWindowMs: 3500,
+    // Ignore tiny recv deltas that can still appear while remote media is muted.
+    minRecvAudioBytesPerSample: 2048,
+    minRecvAudioPacketsPerSample: 4,
+    minRecvVideoBytesPerSample: 4096,
+    minRecvVideoPacketsPerSample: 2,
     peerTelemetryFreshnessMs: 6000,
     enablePeerTelemetry: true
   },
