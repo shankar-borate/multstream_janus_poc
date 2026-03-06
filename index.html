@@ -136,6 +136,9 @@
     #remoteQuality,#remoteQualityDetails{display:none !important}
     .remote-fallback{position:absolute;inset:0;display:none;align-items:center;justify-content:center;z-index:3;pointer-events:none;background:linear-gradient(180deg, rgba(243,244,246,.68), rgba(229,231,235,.82))}
     .remote-fallback-card{width:min(280px,58vw);height:min(180px,34vh);border-radius:16px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:rgba(255,255,255,.82);border:1px solid rgba(148,163,184,.32);box-shadow:0 16px 32px rgba(15,23,42,.12)}
+    .remote-fallback-default{display:flex}
+    .remote-hold-backdrop{display:none;width:min(900px,85vw);height:min(520px,75vh);border-radius:10px;overflow:hidden;box-shadow:0 16px 32px rgba(15,23,42,.14)}
+    .hold-backdrop-image{width:100%;height:100%;object-fit:cover;display:block}
     .remote-fallback-icon{width:64px;height:64px;border-radius:999px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(156,163,175,.54);background:rgba(243,244,246,.95)}
     .remote-fallback-icon i{font-size:28px;color:#6b7280}
     .remote-fallback-dots{display:flex;gap:7px;margin-top:4px}
@@ -151,6 +154,8 @@
   <div class="controls">
     <button id="btnMute" class="ctrl-btn" title="Mute/Unmute" disabled><i class="fa-solid fa-microphone"></i></button>
     <button id="btnUnpublish" class="ctrl-btn neutral" title="Stop Video" disabled><i class="fa-solid fa-video"></i></button>
+    <button id="btnHold" class="ctrl-btn neutral" title="Put Call On Hold" disabled><i class="fa-solid fa-pause"></i></button>
+    <button id="btnSwapCamera" class="ctrl-btn neutral" title="Switch Camera" disabled><i class="fa-solid fa-camera-rotate"></i></button>
     <button id="btnScreen" class="ctrl-btn green" title="Start Screen Share" disabled><i class="fa-solid fa-display"></i></button>
     <button id="btnVB" class="ctrl-btn purple" title="Toggle Virtual Background" disabled><i class="fa-solid fa-wand-magic-sparkles"></i></button>
 
@@ -242,9 +247,16 @@
   <div class="remote-wrap">
     <video id="remoteVideo" autoplay playsinline></video>
     <div id="remoteFallback" class="remote-fallback">
-      <div class="remote-fallback-card">
+      <div id="remoteFallbackDefault" class="remote-fallback-card remote-fallback-default">
         <div class="remote-fallback-icon"><i class="fa-solid fa-video-slash"></i></div>
         <div class="remote-fallback-dots"><span></span><span></span><span></span></div>
+      </div>
+      <div id="remoteHoldBackdrop" class="remote-fallback-card remote-hold-backdrop">
+        <img
+          class="hold-backdrop-image"
+          src="https://beta.videocx.io/web2/assets/images/bg/VideoCX-backdrop.jpg"
+          alt="On hold"
+        />
       </div>
     </div>
     <div id="remoteOverlay" class="overlay-label remote-overlay">Remote</div>

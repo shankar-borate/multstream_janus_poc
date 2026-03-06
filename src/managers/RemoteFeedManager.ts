@@ -189,6 +189,10 @@ class RemoteFeedManager {
           }
           if (parsed?.type === "vcx-peer-network") {
             this.observer?.onRemoteNetworkTelemetry?.(feedId, parsed as PeerNetworkTelemetry);
+            return;
+          }
+          if (parsed?.type === "vcx-peer-hold") {
+            this.observer?.onRemoteHoldState?.(feedId, parsed as PeerHoldState);
           }
         } catch (e: any) {
           Logger.error(ErrorMessages.remoteFeedTelemetryParseFailed(feedId), e);

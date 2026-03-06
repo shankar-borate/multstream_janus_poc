@@ -17,6 +17,8 @@ class UIController {
 
   private btnMute = document.getElementById("btnMute") as HTMLButtonElement;
   private btnUnpublish = document.getElementById("btnUnpublish") as HTMLButtonElement;
+  private btnHold = document.getElementById("btnHold") as HTMLButtonElement;
+  private btnSwapCamera = document.getElementById("btnSwapCamera") as HTMLButtonElement;
   private btnLeave = document.getElementById("btnLeave") as HTMLButtonElement;
   private btnReconnect = document.getElementById("btnReconnect") as HTMLButtonElement;
   private btnScreen = document.getElementById("btnScreen") as HTMLButtonElement;
@@ -35,6 +37,8 @@ class UIController {
   private localVideoEl = document.getElementById("localVideo") as HTMLVideoElement;
   private remoteVideoEl = document.getElementById("remoteVideo") as HTMLVideoElement;
   private remoteFallback = document.getElementById("remoteFallback") as HTMLDivElement;
+  private remoteFallbackDefault = document.getElementById("remoteFallbackDefault") as HTMLDivElement;
+  private remoteHoldBackdrop = document.getElementById("remoteHoldBackdrop") as HTMLDivElement;
 
   private localOverlay = document.getElementById("localOverlay") as HTMLDivElement;
   private remoteOverlay = document.getElementById("remoteOverlay") as HTMLDivElement;
@@ -81,9 +85,14 @@ class UIController {
 
   private audioMuted = false;
   private videoMuted = false;
+  private holdEnabled = false;
+  private remoteHoldActive = false;
+  private joined = false;
+  private cameraFacingMode: "user" | "environment" = "user";
   private ended = false;
   private readonly userType = this.resolveUserType();
   private readonly canRecord = this.userType === "agent";
+  private readonly canSwapCamera = this.userType === "customer";
 
   // ✅ recording state
   private recording = false;
@@ -113,9 +122,17 @@ class UIController {
 
     this.controller = new CallController(this.bus, localVideo, remoteVideo);
     this.applyRecordingAccess();
+    this.applySwapCameraAccess();
+    this.updateHoldUI();
+    this.updateSwapCameraButton();
 
     this.bus.on<boolean>("joined", j=>{
+        this.joined = j;
         this.setJoinedState(j);
+        if (j) {
+          this.cameraFacingMode = this.controller.getCameraFacingMode();
+          this.updateSwapCameraButton();
+        }
         console.log("VCX_JOINED=" + j);
         this.updateDebugState({
           joined: j
@@ -140,6 +157,28 @@ class UIController {
           ? '<i class="fa-solid fa-video-slash"></i>'
           : '<i class="fa-solid fa-video"></i>';
       this.applyConnectionOverlays();
+    });
+    this.bus.on<boolean>("hold-changed", onHold => {
+      this.holdEnabled = onHold;
+      this.updateHoldUI();
+      this.applyHoldControlState();
+      this.applyConnectionOverlays();
+      this.renderRemoteFallback();
+      this.updateDebugState({
+        onHold
+      });
+      this.bridge.emit({
+        type: "HOLD_CHANGED",
+        onHold
+      });
+    });
+    this.bus.on<boolean>("remote-hold-changed", onHold => {
+      this.remoteHoldActive = onHold;
+      this.applyConnectionOverlays();
+      this.renderRemoteFallback();
+      this.updateDebugState({
+        remoteOnHold: onHold
+      });
     });
 
     this.bus.on<boolean>("screen-changed", on => {
@@ -207,6 +246,7 @@ class UIController {
     this.setupParticipantNetworkPanel();
     this.setupParentBridge();
     this.setupRemoteFallbackMonitor();
+    this.bindBrowserNetworkState();
     this.autoJoin();
   }
 
@@ -232,6 +272,29 @@ class UIController {
       this.applyConnectionOverlays();
 
       this.bridge.emit({ type: "VIDEO_MUTED", muted: this.videoMuted });
+    };
+
+    this.btnHold.onclick = async () => {
+      Logger.user("Hold button clicked");
+      if (this.btnHold.disabled) return;
+      this.btnHold.disabled = true;
+      try {
+        this.holdEnabled = await this.controller.toggleHold();
+      } finally {
+        this.applyHoldControlState();
+      }
+    };
+
+    this.btnSwapCamera.onclick = async () => {
+      Logger.user("Swap camera button clicked");
+      if (this.btnSwapCamera.disabled) return;
+      this.btnSwapCamera.disabled = true;
+      try {
+        this.cameraFacingMode = await this.controller.swapCameraFacingMode();
+        this.updateSwapCameraButton();
+      } finally {
+        if (!this.ended) this.btnSwapCamera.disabled = false;
+      }
     };
 
     // LEAVE / START
@@ -299,6 +362,49 @@ class UIController {
     this.btnRecord.disabled = true;
   }
 
+  private applySwapCameraAccess() {
+    if (!this.btnSwapCamera) return;
+    if (this.canSwapCamera) return;
+    this.btnSwapCamera.style.display = "none";
+    this.btnSwapCamera.disabled = true;
+  }
+
+  private updateSwapCameraButton() {
+    if (!this.btnSwapCamera) return;
+    this.btnSwapCamera.title =
+      this.cameraFacingMode === "user"
+        ? "Switch to back camera"
+        : "Switch to front camera";
+  }
+
+  private updateHoldUI() {
+    if (!this.btnHold) return;
+    if (this.holdEnabled) {
+      this.btnHold.classList.add("danger");
+      this.btnHold.classList.remove("neutral");
+      this.btnHold.innerHTML = '<i class="fa-solid fa-play"></i>';
+      this.btnHold.title = "Resume Call";
+      return;
+    }
+    this.btnHold.classList.remove("danger");
+    this.btnHold.classList.add("neutral");
+    this.btnHold.innerHTML = '<i class="fa-solid fa-pause"></i>';
+    this.btnHold.title = "Put Call On Hold";
+  }
+
+  private applyHoldControlState() {
+    const live = this.joined && !this.ended;
+    const lockMediaControls = this.holdEnabled;
+
+    if (this.btnMute) this.btnMute.disabled = !live || lockMediaControls;
+    if (this.btnUnpublish) this.btnUnpublish.disabled = !live || lockMediaControls;
+    if (this.btnSwapCamera) this.btnSwapCamera.disabled = !live || !this.canSwapCamera;
+    if (this.btnScreen) this.btnScreen.disabled = !live || lockMediaControls;
+    if (this.btnVB) this.btnVB.disabled = !live || lockMediaControls;
+    if (this.btnReconnect) this.btnReconnect.disabled = !live;
+    if (this.btnHold) this.btnHold.disabled = !live;
+  }
+
   private syncAutoRecordingByParticipants(participantCount: number) {
     const shouldRecord = participantCount === 2;
 
@@ -340,6 +446,7 @@ class UIController {
     this.ended = ended;
     this.endedOverlay.style.display = ended ? "flex" : "none";
     this.renderRemoteFallback();
+    this.applyHoldControlState();
     if (ended) {
       this.btnLeave.innerHTML = '<i class="fa-solid fa-play"></i>';
       this.btnLeave.title = "Start";
@@ -373,6 +480,11 @@ class UIController {
 
     this.audioMuted = false;
     this.videoMuted = false;
+    this.holdEnabled = false;
+    this.remoteHoldActive = false;
+    this.cameraFacingMode = "user";
+    this.updateHoldUI();
+    this.updateSwapCameraButton();
     this.setEndedState(false);
     this.applyConnectionOverlays();
 
@@ -440,6 +552,7 @@ class UIController {
   }
 
   private setJoinedState(joined: boolean) {
+    this.joined = joined;
     [
       this.btnMute,
       this.btnUnpublish,
@@ -448,20 +561,33 @@ class UIController {
       this.btnVB
     ].forEach(b => b && (b.disabled = !joined));
 
+    if (this.btnHold) {
+      this.btnHold.disabled = !joined;
+    }
+
+    if (this.btnSwapCamera) {
+      this.btnSwapCamera.disabled = !joined || !this.canSwapCamera;
+    }
+
     this.btnLeave.disabled = this.ended ? false : !joined;
 
     if (this.btnRecord) {
       this.btnRecord.disabled = !joined || !this.canRecord;
     }
+
+    this.applyHoldControlState();
   }
 
   private getLocalBaseOverlayText(): string {
+    if (this.holdEnabled) return "on hold";
     if (this.videoMuted) return "video muted";
     if (this.audioMuted) return "audio muted";
     return "Local";
   }
 
   private getRemoteBaseOverlayText(): string {
+    const remoteHoldVisual = this.remoteHoldActive && !this.holdEnabled;
+    if (remoteHoldVisual) return "on hold";
     return "Remote";
   }
 
@@ -628,8 +754,17 @@ class UIController {
   private renderRemoteFallback() {
     if (!this.remoteFallback) return;
 
-    const showFallback = !this.ended && !this.hasRemoteVideoTrack();
+    const remoteHoldVisual = this.remoteHoldActive && !this.holdEnabled;
+    const showFallback = !this.ended && (remoteHoldVisual || !this.hasRemoteVideoTrack());
     this.remoteFallback.style.display = showFallback ? "flex" : "none";
+    if (this.remoteFallbackDefault) {
+      this.remoteFallbackDefault.style.display =
+        showFallback && !remoteHoldVisual ? "flex" : "none";
+    }
+    if (this.remoteHoldBackdrop) {
+      this.remoteHoldBackdrop.style.display =
+        showFallback && remoteHoldVisual ? "block" : "none";
+    }
   }
 
   private formatBytes(bytes: number): string {
@@ -829,6 +964,20 @@ class UIController {
         remote: r
       });
     }, () => this.controller.getNetworkQualityPeers());
+  }
+
+  private bindBrowserNetworkState() {
+    const sync = () => {
+      if (navigator.onLine === false) {
+        Logger.setStatus(ErrorMessages.NETWORK_OFFLINE);
+      }
+    };
+    window.addEventListener("offline", sync);
+    window.addEventListener("online", () => {
+      if (!this.joined || this.ended) return;
+      Logger.setStatus("Back online. Reconnecting media if needed...");
+    });
+    sync();
   }
 
   private setupParticipantNetworkPanel() {
@@ -1157,6 +1306,10 @@ class UIController {
 
         case "TOGGLE_VIDEO":
           this.btnUnpublish.click();
+          break;
+
+        case "TOGGLE_HOLD":
+          this.btnHold.click();
           break;
 
         case "RECONNECT":

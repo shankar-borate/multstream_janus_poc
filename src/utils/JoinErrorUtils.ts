@@ -30,11 +30,67 @@ class JoinErrorUtils {
 }
 
 class ApiErrorUtils {
+  private static safeStringify(value: unknown): string {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return "";
+    }
+  }
+
+  private static collectErrorText(err: unknown): string {
+    const e = err as any;
+    return [
+      String(e?.message || ""),
+      String(e?.error || ""),
+      String(e?.reason || ""),
+      String(e?.statusText || ""),
+      this.safeStringify(e?.details),
+      this.safeStringify(e?.data),
+      this.safeStringify(e?.response),
+      this.safeStringify(err)
+    ]
+      .join(" ")
+      .toLowerCase();
+  }
+
   static isUnauthorized(err: unknown): boolean {
     const status = Number((err as any)?.status);
     if (status === 401) return true;
-    const message = String((err as any)?.message || "").toLowerCase();
+    const message = this.collectErrorText(err);
     return message.includes("http 401") || message.includes("unauthor");
+  }
+
+  static isOffline(err: unknown): boolean {
+    if (navigator.onLine === false) return true;
+    const status = Number((err as any)?.status);
+    const message = this.collectErrorText(err);
+    const isClientTimeout = status === 408 && message.includes("timeout (");
+    if (status === 0 || isClientTimeout) return true;
+    const offlineTokens = [
+      "failed to fetch",
+      "network error",
+      "networkerror",
+      "network request failed",
+      "internet disconnected",
+      "offline",
+      "err_internet_disconnected",
+      "err_network_changed",
+      "err_name_not_resolved",
+      "err_connection_refused",
+      "err_connection_reset",
+      "err_connection_timed_out",
+      "err_address_unreachable",
+      "the internet connection appears to be offline",
+      "load failed"
+    ];
+    return offlineTokens.some((token) => message.includes(token));
+  }
+
+  static resolveUserFacingErrorMessage(err: unknown): string {
+    return this.isOffline(err)
+      ? ErrorMessages.NETWORK_OFFLINE
+      : ErrorMessages.INTERNAL_SERVER_ERROR_RETRY_LATER;
   }
 
   static resolveLoginUrl(): string {
@@ -51,6 +107,8 @@ class ApiErrorUtils {
       window.location.assign(this.resolveLoginUrl());
       return;
     }
-    Logger.error(ErrorMessages.INTERNAL_SERVER_ERROR_RETRY_LATER, err);
+    const message = this.resolveUserFacingErrorMessage(err);
+    Logger.setStatus(message);
+    Logger.error(message, err);
   }
 }

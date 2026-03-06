@@ -11,6 +11,7 @@ class ErrorMessages {
   static readonly RMS_MEETING_ID_INVALID = "RMS response is missing a valid meetingId";
   static readonly RMS_RECORDING_CREATE_FAILED = "Unable to create recording from meeting. Please try again.";
   static readonly RMS_RECORDING_ID_INVALID = "RMS response is missing a valid recordingId";
+  static readonly NETWORK_OFFLINE = "You are offline. Please check your internet connection and try again.";
   static readonly INTERNAL_SERVER_ERROR_RETRY_LATER = "Internal server error, please try after some time";
 
   static domElementNotFound(id: string): string {
@@ -154,11 +155,18 @@ class ErrorMessages {
   static readonly CALL_SCREEN_SHARE_STARTED = "Screen share started";
   static readonly CALL_SCREEN_SHARE_STOPPED = "Screen share stopped";
   static readonly CALL_DISABLE_SCREEN_BEFORE_VB = "Disable screen share before virtual background";
+  static readonly CALL_DISABLE_SCREEN_OR_VB_BEFORE_HOLD = "Disable screen share or virtual background before putting call on hold.";
+  static readonly CALL_DISABLE_SCREEN_OR_VB_BEFORE_CAMERA_SWAP = "Disable screen share or virtual background before swapping camera.";
+  static readonly CALL_HOLD_ENABLED = "Call is on hold.";
+  static readonly CALL_HOLD_DISABLED = "Call resumed.";
+  static readonly CALL_HOLD_TOGGLE_FAILED = "Hold toggle failed";
   static readonly CALL_SCREEN_SHARE_TOGGLE_FAILED = "Screen share toggle failed";
   static readonly CALL_VB_TOGGLE_FAILED = "Virtual background toggle failed";
   static readonly CALL_VB_FALLBACK_TO_CAMERA = "Virtual background failed to stream. Switched back to camera.";
   static readonly CALL_STOP_STALE_CAMERA_TRACK_FAILED = "Stopping stale camera track failed";
   static readonly CALL_CAMERA_ACCESS_FAILED = "Camera access failed";
+  static readonly CALL_CAMERA_SWITCHED_FRONT = "Switched to front camera.";
+  static readonly CALL_CAMERA_SWITCHED_BACK = "Switched to back camera.";
   static readonly CALL_REPLACE_VIDEO_TRACK_FAILED = "replaceVideoTrack failed";
   static readonly CALL_VIDEO_TRACK_SWITCH_FAILED = "Video track switch failed.";
   static readonly CALL_REPLACE_AUDIO_TRACK_FAILED = "replaceAudioTrack failed";

@@ -36,6 +36,7 @@ type RemoteFeedObserver = {
   onRemoteFeedRetryExhausted?: (feedId: number, attempts: number) => void;
   onRemoteTelemetry?: (feedId: number, payload: PeerPlaybackTelemetry) => void;
   onRemoteNetworkTelemetry?: (feedId: number, payload: PeerNetworkTelemetry) => void;
+  onRemoteHoldState?: (feedId: number, payload: PeerHoldState) => void;
   onSlowLink?: (feedId: number, payload: JanusSlowLinkEvent) => void;
 };
 type PeerPlaybackTelemetry = {
@@ -51,6 +52,12 @@ type PeerNetworkTelemetry = {
   downloadKbps: number | null;
   lossPct: number | null;
   jitterMs: number | null;
+};
+type PeerHoldState = {
+  type: "vcx-peer-hold";
+  ts: number;
+  onHold: boolean;
+  fromParticipantId?: number | null;
 };
 type JanusSlowLinkEvent = {
   uplink: boolean;

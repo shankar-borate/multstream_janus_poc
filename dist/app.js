@@ -111,9 +111,9 @@ const APP_CONFIG = {
         }
     },
     vcx: {
-        imsBaseUrl: "https://beta.videocx.io",
+        imsBaseUrl: "https://dev.videocx.io",
         clientId: "101",
-        defaultJanusServer: "wss://beta.videocx.io/mstream_janus",
+        defaultJanusServer: "wss://dev.videocx.io/mstream_janus",
         defaultDisplayName: "Guest"
     },
     videoroom: {
@@ -418,6 +418,7 @@ ErrorMessages.RMS_MEETING_CREATE_FAILED = "Unable to create meeting from group. 
 ErrorMessages.RMS_MEETING_ID_INVALID = "RMS response is missing a valid meetingId";
 ErrorMessages.RMS_RECORDING_CREATE_FAILED = "Unable to create recording from meeting. Please try again.";
 ErrorMessages.RMS_RECORDING_ID_INVALID = "RMS response is missing a valid recordingId";
+ErrorMessages.NETWORK_OFFLINE = "You are offline. Please check your internet connection and try again.";
 ErrorMessages.INTERNAL_SERVER_ERROR_RETRY_LATER = "Internal server error, please try after some time";
 ErrorMessages.EVENT_BUS_HANDLER_FAILED_PREFIX = "EventBus handler failed for event=";
 ErrorMessages.PARENT_BRIDGE_POST_MESSAGE_FAILED = "ParentBridge postMessage failed";
@@ -482,11 +483,18 @@ ErrorMessages.CALL_LEAVE_ERROR = "Leave error";
 ErrorMessages.CALL_SCREEN_SHARE_STARTED = "Screen share started";
 ErrorMessages.CALL_SCREEN_SHARE_STOPPED = "Screen share stopped";
 ErrorMessages.CALL_DISABLE_SCREEN_BEFORE_VB = "Disable screen share before virtual background";
+ErrorMessages.CALL_DISABLE_SCREEN_OR_VB_BEFORE_HOLD = "Disable screen share or virtual background before putting call on hold.";
+ErrorMessages.CALL_DISABLE_SCREEN_OR_VB_BEFORE_CAMERA_SWAP = "Disable screen share or virtual background before swapping camera.";
+ErrorMessages.CALL_HOLD_ENABLED = "Call is on hold.";
+ErrorMessages.CALL_HOLD_DISABLED = "Call resumed.";
+ErrorMessages.CALL_HOLD_TOGGLE_FAILED = "Hold toggle failed";
 ErrorMessages.CALL_SCREEN_SHARE_TOGGLE_FAILED = "Screen share toggle failed";
 ErrorMessages.CALL_VB_TOGGLE_FAILED = "Virtual background toggle failed";
 ErrorMessages.CALL_VB_FALLBACK_TO_CAMERA = "Virtual background failed to stream. Switched back to camera.";
 ErrorMessages.CALL_STOP_STALE_CAMERA_TRACK_FAILED = "Stopping stale camera track failed";
 ErrorMessages.CALL_CAMERA_ACCESS_FAILED = "Camera access failed";
+ErrorMessages.CALL_CAMERA_SWITCHED_FRONT = "Switched to front camera.";
+ErrorMessages.CALL_CAMERA_SWITCHED_BACK = "Switched to back camera.";
 ErrorMessages.CALL_REPLACE_VIDEO_TRACK_FAILED = "replaceVideoTrack failed";
 ErrorMessages.CALL_VIDEO_TRACK_SWITCH_FAILED = "Video track switch failed.";
 ErrorMessages.CALL_REPLACE_AUDIO_TRACK_FAILED = "replaceAudioTrack failed";
@@ -1198,12 +1206,67 @@ class JoinErrorUtils {
     }
 }
 class ApiErrorUtils {
+    static safeStringify(value) {
+        try {
+            return JSON.stringify(value);
+        }
+        catch {
+            return "";
+        }
+    }
+    static collectErrorText(err) {
+        const e = err;
+        return [
+            String(e?.message || ""),
+            String(e?.error || ""),
+            String(e?.reason || ""),
+            String(e?.statusText || ""),
+            this.safeStringify(e?.details),
+            this.safeStringify(e?.data),
+            this.safeStringify(e?.response),
+            this.safeStringify(err)
+        ]
+            .join(" ")
+            .toLowerCase();
+    }
     static isUnauthorized(err) {
         const status = Number(err?.status);
         if (status === 401)
             return true;
-        const message = String(err?.message || "").toLowerCase();
+        const message = this.collectErrorText(err);
         return message.includes("http 401") || message.includes("unauthor");
+    }
+    static isOffline(err) {
+        if (navigator.onLine === false)
+            return true;
+        const status = Number(err?.status);
+        const message = this.collectErrorText(err);
+        const isClientTimeout = status === 408 && message.includes("timeout (");
+        if (status === 0 || isClientTimeout)
+            return true;
+        const offlineTokens = [
+            "failed to fetch",
+            "network error",
+            "networkerror",
+            "network request failed",
+            "internet disconnected",
+            "offline",
+            "err_internet_disconnected",
+            "err_network_changed",
+            "err_name_not_resolved",
+            "err_connection_refused",
+            "err_connection_reset",
+            "err_connection_timed_out",
+            "err_address_unreachable",
+            "the internet connection appears to be offline",
+            "load failed"
+        ];
+        return offlineTokens.some((token) => message.includes(token));
+    }
+    static resolveUserFacingErrorMessage(err) {
+        return this.isOffline(err)
+            ? ErrorMessages.NETWORK_OFFLINE
+            : ErrorMessages.INTERNAL_SERVER_ERROR_RETRY_LATER;
     }
     static resolveLoginUrl() {
         const qs = new URLSearchParams(window.location.search);
@@ -1217,7 +1280,9 @@ class ApiErrorUtils {
             window.location.assign(this.resolveLoginUrl());
             return;
         }
-        Logger.error(ErrorMessages.INTERNAL_SERVER_ERROR_RETRY_LATER, err);
+        const message = this.resolveUserFacingErrorMessage(err);
+        Logger.setStatus(message);
+        Logger.error(message, err);
     }
 }
 class MediaErrorUtils {
@@ -4054,6 +4119,10 @@ class RemoteFeedManager {
                     }
                     if (parsed?.type === "vcx-peer-network") {
                         this.observer?.onRemoteNetworkTelemetry?.(feedId, parsed);
+                        return;
+                    }
+                    if (parsed?.type === "vcx-peer-hold") {
+                        this.observer?.onRemoteHoldState?.(feedId, parsed);
                     }
                 }
                 catch (e) {
@@ -4347,16 +4416,24 @@ class CallController {
         this.participantSyncRequestTimer = null;
         this.participantSyncRequestSeq = 0;
         this.cameraStreamOrientation = null;
+        this.cameraFacingMode = "user";
+        this.cameraStreamFacingMode = null;
         this.publisherPc = null;
         this.subscriberPcs = new Map();
         this.localAudioEnabled = true;
         this.localVideoEnabled = true;
         this.audioToggleBusy = false;
         this.videoToggleBusy = false;
+        this.holdEnabled = false;
+        this.holdToggleBusy = false;
+        this.holdResumeAudioEnabled = true;
+        this.holdResumeVideoEnabled = true;
+        this.cameraSwapBusy = false;
         this.screenToggleBusy = false;
         this.vbToggleBusy = false;
         this.peerTelemetryByFeed = new Map();
         this.peerNetworkTelemetryByFeed = new Map();
+        this.peerHoldStateByFeed = new Map();
         this.mixedAudioContext = null;
         this.mixedAudioTrack = null;
         this.callId = null;
@@ -4451,10 +4528,18 @@ class CallController {
         this.isLeaving = false;
         this.localAudioEnabled = true;
         this.localVideoEnabled = true;
+        this.holdEnabled = false;
+        this.holdToggleBusy = false;
+        this.holdResumeAudioEnabled = true;
+        this.holdResumeVideoEnabled = true;
+        this.cameraFacingMode = "user";
+        this.cameraStreamFacingMode = null;
+        this.cameraSwapBusy = false;
         this.suppressPublisherCleanupRetry = false;
         this.adaptiveNetwork.resetForJoin();
         this.lastPublisherTransportErrorReason = null;
         this.lastPublisherTransportErrorAt = 0;
+        this.peerHoldStateByFeed.clear();
         if (!opts?.internalRetry) {
             this.serverRetryAttempt = 0;
             this.peerRetryAttempt = 0;
@@ -4466,6 +4551,8 @@ class CallController {
             roomId: cfg.roomId,
             participantId: cfg.participantId ?? null
         });
+        this.bus.emit("hold-changed", false);
+        this.bus.emit("remote-hold-changed", false);
         this.connectionEngine.onJoinStarted();
         try {
             const server = UrlConfig.getVcxServer().server;
@@ -4493,7 +4580,7 @@ class CallController {
             Logger.error(ErrorMessages.callJoinFailed(this.callId ?? "n/a", cfg.roomId, requestId), e);
             ApiErrorUtils.handle(e);
             if (!ApiErrorUtils.isUnauthorized(e)) {
-                this.connectionEngine.setFatalError(ErrorMessages.INTERNAL_SERVER_ERROR_RETRY_LATER);
+                this.connectionEngine.setFatalError(ApiErrorUtils.resolveUserFacingErrorMessage(e));
             }
         }
     }
@@ -4524,6 +4611,11 @@ class CallController {
         this.screenEnabled = false;
         this.peerTelemetryByFeed.clear();
         this.peerNetworkTelemetryByFeed.clear();
+        this.peerHoldStateByFeed.clear();
+        this.holdEnabled = false;
+        this.holdToggleBusy = false;
+        this.holdResumeAudioEnabled = true;
+        this.holdResumeVideoEnabled = true;
         this.remoteFeeds?.cleanupAll();
         this.remoteFeeds = null;
         this.plugin = null;
@@ -4538,6 +4630,9 @@ class CallController {
         this.lastPublisherTransportErrorAt = 0;
         this.localAudioEnabled = true;
         this.localVideoEnabled = true;
+        this.cameraFacingMode = "user";
+        this.cameraStreamFacingMode = null;
+        this.cameraSwapBusy = false;
         this.audioToggleBusy = false;
         this.videoToggleBusy = false;
         this.screenToggleBusy = false;
@@ -4547,6 +4642,8 @@ class CallController {
         this.recordingController.reset();
         this.bus.emit("joined", false);
         this.bus.emit("mute-changed", false);
+        this.bus.emit("hold-changed", false);
+        this.bus.emit("remote-hold-changed", false);
         this.suppressPublisherCleanupRetry = true;
         this.destroyGatewayControlled();
     }
@@ -4804,6 +4901,16 @@ class CallController {
                     this.peerNetworkTelemetryByFeed.set(feedId, payload);
                     this.bus.emit("peer-network-telemetry", { feedId, payload });
                 },
+                onRemoteHoldState: (feedId, payload) => {
+                    if (feedId === this.selfId)
+                        return;
+                    if (Number.isFinite(payload.fromParticipantId) &&
+                        payload.fromParticipantId === this.selfId) {
+                        return;
+                    }
+                    this.peerHoldStateByFeed.set(feedId, payload.onHold === true);
+                    this.bus.emit("remote-hold-changed", Array.from(this.peerHoldStateByFeed.values()).some(Boolean));
+                },
                 onSlowLink: (feedId, payload) => {
                     this.bus.emit("janus-slowlink", {
                         participantId: feedId,
@@ -4819,6 +4926,8 @@ class CallController {
                     this.subscriberPcs.delete(feedId);
                     this.peerTelemetryByFeed.delete(feedId);
                     this.peerNetworkTelemetryByFeed.delete(feedId);
+                    this.peerHoldStateByFeed.delete(feedId);
+                    this.bus.emit("remote-hold-changed", Array.from(this.peerHoldStateByFeed.values()).some(Boolean));
                     this.connectionEngine.unregisterSubscriber(feedId);
                     if (this.isLeaving || this.suppressRemoteFeedRetry) {
                         Logger.warn(`Remote feed ${feedId} cleanup ignored (controlled cleanup)`);
@@ -4831,6 +4940,8 @@ class CallController {
                 },
                 onRemoteFeedRetryExhausted: (feedId, attempts) => {
                     this.subscriberPcs.delete(feedId);
+                    this.peerHoldStateByFeed.delete(feedId);
+                    this.bus.emit("remote-hold-changed", Array.from(this.peerHoldStateByFeed.values()).some(Boolean));
                     this.connectionEngine.onRemoteFeedRetryExhausted(feedId, attempts);
                     Logger.setStatus(ErrorMessages.CALL_REMOTE_VIDEO_UNSTABLE);
                     Logger.error(ErrorMessages.callRemoteFeedRetryExhausted(this.callId ?? "n/a", cfg.roomId, feedId, attempts));
@@ -4972,6 +5083,8 @@ class CallController {
         this.subscriberPcs.delete(feedId);
         this.peerTelemetryByFeed.delete(feedId);
         this.peerNetworkTelemetryByFeed.delete(feedId);
+        this.peerHoldStateByFeed.delete(feedId);
+        this.bus.emit("remote-hold-changed", Array.from(this.peerHoldStateByFeed.values()).some(Boolean));
         this.remoteFeeds?.removeFeed(feedId);
         this.publishParticipants(cfg);
     }
@@ -5438,10 +5551,21 @@ class CallController {
             return this.localAudioEnabled;
         this.audioToggleBusy = true;
         try {
-            const track = this.getPreferredAudioTrack();
+            let track = this.getPreferredAudioTrack();
             if (enabled) {
+                if (!track) {
+                    try {
+                        const cam = await this.ensureCameraStream();
+                        track = cam.getAudioTracks()[0] ?? null;
+                    }
+                    catch (recoverErr) {
+                        Logger.error(ErrorMessages.CALL_AUDIO_TOGGLE_FAILED, recoverErr);
+                    }
+                }
                 if (track)
                     track.enabled = true;
+                if (track)
+                    this.syncPublishedAudioTrack(track);
                 try {
                     if (typeof this.plugin.unmuteAudio === "function") {
                         this.plugin.unmuteAudio();
@@ -5574,6 +5698,92 @@ class CallController {
     stopVideo() {
         void this.setVideoEnabled(false);
     }
+    isHoldEnabled() {
+        return this.holdEnabled;
+    }
+    async toggleHold() {
+        return this.setHoldEnabled(!this.holdEnabled);
+    }
+    async setHoldEnabled(enabled) {
+        if (!this.plugin || !this.joinedRoom)
+            return this.holdEnabled;
+        if (this.holdToggleBusy)
+            return this.holdEnabled;
+        if (enabled === this.holdEnabled)
+            return this.holdEnabled;
+        this.holdToggleBusy = true;
+        try {
+            if (enabled) {
+                this.holdResumeAudioEnabled = this.localAudioEnabled;
+                this.holdResumeVideoEnabled = this.localVideoEnabled;
+                await this.setAudioEnabled(false);
+                await this.setVideoEnabled(false);
+                this.holdEnabled = true;
+                Logger.setStatus(ErrorMessages.CALL_HOLD_ENABLED);
+            }
+            else {
+                await this.setAudioEnabled(this.holdResumeAudioEnabled);
+                await this.setVideoEnabled(this.holdResumeVideoEnabled);
+                this.holdEnabled = false;
+                Logger.setStatus(ErrorMessages.CALL_HOLD_DISABLED);
+            }
+        }
+        catch (e) {
+            Logger.error(ErrorMessages.CALL_HOLD_TOGGLE_FAILED, e);
+            Logger.setStatus(MediaErrorUtils.getCameraMicErrorMessage(e));
+        }
+        finally {
+            this.holdToggleBusy = false;
+            this.sendPeerTelemetry({
+                type: "vcx-peer-hold",
+                ts: Date.now(),
+                onHold: this.holdEnabled,
+                fromParticipantId: this.selfId ?? null
+            });
+            this.bus.emit("hold-changed", this.holdEnabled);
+        }
+        return this.holdEnabled;
+    }
+    getCameraFacingMode() {
+        return this.cameraFacingMode;
+    }
+    async swapCameraFacingMode() {
+        if (!this.plugin || !this.joinedRoom)
+            return this.cameraFacingMode;
+        if (this.cameraSwapBusy)
+            return this.cameraFacingMode;
+        if (this.screenEnabled || this.vbEnabled) {
+            Logger.setStatus(ErrorMessages.CALL_DISABLE_SCREEN_OR_VB_BEFORE_CAMERA_SWAP);
+            return this.cameraFacingMode;
+        }
+        this.cameraSwapBusy = true;
+        const previousFacing = this.cameraFacingMode;
+        this.cameraFacingMode = previousFacing === "user" ? "environment" : "user";
+        try {
+            const cam = await this.ensureCameraStream();
+            const track = cam.getVideoTracks()[0];
+            if (!track)
+                throw new Error(ErrorMessages.CALL_CAMERA_MIC_TRACK_UNAVAILABLE);
+            const actualFacingMode = String(track.getSettings?.().facingMode || "").toLowerCase();
+            if (actualFacingMode === "user" || actualFacingMode === "environment") {
+                this.cameraFacingMode = actualFacingMode;
+            }
+            track.enabled = this.localVideoEnabled;
+            this.replaceVideoTrack(track);
+            Logger.setStatus(this.cameraFacingMode === "environment"
+                ? ErrorMessages.CALL_CAMERA_SWITCHED_BACK
+                : ErrorMessages.CALL_CAMERA_SWITCHED_FRONT);
+        }
+        catch (e) {
+            this.cameraFacingMode = previousFacing;
+            Logger.error(ErrorMessages.CALL_VIDEO_TRACK_SWITCH_FAILED, e);
+            Logger.setStatus(MediaErrorUtils.getCameraMicErrorMessage(e));
+        }
+        finally {
+            this.cameraSwapBusy = false;
+        }
+        return this.cameraFacingMode;
+    }
     // =====================================
     // RECORDING
     // =====================================
@@ -5632,8 +5842,16 @@ class CallController {
             this.lastPublisherTransportErrorAt = 0;
             this.peerTelemetryByFeed.clear();
             this.peerNetworkTelemetryByFeed.clear();
+            this.peerHoldStateByFeed.clear();
             this.localAudioEnabled = true;
             this.localVideoEnabled = true;
+            this.holdEnabled = false;
+            this.holdToggleBusy = false;
+            this.holdResumeAudioEnabled = true;
+            this.holdResumeVideoEnabled = true;
+            this.cameraFacingMode = "user";
+            this.cameraStreamFacingMode = null;
+            this.cameraSwapBusy = false;
             this.audioToggleBusy = false;
             this.videoToggleBusy = false;
             this.screenToggleBusy = false;
@@ -5643,11 +5861,14 @@ class CallController {
             this.bus.emit("joined", false);
             this.bus.emit("mute-changed", false);
             this.bus.emit("video-mute-changed", false);
+            this.bus.emit("hold-changed", false);
+            this.bus.emit("remote-hold-changed", false);
             this.connectionEngine.onLeft();
             this.media.clearLocal(this.localVideo);
             this.media.clearRemote(this.remoteVideo);
             this.cameraStream = null;
             this.cameraStreamOrientation = null;
+            this.cameraStreamFacingMode = null;
             this.cameraProfileKey = "";
             this.callId = null;
             Logger.setStatus(ErrorMessages.CALL_LEFT);
@@ -5758,28 +5979,95 @@ class CallController {
             this.vbToggleBusy = false;
         }
     }
+    isCameraBusyError(err) {
+        const name = String(err?.name || "").toLowerCase();
+        const message = String(err?.message || "").toLowerCase();
+        return name.includes("notreadableerror") ||
+            message.includes("busy") ||
+            message.includes("device in use") ||
+            message.includes("could not start video source") ||
+            message.includes("track start failed");
+    }
     async ensureCameraStream() {
         try {
             const desiredOrientation = this.getViewportOrientation();
             const desiredProfileKey = this.getCurrentCameraProfileKey();
+            const desiredFacingMode = this.cameraFacingMode;
             const currentStream = this.cameraStream;
             const hasLiveVideo = !!currentStream?.getVideoTracks().some(t => t.readyState === "live");
             const hasLiveAudio = !!currentStream?.getAudioTracks().some(t => t.readyState === "live");
+            const currentLiveAudioTrack = currentStream?.getAudioTracks().find((t) => t.readyState === "live") ?? null;
+            const requestAudio = !currentLiveAudioTrack;
             const needsRecreate = !currentStream ||
                 !hasLiveVideo ||
                 !hasLiveAudio ||
                 (this.isIOSDevice() && this.cameraStreamOrientation !== desiredOrientation) ||
-                this.cameraProfileKey !== desiredProfileKey;
+                this.cameraProfileKey !== desiredProfileKey ||
+                this.cameraStreamFacingMode !== desiredFacingMode;
             if (needsRecreate) {
-                const videoConstraints = this.buildVideoConstraintsForCurrentProfile(desiredOrientation);
-                const nextStream = await navigator.mediaDevices.getUserMedia({
-                    video: videoConstraints,
-                    audio: true
-                });
+                const baseVideoConstraints = this.buildVideoConstraintsForCurrentProfile(desiredOrientation);
+                const attemptedVideoConstraints = [
+                    {
+                        ...baseVideoConstraints,
+                        facingMode: { exact: desiredFacingMode }
+                    },
+                    {
+                        ...baseVideoConstraints,
+                        facingMode: { ideal: desiredFacingMode }
+                    },
+                    {
+                        ...baseVideoConstraints
+                    }
+                ];
+                let nextStream = null;
+                let lastGetUserMediaError = null;
+                let releasedCurrentVideoTracks = false;
+                for (const videoConstraints of attemptedVideoConstraints) {
+                    try {
+                        nextStream = await navigator.mediaDevices.getUserMedia({
+                            video: videoConstraints,
+                            audio: requestAudio
+                        });
+                        break;
+                    }
+                    catch (gdmErr) {
+                        lastGetUserMediaError = gdmErr;
+                        if (!releasedCurrentVideoTracks && currentStream && this.isCameraBusyError(gdmErr)) {
+                            releasedCurrentVideoTracks = true;
+                            currentStream.getVideoTracks().forEach((track) => {
+                                try {
+                                    track.stop();
+                                }
+                                catch (stopErr) {
+                                    Logger.error(ErrorMessages.CALL_STOP_STALE_CAMERA_TRACK_FAILED, stopErr);
+                                }
+                            });
+                            try {
+                                nextStream = await navigator.mediaDevices.getUserMedia({
+                                    video: videoConstraints,
+                                    audio: requestAudio
+                                });
+                                break;
+                            }
+                            catch (retryErr) {
+                                lastGetUserMediaError = retryErr;
+                            }
+                        }
+                    }
+                }
+                if (!nextStream) {
+                    throw (lastGetUserMediaError ?? new Error(ErrorMessages.CALL_CAMERA_ACCESS_FAILED));
+                }
+                if (!requestAudio &&
+                    currentLiveAudioTrack &&
+                    !nextStream.getAudioTracks().some((t) => t.id === currentLiveAudioTrack.id)) {
+                    nextStream.addTrack(currentLiveAudioTrack);
+                }
                 const previous = this.cameraStream;
                 this.cameraStream = nextStream;
                 this.cameraStreamOrientation = desiredOrientation;
                 this.cameraProfileKey = desiredProfileKey;
+                this.cameraStreamFacingMode = desiredFacingMode;
                 const nextAudio = nextStream.getAudioTracks()[0];
                 if (nextAudio && (!this.screenEnabled || !this.mixedAudioTrack)) {
                     nextAudio.enabled = this.localAudioEnabled;
@@ -5809,6 +6097,9 @@ class CallController {
             }
             if (!this.cameraProfileKey) {
                 this.cameraProfileKey = desiredProfileKey;
+            }
+            if (!this.cameraStreamFacingMode) {
+                this.cameraStreamFacingMode = desiredFacingMode;
             }
             return this.cameraStream;
         }
@@ -6016,6 +6307,8 @@ class UIController {
         this.bus = new EventBus();
         this.btnMute = document.getElementById("btnMute");
         this.btnUnpublish = document.getElementById("btnUnpublish");
+        this.btnHold = document.getElementById("btnHold");
+        this.btnSwapCamera = document.getElementById("btnSwapCamera");
         this.btnLeave = document.getElementById("btnLeave");
         this.btnReconnect = document.getElementById("btnReconnect");
         this.btnScreen = document.getElementById("btnScreen");
@@ -6031,6 +6324,8 @@ class UIController {
         this.localVideoEl = document.getElementById("localVideo");
         this.remoteVideoEl = document.getElementById("remoteVideo");
         this.remoteFallback = document.getElementById("remoteFallback");
+        this.remoteFallbackDefault = document.getElementById("remoteFallbackDefault");
+        this.remoteHoldBackdrop = document.getElementById("remoteHoldBackdrop");
         this.localOverlay = document.getElementById("localOverlay");
         this.remoteOverlay = document.getElementById("remoteOverlay");
         this.endedOverlay = document.getElementById("endedOverlay");
@@ -6074,9 +6369,14 @@ class UIController {
         this.prevMediaBytes = null;
         this.audioMuted = false;
         this.videoMuted = false;
+        this.holdEnabled = false;
+        this.remoteHoldActive = false;
+        this.joined = false;
+        this.cameraFacingMode = "user";
         this.ended = false;
         this.userType = this.resolveUserType();
         this.canRecord = this.userType === "agent";
+        this.canSwapCamera = this.userType === "customer";
         // ✅ recording state
         this.recording = false;
         this.renderedParticipantCount = 0;
@@ -6097,8 +6397,16 @@ class UIController {
         const remoteVideo = this.remoteVideoEl;
         this.controller = new CallController(this.bus, localVideo, remoteVideo);
         this.applyRecordingAccess();
+        this.applySwapCameraAccess();
+        this.updateHoldUI();
+        this.updateSwapCameraButton();
         this.bus.on("joined", j => {
+            this.joined = j;
             this.setJoinedState(j);
+            if (j) {
+                this.cameraFacingMode = this.controller.getCameraFacingMode();
+                this.updateSwapCameraButton();
+            }
             console.log("VCX_JOINED=" + j);
             this.updateDebugState({
                 joined: j
@@ -6122,6 +6430,28 @@ class UIController {
                     ? '<i class="fa-solid fa-video-slash"></i>'
                     : '<i class="fa-solid fa-video"></i>';
             this.applyConnectionOverlays();
+        });
+        this.bus.on("hold-changed", onHold => {
+            this.holdEnabled = onHold;
+            this.updateHoldUI();
+            this.applyHoldControlState();
+            this.applyConnectionOverlays();
+            this.renderRemoteFallback();
+            this.updateDebugState({
+                onHold
+            });
+            this.bridge.emit({
+                type: "HOLD_CHANGED",
+                onHold
+            });
+        });
+        this.bus.on("remote-hold-changed", onHold => {
+            this.remoteHoldActive = onHold;
+            this.applyConnectionOverlays();
+            this.renderRemoteFallback();
+            this.updateDebugState({
+                remoteOnHold: onHold
+            });
         });
         this.bus.on("screen-changed", on => {
             this.btnScreen.title = on ? "Stop Screen Share" : "Start Screen Share";
@@ -6185,6 +6515,7 @@ class UIController {
         this.setupParticipantNetworkPanel();
         this.setupParentBridge();
         this.setupRemoteFallbackMonitor();
+        this.bindBrowserNetworkState();
         this.autoJoin();
     }
     wire() {
@@ -6209,6 +6540,32 @@ class UIController {
             }
             this.applyConnectionOverlays();
             this.bridge.emit({ type: "VIDEO_MUTED", muted: this.videoMuted });
+        };
+        this.btnHold.onclick = async () => {
+            Logger.user("Hold button clicked");
+            if (this.btnHold.disabled)
+                return;
+            this.btnHold.disabled = true;
+            try {
+                this.holdEnabled = await this.controller.toggleHold();
+            }
+            finally {
+                this.applyHoldControlState();
+            }
+        };
+        this.btnSwapCamera.onclick = async () => {
+            Logger.user("Swap camera button clicked");
+            if (this.btnSwapCamera.disabled)
+                return;
+            this.btnSwapCamera.disabled = true;
+            try {
+                this.cameraFacingMode = await this.controller.swapCameraFacingMode();
+                this.updateSwapCameraButton();
+            }
+            finally {
+                if (!this.ended)
+                    this.btnSwapCamera.disabled = false;
+            }
         };
         // LEAVE / START
         this.btnLeave.onclick = () => {
@@ -6275,6 +6632,55 @@ class UIController {
         this.btnRecord.style.display = "none";
         this.btnRecord.disabled = true;
     }
+    applySwapCameraAccess() {
+        if (!this.btnSwapCamera)
+            return;
+        if (this.canSwapCamera)
+            return;
+        this.btnSwapCamera.style.display = "none";
+        this.btnSwapCamera.disabled = true;
+    }
+    updateSwapCameraButton() {
+        if (!this.btnSwapCamera)
+            return;
+        this.btnSwapCamera.title =
+            this.cameraFacingMode === "user"
+                ? "Switch to back camera"
+                : "Switch to front camera";
+    }
+    updateHoldUI() {
+        if (!this.btnHold)
+            return;
+        if (this.holdEnabled) {
+            this.btnHold.classList.add("danger");
+            this.btnHold.classList.remove("neutral");
+            this.btnHold.innerHTML = '<i class="fa-solid fa-play"></i>';
+            this.btnHold.title = "Resume Call";
+            return;
+        }
+        this.btnHold.classList.remove("danger");
+        this.btnHold.classList.add("neutral");
+        this.btnHold.innerHTML = '<i class="fa-solid fa-pause"></i>';
+        this.btnHold.title = "Put Call On Hold";
+    }
+    applyHoldControlState() {
+        const live = this.joined && !this.ended;
+        const lockMediaControls = this.holdEnabled;
+        if (this.btnMute)
+            this.btnMute.disabled = !live || lockMediaControls;
+        if (this.btnUnpublish)
+            this.btnUnpublish.disabled = !live || lockMediaControls;
+        if (this.btnSwapCamera)
+            this.btnSwapCamera.disabled = !live || !this.canSwapCamera;
+        if (this.btnScreen)
+            this.btnScreen.disabled = !live || lockMediaControls;
+        if (this.btnVB)
+            this.btnVB.disabled = !live || lockMediaControls;
+        if (this.btnReconnect)
+            this.btnReconnect.disabled = !live;
+        if (this.btnHold)
+            this.btnHold.disabled = !live;
+    }
     syncAutoRecordingByParticipants(participantCount) {
         const shouldRecord = participantCount === 2;
         if (shouldRecord && !this.recording) {
@@ -6311,6 +6717,7 @@ class UIController {
         this.ended = ended;
         this.endedOverlay.style.display = ended ? "flex" : "none";
         this.renderRemoteFallback();
+        this.applyHoldControlState();
         if (ended) {
             this.btnLeave.innerHTML = '<i class="fa-solid fa-play"></i>';
             this.btnLeave.title = "Start";
@@ -6342,6 +6749,11 @@ class UIController {
         Logger.user(`[rms] create meeting request groupId=${req.groupId} (payload groupId=null, to=${req.groupId})`);
         this.audioMuted = false;
         this.videoMuted = false;
+        this.holdEnabled = false;
+        this.remoteHoldActive = false;
+        this.cameraFacingMode = "user";
+        this.updateHoldUI();
+        this.updateSwapCameraButton();
         this.setEndedState(false);
         this.applyConnectionOverlays();
         try {
@@ -6405,6 +6817,7 @@ class UIController {
         }, APP_CONFIG.call.reconnectDelayMs);
     }
     setJoinedState(joined) {
+        this.joined = joined;
         [
             this.btnMute,
             this.btnUnpublish,
@@ -6412,12 +6825,21 @@ class UIController {
             this.btnScreen,
             this.btnVB
         ].forEach(b => b && (b.disabled = !joined));
+        if (this.btnHold) {
+            this.btnHold.disabled = !joined;
+        }
+        if (this.btnSwapCamera) {
+            this.btnSwapCamera.disabled = !joined || !this.canSwapCamera;
+        }
         this.btnLeave.disabled = this.ended ? false : !joined;
         if (this.btnRecord) {
             this.btnRecord.disabled = !joined || !this.canRecord;
         }
+        this.applyHoldControlState();
     }
     getLocalBaseOverlayText() {
+        if (this.holdEnabled)
+            return "on hold";
         if (this.videoMuted)
             return "video muted";
         if (this.audioMuted)
@@ -6425,6 +6847,9 @@ class UIController {
         return "Local";
     }
     getRemoteBaseOverlayText() {
+        const remoteHoldVisual = this.remoteHoldActive && !this.holdEnabled;
+        if (remoteHoldVisual)
+            return "on hold";
         return "Remote";
     }
     applyConnectionOverlays() {
@@ -6572,8 +6997,17 @@ class UIController {
     renderRemoteFallback() {
         if (!this.remoteFallback)
             return;
-        const showFallback = !this.ended && !this.hasRemoteVideoTrack();
+        const remoteHoldVisual = this.remoteHoldActive && !this.holdEnabled;
+        const showFallback = !this.ended && (remoteHoldVisual || !this.hasRemoteVideoTrack());
         this.remoteFallback.style.display = showFallback ? "flex" : "none";
+        if (this.remoteFallbackDefault) {
+            this.remoteFallbackDefault.style.display =
+                showFallback && !remoteHoldVisual ? "flex" : "none";
+        }
+        if (this.remoteHoldBackdrop) {
+            this.remoteHoldBackdrop.style.display =
+                showFallback && remoteHoldVisual ? "block" : "none";
+        }
     }
     formatBytes(bytes) {
         if (!Number.isFinite(bytes) || bytes <= 0)
@@ -6743,6 +7177,20 @@ class UIController {
                 remote: r
             });
         }, () => this.controller.getNetworkQualityPeers());
+    }
+    bindBrowserNetworkState() {
+        const sync = () => {
+            if (navigator.onLine === false) {
+                Logger.setStatus(ErrorMessages.NETWORK_OFFLINE);
+            }
+        };
+        window.addEventListener("offline", sync);
+        window.addEventListener("online", () => {
+            if (!this.joined || this.ended)
+                return;
+            Logger.setStatus("Back online. Reconnecting media if needed...");
+        });
+        sync();
     }
     setupParticipantNetworkPanel() {
         if (!this.networkSidePanel ||
@@ -7015,6 +7463,9 @@ class UIController {
                     break;
                 case "TOGGLE_VIDEO":
                     this.btnUnpublish.click();
+                    break;
+                case "TOGGLE_HOLD":
+                    this.btnHold.click();
                     break;
                 case "RECONNECT":
                     this.reconnect();
