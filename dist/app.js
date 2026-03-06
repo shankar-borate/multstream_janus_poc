@@ -4798,6 +4798,13 @@ class CallController {
             }
         });
     }
+    recoverParticipantCollisionByRejoin(cfg) {
+        Logger.warn(`[join] participant id collision; forcing leave+rejoin roomId=${cfg.roomId} participantId=${cfg.participantId ?? "n/a"}`);
+        this.leave();
+        window.setTimeout(() => {
+            this.join(cfg, { internalRetry: true });
+        }, APP_CONFIG.call.reconnectDelayMs);
+    }
     handlePublisherJoinError(cfg, data, errorCodeRaw) {
         const errorCode = JoinErrorUtils.parseErrorCode(errorCodeRaw);
         const errorText = JoinErrorUtils.extractErrorText(data);
@@ -4812,11 +4819,8 @@ class CallController {
             return true;
         }
         if (JoinErrorUtils.isParticipantIdCollisionError(errorCode, errorText)) {
-            const msg = ErrorMessages.CALL_PARTICIPANT_ID_IN_USE;
             Logger.error(ErrorMessages.callParticipantIdCollision(this.callId ?? "n/a", cfg.roomId, String(cfg.participantId ?? "n/a"), String(errorCode ?? "n/a"), errorText));
-            Logger.setStatus(msg);
-            this.connectionEngine.setFatalError(msg, ErrorMessages.CALL_PARTICIPANT_ID_IN_USE_SECONDARY);
-            this.bus.emit("joined", false);
+            this.recoverParticipantCollisionByRejoin(cfg);
             return true;
         }
         const unauthorized = JoinErrorUtils.isUnauthorizedJoinError(errorCode, errorText);

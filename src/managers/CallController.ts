@@ -471,6 +471,14 @@ class CallController {
     });
   }
 
+  private recoverParticipantCollisionByRejoin(cfg: JoinConfig): void {
+    Logger.warn(`[join] participant id collision; forcing leave+rejoin roomId=${cfg.roomId} participantId=${cfg.participantId ?? "n/a"}`);
+    this.leave();
+    window.setTimeout(() => {
+      this.join(cfg, { internalRetry: true });
+    }, APP_CONFIG.call.reconnectDelayMs);
+  }
+
   private handlePublisherJoinError(cfg: JoinConfig, data: any, errorCodeRaw: unknown): boolean {
     const errorCode = JoinErrorUtils.parseErrorCode(errorCodeRaw);
     const errorText = JoinErrorUtils.extractErrorText(data);
@@ -486,7 +494,6 @@ class CallController {
     }
 
     if (JoinErrorUtils.isParticipantIdCollisionError(errorCode, errorText)) {
-      const msg = ErrorMessages.CALL_PARTICIPANT_ID_IN_USE;
       Logger.error(ErrorMessages.callParticipantIdCollision(
         this.callId ?? "n/a",
         cfg.roomId,
@@ -494,9 +501,7 @@ class CallController {
         String(errorCode ?? "n/a"),
         errorText
       ));
-      Logger.setStatus(msg);
-      this.connectionEngine.setFatalError(msg, ErrorMessages.CALL_PARTICIPANT_ID_IN_USE_SECONDARY);
-      this.bus.emit("joined", false);
+      this.recoverParticipantCollisionByRejoin(cfg);
       return true;
     }
 
