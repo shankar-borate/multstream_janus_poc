@@ -1441,6 +1441,7 @@ class MediaManager {
         this.localPreviewStream = null;
         this.remotePlayPromise = null;
         this.remoteGestureUnmuteBound = false;
+        this.remoteAutoplayBlocked = false;
     }
     setLocalTrack(video, track) {
         if (!this.localPreviewStream)
@@ -1510,9 +1511,17 @@ class MediaManager {
             return;
         if (this.remotePlayPromise)
             return;
+        if (this.remoteAutoplayBlocked) {
+            video.muted = true;
+        }
         const playNormal = video.play();
         this.remotePlayPromise = playNormal;
         playNormal
+            .then(() => {
+            if (video.muted) {
+                this.bindGestureUnmute(video);
+            }
+        })
             .catch((e) => {
             // Normal when track/srcObject is reloaded during renegotiation.
             if (e?.name === "AbortError")
@@ -1521,6 +1530,7 @@ class MediaManager {
                 Logger.error(ErrorMessages.MEDIA_REMOTE_VIDEO_PLAY_FAILED, e);
                 return;
             }
+            this.remoteAutoplayBlocked = true;
             Logger.warn("Remote autoplay blocked. Retrying muted playback.");
             if (this.remotePlayPromise === playNormal) {
                 this.remotePlayPromise = null;
@@ -1557,7 +1567,12 @@ class MediaManager {
             if (!video.srcObject || !video.muted)
                 return;
             video.muted = false;
-            void video.play().catch(() => {
+            void video.play()
+                .then(() => {
+                this.remoteAutoplayBlocked = false;
+            })
+                .catch(() => {
+                this.remoteAutoplayBlocked = true;
                 video.muted = true;
             });
         };
