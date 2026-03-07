@@ -58,6 +58,7 @@ class CallController {
   private peerHoldStateByFeed = new Map<number, boolean>();
   private mixedAudioContext: AudioContext | null = null;
   private mixedAudioTrack: MediaStreamTrack | null = null;
+  private mediaReplaceQueue: Promise<void> = Promise.resolve();
   private callId: string | null = null;
   private readonly userType: "agent" | "customer" = this.resolveUserType();
   private adaptiveNetwork: AdaptiveNetworkManager;
@@ -880,7 +881,7 @@ class CallController {
         const track = cam.getVideoTracks()[0];
         if (track) {
           track.enabled = this.localVideoEnabled;
-          this.replaceVideoTrack(track);
+          await this.replaceVideoTrack(track);
         }
       }
     } catch (e: any) {
@@ -1335,8 +1336,11 @@ class CallController {
             Logger.error(ErrorMessages.CALL_AUDIO_TOGGLE_FAILED, recoverErr);
           }
         }
+        if (!track || track.readyState !== "live") {
+          throw new Error(ErrorMessages.CALL_CAMERA_MIC_TRACK_UNAVAILABLE);
+        }
         if (track) track.enabled = true;
-        if (track) this.syncPublishedAudioTrack(track);
+        await this.syncPublishedAudioTrack(track);
         try {
           if (typeof this.plugin.unmuteAudio === "function") {
             this.plugin.unmuteAudio();
@@ -1375,29 +1379,26 @@ class CallController {
     if (this.videoToggleBusy) return this.localVideoEnabled;
     this.videoToggleBusy = true;
     try {
-      const activeVideoTrack = this.screenEnabled
-        ? this.screenManager.getStream()?.getVideoTracks()[0]
-        : this.vbEnabled
-          ? this.vbManager.getOutputStream()?.getVideoTracks()[0]
-          : this.cameraStream?.getVideoTracks()[0];
+      const activeVideoTrack = this.getPreferredVideoTrack();
 
       if (enabled) {
         let track = activeVideoTrack;
         if (!track) {
           const cam = await this.ensureCameraStream();
           track = this.vbEnabled
-            ? this.vbManager.getOutputStream()?.getVideoTracks()[0] ?? cam.getVideoTracks()[0]
-            : cam.getVideoTracks()[0];
+            ? this.getLiveTrack(this.vbManager.getOutputStream(), "video") ?? this.getLiveTrack(cam, "video")
+            : this.getLiveTrack(cam, "video");
           if (this.vbEnabled) {
-            const vbSourceTrack = this.vbManager.getSourceStream()?.getVideoTracks()[0] ?? cam.getVideoTracks()[0];
+            const vbSourceTrack =
+              this.getLiveTrack(this.vbManager.getSourceStream(), "video") ?? this.getLiveTrack(cam, "video");
             if (vbSourceTrack) vbSourceTrack.enabled = true;
           }
         }
-        if (track) {
-          track.enabled = true;
-          this.connectionEngine.onLocalTrackSignal(track, true);
-          this.media.setLocalTrack(this.localVideo, track);
+        if (!track || track.readyState !== "live") {
+          throw new Error(ErrorMessages.CALL_CAMERA_MIC_TRACK_UNAVAILABLE);
         }
+        track.enabled = true;
+        await this.replaceVideoTrack(track);
         try {
           if (typeof this.plugin.unmuteVideo === "function") {
             this.plugin.unmuteVideo();
@@ -1526,7 +1527,7 @@ class CallController {
         this.cameraFacingMode = actualFacingMode;
       }
       track.enabled = this.localVideoEnabled;
-      this.replaceVideoTrack(track);
+      await this.replaceVideoTrack(track);
       Logger.setStatus(
         this.cameraFacingMode === "environment"
           ? ErrorMessages.CALL_CAMERA_SWITCHED_BACK
@@ -1664,11 +1665,11 @@ class CallController {
         const micTrack = cam.getAudioTracks()[0] ?? null;
         const displayAudioTrack = ss.getAudioTracks()[0] ?? null;
         const outgoingAudio = await this.resolveScreenShareAudioTrack(micTrack, displayAudioTrack);
-        if (outgoingAudio) this.syncPublishedAudioTrack(outgoingAudio);
+        if (outgoingAudio) await this.syncPublishedAudioTrack(outgoingAudio);
 
         this.screenEnabled = true;
         await this.ensureOutgoingAudio({ camera: cam, screen: ss });
-        this.replaceVideoTrack(screenTrack);
+        await this.replaceVideoTrack(screenTrack);
         Logger.setStatus(ErrorMessages.CALL_SCREEN_SHARE_STARTED);
         this.bus.emit("screen-changed", true);
         screenTrack.onended = () => {
@@ -1683,10 +1684,10 @@ class CallController {
         const videoTrack = cam.getVideoTracks()[0];
         if (videoTrack) {
           videoTrack.enabled = this.localVideoEnabled;
-          this.replaceVideoTrack(videoTrack);
+          await this.replaceVideoTrack(videoTrack);
         }
         const micTrack = cam.getAudioTracks()[0];
-        if (micTrack) this.syncPublishedAudioTrack(micTrack);
+        if (micTrack) await this.syncPublishedAudioTrack(micTrack);
         Logger.setStatus(ErrorMessages.CALL_SCREEN_SHARE_STOPPED);
         this.bus.emit("screen-changed", false);
       }
@@ -1719,7 +1720,7 @@ class CallController {
         track.enabled = true;
         this.vbEnabled = true;
         this.localVideoEnabled = true;
-        this.replaceVideoTrack(track);
+        await this.replaceVideoTrack(track);
         this.guardVirtualBackgroundTrack(track, camVideoTrack ?? null);
         this.bus.emit("video-mute-changed", false);
         this.bus.emit("vb-changed", true);
@@ -1730,7 +1731,7 @@ class CallController {
         const track = cam.getVideoTracks()[0];
         if (track) {
           track.enabled = this.localVideoEnabled;
-          this.replaceVideoTrack(track);
+          await this.replaceVideoTrack(track);
         }
         this.bus.emit("vb-changed", false);
       }
@@ -1841,7 +1842,7 @@ class CallController {
         const nextAudio = nextStream.getAudioTracks()[0];
         if (nextAudio && (!this.screenEnabled || !this.mixedAudioTrack)) {
           nextAudio.enabled = this.localAudioEnabled;
-          this.syncPublishedAudioTrack(nextAudio);
+          await this.syncPublishedAudioTrack(nextAudio);
         }
 
         if (previous && previous !== nextStream) {
@@ -1891,13 +1892,13 @@ class CallController {
 
         if (fallbackCameraTrack && fallbackCameraTrack.readyState === "live") {
           fallbackCameraTrack.enabled = this.localVideoEnabled;
-          this.replaceVideoTrack(fallbackCameraTrack);
+          await this.replaceVideoTrack(fallbackCameraTrack);
         } else {
           const activeCamera = await this.ensureCameraStream();
           const freshTrack = activeCamera.getVideoTracks()[0];
           if (freshTrack) {
             freshTrack.enabled = this.localVideoEnabled;
-            this.replaceVideoTrack(freshTrack);
+            await this.replaceVideoTrack(freshTrack);
           }
         }
         this.bus.emit("vb-changed", false);
@@ -1909,17 +1910,53 @@ class CallController {
     }, 1500);
   }
 
-  private replaceVideoTrack(track: MediaStreamTrack) {
+  private getLiveTrack(stream: MediaStream | null | undefined, kind: "audio" | "video"): MediaStreamTrack | null {
+    if (!stream) return null;
+    const tracks = kind === "audio" ? stream.getAudioTracks() : stream.getVideoTracks();
+    return tracks.find((candidate: MediaStreamTrack) => candidate.readyState === "live") ?? null;
+  }
+
+  private getPreferredVideoTrack(): MediaStreamTrack | null {
+    if (this.screenEnabled) {
+      return this.getLiveTrack(this.screenManager.getStream(), "video");
+    }
+    if (this.vbEnabled) {
+      return this.getLiveTrack(this.vbManager.getOutputStream(), "video");
+    }
+    return this.getLiveTrack(this.cameraStream, "video");
+  }
+
+  private getPublisherSender(kind: "audio" | "video"): RTCRtpSender | null {
+    return this.publisherPc?.getSenders().find((sender: RTCRtpSender) => sender.track?.kind === kind) ?? null;
+  }
+
+  private async replacePublishedTrack(kind: "audio" | "video", track: MediaStreamTrack): Promise<void> {
+    if (!this.plugin) return;
+    const run = async () => {
+      const sender = this.getPublisherSender(kind);
+      if (sender && typeof sender.replaceTrack === "function") {
+        await sender.replaceTrack(track);
+        return;
+      }
+      this.plugin?.replaceTracks({
+        tracks: [{ type: kind, capture: track, recv: false }]
+      });
+    };
+    const queued = this.mediaReplaceQueue.then(run, run);
+    this.mediaReplaceQueue = queued.catch(() => {});
+    await queued;
+  }
+
+  private async replaceVideoTrack(track: MediaStreamTrack): Promise<void> {
     if (!this.plugin) return;
     try {
-      this.plugin.replaceTracks({
-        tracks: [{ type: "video", capture: track, recv: false }]
-      });
+      await this.replacePublishedTrack("video", track);
       this.connectionEngine.onLocalTrackSignal(track, track.enabled !== false);
       this.media.setLocalTrack(this.localVideo, track);
     } catch (e: any) {
       Logger.error(ErrorMessages.CALL_REPLACE_VIDEO_TRACK_FAILED, e);
       Logger.setStatus(ErrorMessages.CALL_VIDEO_TRACK_SWITCH_FAILED);
+      throw e;
     }
   }
 
@@ -1940,7 +1977,7 @@ class CallController {
     }
     if (!preferred) return;
     preferred.enabled = this.localAudioEnabled;
-    this.syncPublishedAudioTrack(preferred);
+    void this.syncPublishedAudioTrack(preferred);
   }
 
   private async ensureOutgoingAudio(opts?: { camera?: MediaStream | null; screen?: MediaStream | null }): Promise<void> {
@@ -1953,7 +1990,7 @@ class CallController {
       const outgoing = await this.resolveScreenShareAudioTrack(micTrack, displayAudioTrack);
       if (outgoing) {
         outgoing.enabled = this.localAudioEnabled;
-        this.syncPublishedAudioTrack(outgoing);
+        await this.syncPublishedAudioTrack(outgoing);
       } else {
         Logger.warn("No outgoing audio track available during screen share.");
       }
@@ -1966,20 +2003,19 @@ class CallController {
     const micTrack = camera.getAudioTracks()[0] ?? null;
     if (micTrack) {
       micTrack.enabled = this.localAudioEnabled;
-      this.syncPublishedAudioTrack(micTrack);
+      await this.syncPublishedAudioTrack(micTrack);
     } else {
       Logger.warn("No microphone track available for outgoing audio.");
     }
   }
 
-  private syncPublishedAudioTrack(track: MediaStreamTrack) {
+  private async syncPublishedAudioTrack(track: MediaStreamTrack): Promise<void> {
     if (!this.plugin) return;
     try {
-      this.plugin.replaceTracks({
-        tracks: [{ type: "audio", capture: track, recv: false }]
-      });
+      await this.replacePublishedTrack("audio", track);
     } catch (e: any) {
       Logger.error(ErrorMessages.CALL_REPLACE_AUDIO_TRACK_FAILED, e);
+      throw e;
     }
   }
 
