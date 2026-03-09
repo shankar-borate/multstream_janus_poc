@@ -173,6 +173,9 @@ class ErrorMessages {
   static readonly CALL_SCREEN_AUDIO_MIXING_FAILED = "Screen-share audio mixing failed; using microphone only";
   static readonly CALL_STOP_MIXED_AUDIO_TRACK_FAILED = "Stopping mixed audio track failed";
   static readonly CALL_CLOSE_MIXED_AUDIO_CONTEXT_FAILED = "Closing mixed audio context failed";
+  static readonly CALL_SCREENSHOT_UNAVAILABLE = "Selected video is not ready for screenshot.";
+  static readonly CALL_SCREENSHOT_CAPTURE_FAILED = "Screenshot capture failed";
+  static readonly CALL_SCREENSHOT_CANVAS_FAILED = "Screenshot canvas initialization failed";
   static readonly CALL_PUBLISHER_METRICS_FAILED = "Publisher metrics collection failed";
   static readonly CALL_SUBSCRIBER_METRICS_FAILED = "Subscriber metrics collection failed";
   static readonly CALL_MEDIA_SETUP_SET_PARAMETERS_ERROR = "VCX_SET_PARAMETERS_ERROR";
@@ -186,6 +189,12 @@ class ErrorMessages {
 
   static callServerRetrying(attempt: number, maxAttempts: number): string {
     return `Video server call failed. Retrying (${attempt}/${maxAttempts})...`;
+  }
+
+  static callScreenshotUnavailable(target: "local" | "remote"): string {
+    return target === "remote"
+      ? "Remote video is not ready for screenshot."
+      : "Local video is not ready for screenshot.";
   }
 
   static callPeerRetrying(attempt: number, maxAttempts: number): string {

@@ -146,6 +146,21 @@
     .remote-fallback-dots span:nth-child(2){animation-delay:.15s}
     .remote-fallback-dots span:nth-child(3){animation-delay:.3s}
     @keyframes fallbackPulse{0%,100%{opacity:.28;transform:translateY(0)}50%{opacity:1;transform:translateY(-2px)}}
+    .shot-dialog{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:10vh 10vw;box-sizing:border-box;overflow:auto;background:rgba(15,23,42,.56);z-index:40}
+    .shot-dialog.show{display:flex}
+    .shot-dialog-card{width:min(640px,80vw);max-width:80vw;max-height:80vh;box-sizing:border-box;background:#fff;border-radius:18px;padding:18px;box-shadow:0 22px 48px rgba(15,23,42,.28);display:flex;flex-direction:column;gap:14px}
+    .shot-dialog-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .shot-dialog-title{font-size:16px;font-weight:700;color:#111827}
+    .shot-dialog-subtitle{font-size:12px;color:#6b7280}
+    .shot-preview-wrap{flex:1 1 auto;border-radius:14px;overflow:auto;background:#111827;min-height:180px;max-height:calc(80vh - 140px);display:flex;align-items:center;justify-content:center}
+    .shot-preview-image{width:100%;height:auto;max-height:calc(80vh - 140px);object-fit:contain;display:block}
+    .shot-dialog-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:auto}
+    .shot-dialog-btn{border:0;border-radius:999px;padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer}
+    .shot-dialog-btn.cancel{background:#e5e7eb;color:#111827}
+    @media (max-width: 900px), (max-height: 560px){
+      .shot-dialog-card{padding:16px}
+      .shot-preview-wrap{min-height:120px}
+    }
 
   </style>
 </head>
@@ -158,6 +173,7 @@
     <button id="btnSwapCamera" class="ctrl-btn neutral" title="Switch Camera" disabled><i class="fa-solid fa-camera-rotate"></i></button>
     <button id="btnScreen" class="ctrl-btn green" title="Start Screen Share" disabled><i class="fa-solid fa-display"></i></button>
     <button id="btnVB" class="ctrl-btn purple" title="Toggle Virtual Background" disabled><i class="fa-solid fa-wand-magic-sparkles"></i></button>
+    <button id="btnScreenshot" class="ctrl-btn neutral" title="Capture Screenshot" disabled><i class="fa-solid fa-camera"></i></button>
 
     <!-- ✅ Added Recording button ABOVE End/Hangup (no other changes) -->
     <button id="btnRecord" title="Start Recording"> <i class="fa-solid fa-circle"></i></button>
@@ -270,6 +286,23 @@
     <div id="localOverlay" class="overlay-label local-overlay">Local</div>
     <div id="localQuality" class="quality-badge">Local: -</div>
     <div id="localQualityDetails" class="quality-details">-</div>
+  </div>
+</div>
+
+<div id="screenshotDialog" class="shot-dialog" aria-hidden="true">
+  <div class="shot-dialog-card" role="dialog" aria-modal="true" aria-labelledby="screenshotDialogTitle">
+    <div class="shot-dialog-head">
+      <div>
+        <div id="screenshotDialogTitle" class="shot-dialog-title">Screenshot Preview</div>
+        <div id="screenshotDialogSubtitle" class="shot-dialog-subtitle">Captured from your local camera preview.</div>
+      </div>
+    </div>
+    <div class="shot-preview-wrap">
+      <img id="screenshotPreviewImage" class="shot-preview-image" alt="Local screenshot preview" />
+    </div>
+    <div class="shot-dialog-actions">
+      <button id="btnScreenshotCancel" class="shot-dialog-btn cancel" type="button">Cancel</button>
+    </div>
   </div>
 </div>
 

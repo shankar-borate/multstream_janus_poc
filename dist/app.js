@@ -334,6 +334,11 @@ class ErrorMessages {
     static callServerRetrying(attempt, maxAttempts) {
         return `Video server call failed. Retrying (${attempt}/${maxAttempts})...`;
     }
+    static callScreenshotUnavailable(target) {
+        return target === "remote"
+            ? "Remote video is not ready for screenshot."
+            : "Local video is not ready for screenshot.";
+    }
     static callPeerRetrying(attempt, maxAttempts) {
         return `TURN/peer connection failed. Retrying (${attempt}/${maxAttempts})...`;
     }
@@ -501,6 +506,9 @@ ErrorMessages.CALL_REPLACE_AUDIO_TRACK_FAILED = "replaceAudioTrack failed";
 ErrorMessages.CALL_SCREEN_AUDIO_MIXING_FAILED = "Screen-share audio mixing failed; using microphone only";
 ErrorMessages.CALL_STOP_MIXED_AUDIO_TRACK_FAILED = "Stopping mixed audio track failed";
 ErrorMessages.CALL_CLOSE_MIXED_AUDIO_CONTEXT_FAILED = "Closing mixed audio context failed";
+ErrorMessages.CALL_SCREENSHOT_UNAVAILABLE = "Selected video is not ready for screenshot.";
+ErrorMessages.CALL_SCREENSHOT_CAPTURE_FAILED = "Screenshot capture failed";
+ErrorMessages.CALL_SCREENSHOT_CANVAS_FAILED = "Screenshot canvas initialization failed";
 ErrorMessages.CALL_PUBLISHER_METRICS_FAILED = "Publisher metrics collection failed";
 ErrorMessages.CALL_SUBSCRIBER_METRICS_FAILED = "Subscriber metrics collection failed";
 ErrorMessages.CALL_MEDIA_SETUP_SET_PARAMETERS_ERROR = "VCX_SET_PARAMETERS_ERROR";
@@ -6364,6 +6372,7 @@ class UIController {
         this.btnReconnect = document.getElementById("btnReconnect");
         this.btnScreen = document.getElementById("btnScreen");
         this.btnVB = document.getElementById("btnVB");
+        this.btnScreenshot = document.getElementById("btnScreenshot");
         // ✅ NEW
         this.btnRecord = document.getElementById("btnRecord");
         this.lastCfg = null;
@@ -6380,6 +6389,10 @@ class UIController {
         this.localOverlay = document.getElementById("localOverlay");
         this.remoteOverlay = document.getElementById("remoteOverlay");
         this.endedOverlay = document.getElementById("endedOverlay");
+        this.screenshotDialog = document.getElementById("screenshotDialog");
+        this.screenshotPreviewImage = document.getElementById("screenshotPreviewImage");
+        this.screenshotDialogSubtitle = document.getElementById("screenshotDialogSubtitle");
+        this.btnScreenshotCancel = document.getElementById("btnScreenshotCancel");
         this.localQ = document.getElementById("localQuality");
         this.remoteQ = document.getElementById("remoteQuality");
         this.localQD = document.getElementById("localQualityDetails");
@@ -6449,6 +6462,7 @@ class UIController {
         this.controller = new CallController(this.bus, localVideo, remoteVideo);
         this.applyRecordingAccess();
         this.applySwapCameraAccess();
+        this.updateScreenshotUiCopy();
         this.updateHoldUI();
         this.updateSwapCameraButton();
         this.bus.on("joined", j => {
@@ -6565,6 +6579,7 @@ class UIController {
         this.setupDiagnosticsPanel();
         this.setupParticipantNetworkPanel();
         this.setupParentBridge();
+        this.setupScreenshotDialog();
         this.setupRemoteFallbackMonitor();
         this.bindBrowserNetworkState();
         this.autoJoin();
@@ -6657,6 +6672,13 @@ class UIController {
             }
         };
         // ✅ RECORD BUTTON
+        if (this.btnScreenshot) {
+            this.btnScreenshot.onclick = () => {
+                if (this.btnScreenshot.disabled)
+                    return;
+                void this.previewLocalScreenshot();
+            };
+        }
         if (this.btnRecord) {
             this.btnRecord.onclick = () => {
                 if (this.recording) {
@@ -6699,6 +6721,24 @@ class UIController {
                 ? "Switch to back camera"
                 : "Switch to front camera";
     }
+    updateScreenshotUiCopy() {
+        const targetLabel = this.userType === "agent" ? "remote" : "local";
+        if (this.btnScreenshot) {
+            this.btnScreenshot.title = `Capture ${targetLabel} screenshot`;
+        }
+        if (this.screenshotDialogSubtitle) {
+            this.screenshotDialogSubtitle.textContent =
+                this.userType === "agent"
+                    ? "Captured from the participant video."
+                    : "Captured from your local camera preview.";
+        }
+        if (this.screenshotPreviewImage) {
+            this.screenshotPreviewImage.alt =
+                this.userType === "agent"
+                    ? "Remote screenshot preview"
+                    : "Local screenshot preview";
+        }
+    }
     updateHoldUI() {
         if (!this.btnHold)
             return;
@@ -6727,6 +6767,8 @@ class UIController {
             this.btnScreen.disabled = !live || lockMediaControls;
         if (this.btnVB)
             this.btnVB.disabled = !live || lockMediaControls;
+        if (this.btnScreenshot)
+            this.btnScreenshot.disabled = !live || lockMediaControls;
         if (this.btnReconnect)
             this.btnReconnect.disabled = !live;
         if (this.btnHold)
@@ -6764,11 +6806,145 @@ class UIController {
             this.btnRecord.title = "Start Recording";
         }
     }
+    setupScreenshotDialog() {
+        if (!this.screenshotDialog || !this.btnScreenshotCancel)
+            return;
+        this.btnScreenshotCancel.onclick = () => this.closeScreenshotPreview();
+        this.screenshotDialog.onclick = (ev) => {
+            if (ev.target === this.screenshotDialog) {
+                this.closeScreenshotPreview();
+            }
+        };
+        window.addEventListener("keydown", (ev) => {
+            if (ev.key === "Escape" && this.screenshotDialog.classList.contains("show")) {
+                this.closeScreenshotPreview();
+            }
+        });
+    }
+    closeScreenshotPreview() {
+        if (!this.screenshotDialog)
+            return;
+        this.screenshotDialog.classList.remove("show");
+        this.screenshotDialog.setAttribute("aria-hidden", "true");
+        if (this.screenshotPreviewImage) {
+            this.screenshotPreviewImage.src = "";
+        }
+    }
+    openScreenshotPreview(dataUrl) {
+        if (!this.screenshotDialog || !this.screenshotPreviewImage)
+            return;
+        this.screenshotPreviewImage.src = dataUrl;
+        this.screenshotDialog.classList.add("show");
+        this.screenshotDialog.setAttribute("aria-hidden", "false");
+    }
+    getScreenshotTarget() {
+        if (this.userType === "agent") {
+            return {
+                video: this.remoteVideoEl,
+                mirror: false,
+                source: "remote"
+            };
+        }
+        return {
+            video: this.localVideoEl,
+            mirror: true,
+            source: "local"
+        };
+    }
+    captureLocalScreenshotCanvas() {
+        const target = this.getScreenshotTarget();
+        const video = target.video;
+        const width = Math.max(0, Math.floor(video.videoWidth || 0));
+        const height = Math.max(0, Math.floor(video.videoHeight || 0));
+        if (!video.srcObject ||
+            video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+            width === 0 ||
+            height === 0) {
+            throw new Error(ErrorMessages.callScreenshotUnavailable(target.source));
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+            throw new Error(ErrorMessages.CALL_SCREENSHOT_CANVAS_FAILED);
+        }
+        if (target.mirror) {
+            // Mirror the local capture so it matches the local PiP preview.
+            ctx.translate(width, 0);
+            ctx.scale(-1, 1);
+        }
+        ctx.drawImage(video, 0, 0, width, height);
+        return canvas;
+    }
+    async canvasToByteArray(canvas) {
+        const blob = await new Promise((resolve, reject) => {
+            canvas.toBlob((value) => {
+                if (value) {
+                    resolve(value);
+                    return;
+                }
+                reject(new Error(ErrorMessages.CALL_SCREENSHOT_CAPTURE_FAILED));
+            }, "image/png");
+        });
+        const buffer = await blob.arrayBuffer();
+        return Array.from(new Uint8Array(buffer));
+    }
+    async captureLocalScreenshot() {
+        const canvas = this.captureLocalScreenshotCanvas();
+        return {
+            byteArray: await this.canvasToByteArray(canvas),
+            dataUrl: canvas.toDataURL("image/png"),
+            mimeType: "image/png",
+            width: canvas.width,
+            height: canvas.height
+        };
+    }
+    async previewLocalScreenshot() {
+        try {
+            const shot = await this.captureLocalScreenshot();
+            this.openScreenshotPreview(shot.dataUrl);
+        }
+        catch (e) {
+            Logger.error(ErrorMessages.CALL_SCREENSHOT_CAPTURE_FAILED, e);
+            Logger.setStatus(String(e?.message || ErrorMessages.CALL_SCREENSHOT_CAPTURE_FAILED));
+        }
+    }
+    async handleParentScreenshot(cmd) {
+        const responseType = cmd?.type === "TAKE_SCREENSHOT"
+            ? "TAKE_SCREENSHOT_RESULT"
+            : "TAKE_SCREENSHOOT_RESULT";
+        const requestId = cmd?.requestId ?? cmd?.id ?? null;
+        try {
+            const shot = await this.captureLocalScreenshot();
+            this.bridge.emit({
+                type: responseType,
+                ok: true,
+                requestId,
+                mimeType: shot.mimeType,
+                width: shot.width,
+                height: shot.height,
+                byteArray: shot.byteArray
+            });
+        }
+        catch (e) {
+            Logger.error(ErrorMessages.CALL_SCREENSHOT_CAPTURE_FAILED, e);
+            this.bridge.emit({
+                type: responseType,
+                ok: false,
+                requestId,
+                error: String(e?.message || ErrorMessages.CALL_SCREENSHOT_CAPTURE_FAILED)
+            });
+        }
+    }
     setEndedState(ended) {
         this.ended = ended;
         this.endedOverlay.style.display = ended ? "flex" : "none";
         this.renderRemoteFallback();
         this.applyHoldControlState();
+        if (ended) {
+            this.closeScreenshotPreview();
+        }
         if (ended) {
             this.btnLeave.innerHTML = '<i class="fa-solid fa-play"></i>';
             this.btnLeave.title = "Start";
@@ -6794,6 +6970,7 @@ class UIController {
         this.renderedParticipantCount = 0;
         this.lastRemoteVideoTime = 0;
         this.remoteVideoFrameProgressAt = 0;
+        this.closeScreenshotPreview();
         this.updateRecordUI();
         this.renderCallMeta(req.display, req.participantId);
         Logger.setStatus(`Creating meeting... groupId=${req.groupId}, name=${req.display}${req.participantId ? `, participantId=${req.participantId}` : ""}`);
@@ -6874,7 +7051,8 @@ class UIController {
             this.btnUnpublish,
             this.btnReconnect,
             this.btnScreen,
-            this.btnVB
+            this.btnVB,
+            this.btnScreenshot
         ].forEach(b => b && (b.disabled = !joined));
         if (this.btnHold) {
             this.btnHold.disabled = !joined;
@@ -7517,6 +7695,10 @@ class UIController {
                     break;
                 case "TOGGLE_HOLD":
                     this.btnHold.click();
+                    break;
+                case "TAKE_SCREENSHOOT":
+                case "TAKE_SCREENSHOT":
+                    void this.handleParentScreenshot(cmd);
                     break;
                 case "RECONNECT":
                     this.reconnect();
