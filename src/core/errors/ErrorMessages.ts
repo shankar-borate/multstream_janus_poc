@@ -298,6 +298,10 @@ class ErrorMessages {
   static readonly MEDIA_DEVICE_BUSY = "Camera/Mic is busy in another app. Close other apps using them, then retry.";
   static readonly MEDIA_CONSTRAINT_UNSUPPORTED = "Camera/Mic settings are unsupported. Reconnect device or reset browser media settings.";
   static readonly MEDIA_CAMERA_MIC_GENERIC = "Unable to start camera/microphone. Check devices and browser permissions, then retry.";
+  static readonly MEDIA_SCREEN_REQUIRES_SECURE_CONTEXT = "Screen share requires HTTPS or a secure browser context.";
+  static readonly MEDIA_SCREEN_UNSUPPORTED = "Screen share is not supported in this browser.";
+  static readonly MEDIA_SCREEN_UNSUPPORTED_MOBILE = "Screen share is not supported on this mobile browser. Use a supported desktop browser or supported Android browser.";
+  static readonly MEDIA_SCREEN_REQUIRES_USER_GESTURE = "Screen share must be started from a direct user action. Tap the button again.";
   static readonly MEDIA_SCREEN_BLOCKED_OR_CANCELED = "Screen share was blocked or canceled. Select a window/screen and allow access.";
   static readonly MEDIA_SCREEN_CANCELED = "Screen share was canceled. Please try sharing again.";
   static readonly MEDIA_SCREEN_UNAVAILABLE_BUSY = "Screen share is unavailable right now. Close blocking apps and retry.";

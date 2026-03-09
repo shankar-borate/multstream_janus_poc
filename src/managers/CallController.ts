@@ -1463,6 +1463,10 @@ class CallController {
     return this.holdEnabled;
   }
 
+  public getScreenShareUnsupportedReason(): string | null {
+    return this.screenManager.getUnsupportedReason();
+  }
+
   public async toggleHold(): Promise<boolean> {
     return this.setHoldEnabled(!this.holdEnabled);
   }
@@ -1653,6 +1657,11 @@ class CallController {
   }
 
   async toggleScreenShare() {
+    const unsupportedReason = this.screenManager.getUnsupportedReason();
+    if (unsupportedReason) {
+      Logger.setStatus(unsupportedReason);
+      return;
+    }
     if (!this.plugin || this.screenToggleBusy) return;
     this.screenToggleBusy = true;
     try {

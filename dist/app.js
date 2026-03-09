@@ -524,6 +524,10 @@ ErrorMessages.MEDIA_DEVICE_MISSING = "Camera or microphone not found. Connect yo
 ErrorMessages.MEDIA_DEVICE_BUSY = "Camera/Mic is busy in another app. Close other apps using them, then retry.";
 ErrorMessages.MEDIA_CONSTRAINT_UNSUPPORTED = "Camera/Mic settings are unsupported. Reconnect device or reset browser media settings.";
 ErrorMessages.MEDIA_CAMERA_MIC_GENERIC = "Unable to start camera/microphone. Check devices and browser permissions, then retry.";
+ErrorMessages.MEDIA_SCREEN_REQUIRES_SECURE_CONTEXT = "Screen share requires HTTPS or a secure browser context.";
+ErrorMessages.MEDIA_SCREEN_UNSUPPORTED = "Screen share is not supported in this browser.";
+ErrorMessages.MEDIA_SCREEN_UNSUPPORTED_MOBILE = "Screen share is not supported on this mobile browser. Use a supported desktop browser or supported Android browser.";
+ErrorMessages.MEDIA_SCREEN_REQUIRES_USER_GESTURE = "Screen share must be started from a direct user action. Tap the button again.";
 ErrorMessages.MEDIA_SCREEN_BLOCKED_OR_CANCELED = "Screen share was blocked or canceled. Select a window/screen and allow access.";
 ErrorMessages.MEDIA_SCREEN_CANCELED = "Screen share was canceled. Please try sharing again.";
 ErrorMessages.MEDIA_SCREEN_UNAVAILABLE_BUSY = "Screen share is unavailable right now. Close blocking apps and retry.";
@@ -1142,7 +1146,7 @@ class RmsClient {
     async createRecording(groupId, meetingId) {
         const body = {
             to: groupId,
-            meetingId,
+            meetingId: meetingId,
             recordingMethod: 2,
             recordingType: 1,
             alwaysCreateNewRecording: true
@@ -1347,10 +1351,22 @@ class MediaErrorUtils {
         return ErrorMessages.MEDIA_CAMERA_MIC_GENERIC;
     }
     static getScreenShareErrorMessage(err) {
+        const name = this.getErrorName(err).toLowerCase();
+        const message = this.getErrorMessage(err);
+        const lowerMessage = message.toLowerCase();
+        if (name === "notsupportederror" || /not supported|unsupported/.test(lowerMessage)) {
+            return message || ErrorMessages.MEDIA_SCREEN_UNSUPPORTED;
+        }
+        if (name === "invalidstateerror") {
+            return ErrorMessages.MEDIA_SCREEN_REQUIRES_USER_GESTURE;
+        }
+        if (name === "securityerror" || /secure context|https/.test(lowerMessage)) {
+            return ErrorMessages.MEDIA_SCREEN_REQUIRES_SECURE_CONTEXT;
+        }
         if (this.isMediaPermissionError(err)) {
             return ErrorMessages.MEDIA_SCREEN_BLOCKED_OR_CANCELED;
         }
-        if (this.getErrorName(err).toLowerCase() === "aborterror") {
+        if (name === "aborterror") {
             return ErrorMessages.MEDIA_SCREEN_CANCELED;
         }
         if (this.isMediaBusyError(err)) {
@@ -1998,16 +2014,8 @@ class ScreenShareManager {
         this.stream = null;
     }
     async start() {
-        // Get screen share stream
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-            video: true
-        });
-        // Get audio stream
-        const mic = await navigator.mediaDevices.getUserMedia({
-            audio: true
-        });
-        // combine streams
-        mic.getAudioTracks().forEach(track => stream.addTrack(track));
+        this.ensureSupported();
+        const stream = await this.getDisplayStream();
         this.stream = stream;
         return this.stream;
     }
@@ -2019,6 +2027,67 @@ class ScreenShareManager {
     }
     getStream() {
         return this.stream;
+    }
+    isSupported() {
+        return this.getUnsupportedReason() === null;
+    }
+    getUnsupportedReason() {
+        if (!window.isSecureContext) {
+            return ErrorMessages.MEDIA_SCREEN_REQUIRES_SECURE_CONTEXT;
+        }
+        const mediaDevices = navigator.mediaDevices;
+        if (!mediaDevices || typeof mediaDevices.getDisplayMedia !== "function") {
+            return this.isMobileDevice()
+                ? ErrorMessages.MEDIA_SCREEN_UNSUPPORTED_MOBILE
+                : ErrorMessages.MEDIA_SCREEN_UNSUPPORTED;
+        }
+        return null;
+    }
+    ensureSupported() {
+        const reason = this.getUnsupportedReason();
+        if (!reason)
+            return;
+        throw this.buildNamedError(reason, /secure/i.test(reason) ? "SecurityError" : "NotSupportedError");
+    }
+    async getDisplayStream() {
+        const mediaDevices = navigator.mediaDevices;
+        const videoConstraints = {
+            frameRate: { ideal: 15, max: 20 }
+        };
+        try {
+            return await mediaDevices.getDisplayMedia({
+                video: videoConstraints,
+                audio: true
+            });
+        }
+        catch (e) {
+            if (!this.shouldRetryVideoOnly(e)) {
+                throw e;
+            }
+            Logger.warn("Display audio capture unavailable. Retrying screen share without system audio.");
+            return mediaDevices.getDisplayMedia({
+                video: videoConstraints
+            });
+        }
+    }
+    shouldRetryVideoOnly(err) {
+        const name = MediaErrorUtils.getErrorName(err).toLowerCase();
+        const message = MediaErrorUtils.getErrorMessage(err).toLowerCase();
+        return name === "typeerror" ||
+            name === "overconstrainederror" ||
+            name === "constraintnotsatisfiederror" ||
+            /audio|system audio|display audio/.test(message);
+    }
+    isMobileDevice() {
+        const ua = navigator.userAgent || "";
+        const mobileUa = /Android|iPhone|iPad|iPod/i.test(ua);
+        const iPadDesktopUa = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+        return mobileUa || iPadDesktopUa;
+    }
+    buildNamedError(message, name) {
+        const err = new Error(message);
+        err.name = name;
+        return err;
     }
 }
 class NetworkQualityManager {
@@ -5727,6 +5796,9 @@ class CallController {
     isHoldEnabled() {
         return this.holdEnabled;
     }
+    getScreenShareUnsupportedReason() {
+        return this.screenManager.getUnsupportedReason();
+    }
     async toggleHold() {
         return this.setHoldEnabled(!this.holdEnabled);
     }
@@ -5905,6 +5977,11 @@ class CallController {
         }
     }
     async toggleScreenShare() {
+        const unsupportedReason = this.screenManager.getUnsupportedReason();
+        if (unsupportedReason) {
+            Logger.setStatus(unsupportedReason);
+            return;
+        }
         if (!this.plugin || this.screenToggleBusy)
             return;
         this.screenToggleBusy = true;
@@ -6465,6 +6542,7 @@ class UIController {
         this.updateScreenshotUiCopy();
         this.updateHoldUI();
         this.updateSwapCameraButton();
+        this.applyHoldControlState();
         this.bus.on("joined", j => {
             this.joined = j;
             this.setJoinedState(j);
@@ -6757,14 +6835,19 @@ class UIController {
     applyHoldControlState() {
         const live = this.joined && !this.ended;
         const lockMediaControls = this.holdEnabled;
+        const screenShareUnsupportedReason = this.controller.getScreenShareUnsupportedReason();
         if (this.btnMute)
             this.btnMute.disabled = !live || lockMediaControls;
         if (this.btnUnpublish)
             this.btnUnpublish.disabled = !live || lockMediaControls;
         if (this.btnSwapCamera)
             this.btnSwapCamera.disabled = !live || !this.canSwapCamera;
-        if (this.btnScreen)
-            this.btnScreen.disabled = !live || lockMediaControls;
+        if (this.btnScreen) {
+            this.btnScreen.disabled = !live || lockMediaControls || !!screenShareUnsupportedReason;
+            if (screenShareUnsupportedReason) {
+                this.btnScreen.title = screenShareUnsupportedReason;
+            }
+        }
         if (this.btnVB)
             this.btnVB.disabled = !live || lockMediaControls;
         if (this.btnScreenshot)

@@ -131,6 +131,7 @@ class UIController {
     this.updateScreenshotUiCopy();
     this.updateHoldUI();
     this.updateSwapCameraButton();
+    this.applyHoldControlState();
 
     this.bus.on<boolean>("joined", j=>{
         this.joined = j;
@@ -428,11 +429,17 @@ class UIController {
   private applyHoldControlState() {
     const live = this.joined && !this.ended;
     const lockMediaControls = this.holdEnabled;
+    const screenShareUnsupportedReason = this.controller.getScreenShareUnsupportedReason();
 
     if (this.btnMute) this.btnMute.disabled = !live || lockMediaControls;
     if (this.btnUnpublish) this.btnUnpublish.disabled = !live || lockMediaControls;
     if (this.btnSwapCamera) this.btnSwapCamera.disabled = !live || !this.canSwapCamera;
-    if (this.btnScreen) this.btnScreen.disabled = !live || lockMediaControls;
+    if (this.btnScreen) {
+      this.btnScreen.disabled = !live || lockMediaControls || !!screenShareUnsupportedReason;
+      if (screenShareUnsupportedReason) {
+        this.btnScreen.title = screenShareUnsupportedReason;
+      }
+    }
     if (this.btnVB) this.btnVB.disabled = !live || lockMediaControls;
     if (this.btnScreenshot) this.btnScreenshot.disabled = !live || lockMediaControls;
     if (this.btnReconnect) this.btnReconnect.disabled = !live;

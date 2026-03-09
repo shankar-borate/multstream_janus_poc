@@ -61,10 +61,22 @@ class MediaErrorUtils {
   }
 
   static getScreenShareErrorMessage(err: unknown): string {
+    const name = this.getErrorName(err).toLowerCase();
+    const message = this.getErrorMessage(err);
+    const lowerMessage = message.toLowerCase();
+    if (name === "notsupportederror" || /not supported|unsupported/.test(lowerMessage)) {
+      return message || ErrorMessages.MEDIA_SCREEN_UNSUPPORTED;
+    }
+    if (name === "invalidstateerror") {
+      return ErrorMessages.MEDIA_SCREEN_REQUIRES_USER_GESTURE;
+    }
+    if (name === "securityerror" || /secure context|https/.test(lowerMessage)) {
+      return ErrorMessages.MEDIA_SCREEN_REQUIRES_SECURE_CONTEXT;
+    }
     if (this.isMediaPermissionError(err)) {
       return ErrorMessages.MEDIA_SCREEN_BLOCKED_OR_CANCELED;
     }
-    if (this.getErrorName(err).toLowerCase() === "aborterror") {
+    if (name === "aborterror") {
       return ErrorMessages.MEDIA_SCREEN_CANCELED;
     }
     if (this.isMediaBusyError(err)) {

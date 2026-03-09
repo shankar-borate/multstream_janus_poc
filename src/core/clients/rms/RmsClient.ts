@@ -28,7 +28,7 @@ class RmsClient {
   async createRecording(groupId: number, meetingId: number): Promise<number> {
     const body: RmsCreateRecordingRequest = {
       to: groupId,
-      meetingId,
+      meetingId: meetingId,
       recordingMethod: 2,
       recordingType: 1,
       alwaysCreateNewRecording: true
