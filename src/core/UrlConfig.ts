@@ -48,6 +48,19 @@ class UrlConfig {
       participantId = parsedParticipantId;
     }
 
+    const guIdRaw =
+      this.getString("guId", "") ||
+      this.getString("guid", "");
+    if (!guIdRaw) {
+      alert(ErrorMessages.URL_GUID_ALERT);
+      throw new Error(ErrorMessages.URL_GUID_MISSING);
+    }
+    const parsedGuId = parseInt(guIdRaw, 10);
+    if (!Number.isFinite(parsedGuId) || parsedGuId <= 0) {
+      throw new Error(ErrorMessages.URL_GUID_INVALID);
+    }
+    const guId = parsedGuId;
+
     const userTypeRaw =
       this.getString("user_type", "") ||
       this.getString("usertpye", "") ||
@@ -66,6 +79,7 @@ class UrlConfig {
     return {
       server: this.getString("server", APP_CONFIG.vcx.defaultJanusServer),
       groupId,
+      guId,
       display: this.getString("name", APP_CONFIG.vcx.defaultDisplayName),
       participantId
     };

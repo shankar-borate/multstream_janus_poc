@@ -1,11 +1,11 @@
 class RmsClient {
   constructor(private readonly http: HttpClient) {}
 
-  async createMeetingByGroup(groupId: number): Promise<number> {
+  async createMeetingByGroup(groupId: number, to: number): Promise<number> {
     const body: RmsCreateMeetingRequest = {
       groupId: groupId,
       meetingType: 1,
-      to: groupId,
+      to: to,
       recordingMethod: 2,
       autoRecording: false,
       recordingType: 1,
@@ -25,9 +25,9 @@ class RmsClient {
     return meetingId;
   }
 
-  async createRecording(groupId: number, meetingId: number): Promise<number> {
+  async createRecording(to: number, meetingId: number): Promise<number> {
     const body: RmsCreateRecordingRequest = {
-      to: groupId,
+      to: to,
       meetingId: meetingId,
       recordingMethod: 2,
       recordingType: 1,

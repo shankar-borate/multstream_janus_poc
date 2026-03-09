@@ -659,6 +659,7 @@ class UIController {
       return;
     }
     const joinSeq = ++this.autoJoinSeq;
+    const meetingTo = req.guId;
     this.lastGroupId = req.groupId;
     this.controller.clearRecordingMeetingContext();
     this.recording = false;
@@ -670,7 +671,7 @@ class UIController {
     this.renderCallMeta(req.display, req.participantId);
 
     Logger.setStatus(`Creating meeting... groupId=${req.groupId}, name=${req.display}${req.participantId ? `, participantId=${req.participantId}` : ""}`);
-    Logger.user(`[rms] create meeting request groupId=${req.groupId} (payload groupId=null, to=${req.groupId})`);
+    Logger.user(`[rms] create meeting request groupId=${req.groupId}, to=${meetingTo}`);
 
     this.audioMuted = false;
     this.videoMuted = false;
@@ -683,7 +684,7 @@ class UIController {
     this.applyConnectionOverlays();
 
     try {
-      const roomId = await this.resolveMeetingRoomId(req.groupId);
+      const roomId = await this.resolveMeetingRoomId(req.groupId, meetingTo);
       if (joinSeq !== this.autoJoinSeq) return;
 
       const cfg: JoinConfig = {
@@ -693,10 +694,12 @@ class UIController {
         participantId: req.participantId
       };
       this.lastCfg = cfg;
-      this.controller.setRecordingMeetingContext(req.groupId, cfg.roomId);
+      this.controller.setRecordingMeetingContext(req.groupId, cfg.roomId, meetingTo);
       this.renderCallMeta(cfg.display, cfg.participantId, cfg.roomId);
       this.updateDebugState({
         groupId: req.groupId,
+        guId: req.guId,
+        meetingTo,
         roomId: cfg.roomId
       });
 
@@ -709,13 +712,13 @@ class UIController {
     }
   }
 
-  private async resolveMeetingRoomId(groupId: number): Promise<number> {
+  private async resolveMeetingRoomId(groupId: number, to: number): Promise<number> {
     const server = UrlConfig.getVcxServer().server;
     const clientId = UrlConfig.getVcxServer().client_id;
     const http = new HttpClient(server, clientId);
     const rms = new RmsClient(http);
-    const meetingId = await rms.createMeetingByGroup(groupId);
-    Logger.user(`[rms] meeting created groupId=${groupId} -> meetingId(roomId)=${meetingId}`);
+    const meetingId = await rms.createMeetingByGroup(groupId, to);
+    Logger.user(`[rms] meeting created groupId=${groupId}, to=${to} -> meetingId(roomId)=${meetingId}`);
     return meetingId;
   }
 

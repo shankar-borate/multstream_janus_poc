@@ -13,6 +13,7 @@ type RecordingControllerDeps = {
 class RecordingController {
   private groupId: number | null = null;
   private meetingId: number | null = null;
+  private to: number | null = null;
   private recording = false;
   private currentRecordingId: number | null = null;
   private createInFlight = false;
@@ -20,14 +21,16 @@ class RecordingController {
 
   constructor(private readonly deps: RecordingControllerDeps) {}
 
-  setMeetingContext(groupId: number, meetingId: number) {
+  setMeetingContext(groupId: number, meetingId: number, to: number) {
     this.groupId = groupId;
     this.meetingId = meetingId;
+    this.to = to;
   }
 
   clearMeetingContext() {
     this.groupId = null;
     this.meetingId = null;
+    this.to = null;
   }
 
   reset() {
@@ -59,8 +62,9 @@ class RecordingController {
 
     const groupId = this.groupId;
     const meetingId = this.meetingId;
-    if (!Number.isFinite(groupId as number) || !Number.isFinite(meetingId as number)) {
-      ApiErrorUtils.handle({ message: "recording context missing", details: { groupId, meetingId } });
+    const to = this.to;
+    if (!Number.isFinite(groupId as number) || !Number.isFinite(meetingId as number) || !Number.isFinite(to as number)) {
+      ApiErrorUtils.handle({ message: "recording context missing", details: { groupId, meetingId, to } });
       return;
     }
 
@@ -69,9 +73,9 @@ class RecordingController {
       const server = this.deps.getServer();
       const http = new HttpClient(server.server, server.client_id);
       const rms = new RmsClient(http);
-      const recordingId = await rms.createRecording(groupId as number, meetingId as number);
+      const recordingId = await rms.createRecording(to as number, meetingId as number);
       Logger.user(
-        `[rms] recording created groupId=${groupId} meetingId=${meetingId} recordingId=${recordingId}`
+        `[rms] recording created groupId=${groupId} to=${to} meetingId=${meetingId} recordingId=${recordingId}`
       );
       Logger.user(`${source} start recording`);
       this.enableRecording(recordingId, 1);

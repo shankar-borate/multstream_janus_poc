@@ -1551,8 +1551,8 @@ class CallController {
   // RECORDING
   // =====================================
 
-  public setRecordingMeetingContext(groupId: number, meetingId: number) {
-    this.recordingController.setMeetingContext(groupId, meetingId);
+  public setRecordingMeetingContext(groupId: number, meetingId: number, to: number) {
+    this.recordingController.setMeetingContext(groupId, meetingId, to);
   }
 
   public clearRecordingMeetingContext() {

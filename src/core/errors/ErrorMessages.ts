@@ -3,6 +3,10 @@ class ErrorMessages {
     "This call link is missing a group ID, so we can't join yet. Please open the full link again or add ?groupId=1234 to the URL.";
   static readonly URL_GROUP_ID_MISSING = "Missing required query param: groupId";
   static readonly URL_GROUP_ID_INVALID = "Invalid query param: groupId must be a number";
+  static readonly URL_GUID_ALERT =
+    "This call link is missing guId, so we can't create the meeting yet. Please open the full link again or add ?guId=1234 to the URL.";
+  static readonly URL_GUID_MISSING = "Missing required query param: guId";
+  static readonly URL_GUID_INVALID = "Invalid query param: guId must be a positive number";
   static readonly URL_PARTICIPANT_ID_INVALID = "Invalid query param: participantId must be a positive number";
   static readonly URL_RUID_ALERT =
     "Customer call link is missing ruId. Please open the full link again or add ?ruId=<register-user-id>.";

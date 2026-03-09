@@ -416,6 +416,9 @@ class ErrorMessages {
 ErrorMessages.URL_GROUP_ID_ALERT = "This call link is missing a group ID, so we can't join yet. Please open the full link again or add ?groupId=1234 to the URL.";
 ErrorMessages.URL_GROUP_ID_MISSING = "Missing required query param: groupId";
 ErrorMessages.URL_GROUP_ID_INVALID = "Invalid query param: groupId must be a number";
+ErrorMessages.URL_GUID_ALERT = "This call link is missing guId, so we can't create the meeting yet. Please open the full link again or add ?guId=1234 to the URL.";
+ErrorMessages.URL_GUID_MISSING = "Missing required query param: guId";
+ErrorMessages.URL_GUID_INVALID = "Invalid query param: guId must be a positive number";
 ErrorMessages.URL_PARTICIPANT_ID_INVALID = "Invalid query param: participantId must be a positive number";
 ErrorMessages.URL_RUID_ALERT = "Customer call link is missing ruId. Please open the full link again or add ?ruId=<register-user-id>.";
 ErrorMessages.URL_RUID_MISSING = "Missing required query param: ruId (mandatory for customer)";
@@ -742,6 +745,17 @@ class UrlConfig {
             }
             participantId = parsedParticipantId;
         }
+        const guIdRaw = this.getString("guId", "") ||
+            this.getString("guid", "");
+        if (!guIdRaw) {
+            alert(ErrorMessages.URL_GUID_ALERT);
+            throw new Error(ErrorMessages.URL_GUID_MISSING);
+        }
+        const parsedGuId = parseInt(guIdRaw, 10);
+        if (!Number.isFinite(parsedGuId) || parsedGuId <= 0) {
+            throw new Error(ErrorMessages.URL_GUID_INVALID);
+        }
+        const guId = parsedGuId;
         const userTypeRaw = this.getString("user_type", "") ||
             this.getString("usertpye", "") ||
             this.getString("usertype", "");
@@ -757,6 +771,7 @@ class UrlConfig {
         return {
             server: this.getString("server", APP_CONFIG.vcx.defaultJanusServer),
             groupId,
+            guId,
             display: this.getString("name", APP_CONFIG.vcx.defaultDisplayName),
             participantId
         };
@@ -1122,11 +1137,11 @@ class RmsClient {
     constructor(http) {
         this.http = http;
     }
-    async createMeetingByGroup(groupId) {
+    async createMeetingByGroup(groupId, to) {
         const body = {
             groupId: groupId,
             meetingType: 1,
-            to: groupId,
+            to: to,
             recordingMethod: 2,
             autoRecording: false,
             recordingType: 1,
@@ -1143,9 +1158,9 @@ class RmsClient {
         }
         return meetingId;
     }
-    async createRecording(groupId, meetingId) {
+    async createRecording(to, meetingId) {
         const body = {
-            to: groupId,
+            to: to,
             meetingId: meetingId,
             recordingMethod: 2,
             recordingType: 1,
@@ -4322,18 +4337,21 @@ class RecordingController {
         this.deps = deps;
         this.groupId = null;
         this.meetingId = null;
+        this.to = null;
         this.recording = false;
         this.currentRecordingId = null;
         this.createInFlight = false;
         this.recordingRetryDelayMs = 700;
     }
-    setMeetingContext(groupId, meetingId) {
+    setMeetingContext(groupId, meetingId, to) {
         this.groupId = groupId;
         this.meetingId = meetingId;
+        this.to = to;
     }
     clearMeetingContext() {
         this.groupId = null;
         this.meetingId = null;
+        this.to = null;
     }
     reset() {
         this.recording = false;
@@ -4359,8 +4377,9 @@ class RecordingController {
             return;
         const groupId = this.groupId;
         const meetingId = this.meetingId;
-        if (!Number.isFinite(groupId) || !Number.isFinite(meetingId)) {
-            ApiErrorUtils.handle({ message: "recording context missing", details: { groupId, meetingId } });
+        const to = this.to;
+        if (!Number.isFinite(groupId) || !Number.isFinite(meetingId) || !Number.isFinite(to)) {
+            ApiErrorUtils.handle({ message: "recording context missing", details: { groupId, meetingId, to } });
             return;
         }
         this.createInFlight = true;
@@ -4368,8 +4387,8 @@ class RecordingController {
             const server = this.deps.getServer();
             const http = new HttpClient(server.server, server.client_id);
             const rms = new RmsClient(http);
-            const recordingId = await rms.createRecording(groupId, meetingId);
-            Logger.user(`[rms] recording created groupId=${groupId} meetingId=${meetingId} recordingId=${recordingId}`);
+            const recordingId = await rms.createRecording(to, meetingId);
+            Logger.user(`[rms] recording created groupId=${groupId} to=${to} meetingId=${meetingId} recordingId=${recordingId}`);
             Logger.user(`${source} start recording`);
             this.enableRecording(recordingId, 1);
         }
@@ -5885,8 +5904,8 @@ class CallController {
     // =====================================
     // RECORDING
     // =====================================
-    setRecordingMeetingContext(groupId, meetingId) {
-        this.recordingController.setMeetingContext(groupId, meetingId);
+    setRecordingMeetingContext(groupId, meetingId, to) {
+        this.recordingController.setMeetingContext(groupId, meetingId, to);
     }
     clearRecordingMeetingContext() {
         this.recordingController.clearMeetingContext();
@@ -7047,6 +7066,7 @@ class UIController {
             return;
         }
         const joinSeq = ++this.autoJoinSeq;
+        const meetingTo = req.guId;
         this.lastGroupId = req.groupId;
         this.controller.clearRecordingMeetingContext();
         this.recording = false;
@@ -7057,7 +7077,7 @@ class UIController {
         this.updateRecordUI();
         this.renderCallMeta(req.display, req.participantId);
         Logger.setStatus(`Creating meeting... groupId=${req.groupId}, name=${req.display}${req.participantId ? `, participantId=${req.participantId}` : ""}`);
-        Logger.user(`[rms] create meeting request groupId=${req.groupId} (payload groupId=null, to=${req.groupId})`);
+        Logger.user(`[rms] create meeting request groupId=${req.groupId}, to=${meetingTo}`);
         this.audioMuted = false;
         this.videoMuted = false;
         this.holdEnabled = false;
@@ -7068,7 +7088,7 @@ class UIController {
         this.setEndedState(false);
         this.applyConnectionOverlays();
         try {
-            const roomId = await this.resolveMeetingRoomId(req.groupId);
+            const roomId = await this.resolveMeetingRoomId(req.groupId, meetingTo);
             if (joinSeq !== this.autoJoinSeq)
                 return;
             const cfg = {
@@ -7078,10 +7098,12 @@ class UIController {
                 participantId: req.participantId
             };
             this.lastCfg = cfg;
-            this.controller.setRecordingMeetingContext(req.groupId, cfg.roomId);
+            this.controller.setRecordingMeetingContext(req.groupId, cfg.roomId, meetingTo);
             this.renderCallMeta(cfg.display, cfg.participantId, cfg.roomId);
             this.updateDebugState({
                 groupId: req.groupId,
+                guId: req.guId,
+                meetingTo,
                 roomId: cfg.roomId
             });
             Logger.setStatus(`Joining... roomId=${cfg.roomId}, name=${cfg.display}${cfg.participantId ? `, participantId=${cfg.participantId}` : ""}`);
@@ -7094,13 +7116,13 @@ class UIController {
             ApiErrorUtils.handle(e);
         }
     }
-    async resolveMeetingRoomId(groupId) {
+    async resolveMeetingRoomId(groupId, to) {
         const server = UrlConfig.getVcxServer().server;
         const clientId = UrlConfig.getVcxServer().client_id;
         const http = new HttpClient(server, clientId);
         const rms = new RmsClient(http);
-        const meetingId = await rms.createMeetingByGroup(groupId);
-        Logger.user(`[rms] meeting created groupId=${groupId} -> meetingId(roomId)=${meetingId}`);
+        const meetingId = await rms.createMeetingByGroup(groupId, to);
+        Logger.user(`[rms] meeting created groupId=${groupId}, to=${to} -> meetingId(roomId)=${meetingId}`);
         return meetingId;
     }
     renderCallMeta(display, participantId, roomId) {
