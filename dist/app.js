@@ -793,13 +793,13 @@ const CONNECTION_MESSAGES = {
         rotate: true,
         primary: [
             "Preparing camera and microphone...",
-            "Setting up your media devices...",
-            "Finalizing media permissions..."
+            "Preparing camera and microphone...",
+            "Preparing camera and microphone..."
         ],
         secondary: [
-            "This usually takes a few seconds.",
-            "Checking browser access to media devices.",
-            "Almost done."
+            "Please allow camera and microphone access if your browser asks.",
+            "Please allow camera and microphone access if your browser asks.",
+            "Please allow camera and microphone access if your browser asks."
         ]
     },
     NEGOTIATING: {
@@ -808,13 +808,13 @@ const CONNECTION_MESSAGES = {
         rotate: true,
         primary: [
             "Connecting your call...",
-            "Negotiating secure media channels...",
-            "Establishing video path..."
+            "Connecting your call...",
+            "Connecting your call..."
         ],
         secondary: [
-            "Please stay on this screen.",
-            "Optimizing signaling and media routing.",
-            "Finalizing connection details."
+            "Setting up the secure media connection.",
+            "Setting up the secure media connection.",
+            "Setting up the secure media connection."
         ]
     },
     WAITING_REMOTE: {
@@ -823,13 +823,13 @@ const CONNECTION_MESSAGES = {
         rotate: true,
         primary: [
             "Waiting for the other participant...",
-            "Waiting for participant to join...",
-            "Standing by for remote join..."
+            "Waiting for the other participant...",
+            "Waiting for the other participant..."
         ],
         secondary: [
-            "Keep this screen open while they join.",
-            "Share the link if they have not joined yet.",
-            "This screen will update automatically."
+            "The call will continue automatically when they join.",
+            "The call will continue automatically when they join.",
+            "The call will continue automatically when they join."
         ]
     },
     NETWORK_CHECK: {
@@ -852,14 +852,14 @@ const CONNECTION_MESSAGES = {
         severity: "warn",
         rotate: true,
         primary: [
-            "Your network seems slow...",
-            "Your connection is unstable right now...",
-            "Your upload speed is lower than required..."
+            "Your network is slow.",
+            "Your network is slow.",
+            "Your network is slow."
         ],
         secondary: [
-            "Try a stronger network or pause heavy downloads.",
-            "The other participant may see delayed video.",
-            "We are still trying to stabilize your connection."
+            "Video may take longer to connect. Try a stronger network or stop heavy downloads.",
+            "Video may take longer to connect. Try a stronger network or stop heavy downloads.",
+            "Video may take longer to connect. Try a stronger network or stop heavy downloads."
         ]
     },
     REMOTE_SLOW: {
@@ -867,14 +867,14 @@ const CONNECTION_MESSAGES = {
         severity: "warn",
         rotate: true,
         primary: [
-            "Other participant's network is slow...",
-            "Waiting for the other participant's browser to send video...",
-            "Still waiting for the participant's network..."
+            "The participant's network is slow.",
+            "The participant's network is slow.",
+            "The participant's network is slow."
         ],
         secondary: [
-            "Your connection looks active. Waiting on remote media.",
-            "The other side may need a few more seconds.",
-            "Their video should appear once their network stabilizes."
+            "Your connection is active. Waiting for their media to start.",
+            "Your connection is active. Waiting for their media to start.",
+            "Your connection is active. Waiting for their media to start."
         ]
     },
     OPTIMIZING: {
@@ -904,14 +904,14 @@ const CONNECTION_MESSAGES = {
         severity: "warn",
         rotate: true,
         primary: [
-            "Connection is unstable...",
-            "Call quality is temporarily degraded...",
-            "Recovering from network instability..."
+            "The connection is unstable.",
+            "The connection is unstable.",
+            "The connection is unstable."
         ],
         secondary: [
-            "Trying to restore stable media.",
-            "You may see temporary freezes.",
-            "Automatic recovery is in progress."
+            "We are trying a more stable route now.",
+            "We are trying a more stable route now.",
+            "We are trying a more stable route now."
         ]
     },
     SERVER_RETRYING: {
@@ -934,14 +934,14 @@ const CONNECTION_MESSAGES = {
         severity: "warn",
         rotate: true,
         primary: [
-            "Peer connection failed. Retrying...",
-            "TURN/ICE connection failed. Retrying...",
-            "Rebuilding media connection..."
+            "Secure media connection failed. Retrying...",
+            "Secure media connection failed. Retrying...",
+            "Secure media connection failed. Retrying..."
         ],
         secondary: [
-            "Trying a new media path now.",
-            "Refreshing peer connectivity.",
-            "Call media recovery is in progress."
+            "We could not establish a stable TURN/ICE media path.",
+            "We could not establish a stable TURN/ICE media path.",
+            "We could not establish a stable TURN/ICE media path."
         ]
     },
     RETRYING: {
@@ -949,14 +949,14 @@ const CONNECTION_MESSAGES = {
         severity: "warn",
         rotate: true,
         primary: [
-            "Reconnecting call...",
-            "Trying to recover connection...",
-            "Attempting a new network route..."
+            "Reconnecting the call...",
+            "Reconnecting the call...",
+            "Reconnecting the call..."
         ],
         secondary: [
-            "Please stay on this screen.",
-            "This usually resolves in a few seconds.",
-            "Session recovery is in progress."
+            "Trying a new media route now.",
+            "Trying a new media route now.",
+            "Trying a new media route now."
         ]
     },
     FAILED: {
@@ -964,7 +964,7 @@ const CONNECTION_MESSAGES = {
         severity: "error",
         rotate: false,
         primary: ["Connection failed"],
-        secondary: ["Please reconnect to continue the call."]
+        secondary: ["The media connection could not be established. Please reconnect."]
     }
 };
 class ParentBridge {
@@ -1784,6 +1784,10 @@ class VirtualBackgroundManager {
             this.disable();
             throw e;
         }
+    }
+    async refreshSource(stream) {
+        await this.prepareSourceStream(stream);
+        await this.waitForInputVideoFrame(this.sourceReadyTimeoutMs);
     }
     disable() {
         this.running = false;
@@ -4590,6 +4594,8 @@ class CallController {
         this.cameraStreamOrientation = null;
         this.cameraFacingMode = "user";
         this.cameraStreamFacingMode = null;
+        this.cameraViewportRefreshTimer = null;
+        this.cameraViewportRefreshBusy = false;
         this.publisherPc = null;
         this.subscriberPcs = new Map();
         this.localAudioEnabled = true;
@@ -4615,6 +4621,9 @@ class CallController {
         this.suppressSessionDestroyedRetryUntil = 0;
         this.lastPublisherTransportErrorReason = null;
         this.lastPublisherTransportErrorAt = 0;
+        this.onViewportChanged = () => {
+            this.scheduleViewportCameraRefresh();
+        };
         this.gateway = new JanusGateway();
         this.media = new MediaManager();
         this.vbManager = new VirtualBackgroundManager();
@@ -4652,6 +4661,7 @@ class CallController {
             leave: () => this.leave(),
             canRecord: () => this.userType === "agent"
         });
+        this.registerViewportListeners();
         this.bus.emit("connection-status", this.connectionEngine.getStatus());
         this.gateway.init();
         this.monitoringStat = new CallMonitoringStat(this.bus, this.remoteVideo, {
@@ -5361,7 +5371,70 @@ class CallController {
         return isiPhoneFamily || iPadOSDesktopUA;
     }
     getViewportOrientation() {
+        if (typeof window.matchMedia === "function" && window.matchMedia("(orientation: portrait)").matches) {
+            return "portrait";
+        }
         return window.innerHeight >= window.innerWidth ? "portrait" : "landscape";
+    }
+    registerViewportListeners() {
+        window.addEventListener("orientationchange", this.onViewportChanged);
+        window.addEventListener("resize", this.onViewportChanged);
+        window.visualViewport?.addEventListener("resize", this.onViewportChanged);
+    }
+    scheduleViewportCameraRefresh() {
+        if (!this.isIOSDevice())
+            return;
+        if (this.cameraViewportRefreshTimer !== null) {
+            window.clearTimeout(this.cameraViewportRefreshTimer);
+        }
+        this.cameraViewportRefreshTimer = window.setTimeout(() => {
+            this.cameraViewportRefreshTimer = null;
+            void this.refreshCameraForViewportChange();
+        }, 350);
+    }
+    async refreshCameraForViewportChange() {
+        if (!this.isIOSDevice() || !this.plugin || !this.joinedRoom || this.isLeaving)
+            return;
+        if (this.screenEnabled || this.cameraSwapBusy || this.screenToggleBusy || this.vbToggleBusy)
+            return;
+        if (this.cameraViewportRefreshBusy)
+            return;
+        const desiredOrientation = this.getViewportOrientation();
+        const desiredProfileKey = this.getCurrentCameraProfileKey();
+        const desiredFacingMode = this.cameraFacingMode;
+        const needsRefresh = !this.cameraStream ||
+            this.cameraStreamOrientation !== desiredOrientation ||
+            this.cameraProfileKey !== desiredProfileKey ||
+            this.cameraStreamFacingMode !== desiredFacingMode;
+        if (!needsRefresh)
+            return;
+        this.cameraViewportRefreshBusy = true;
+        try {
+            const cam = await this.ensureCameraStream();
+            const cameraTrack = this.getLiveTrack(cam, "video");
+            if (!cameraTrack) {
+                throw new Error(ErrorMessages.CALL_CAMERA_MIC_TRACK_UNAVAILABLE);
+            }
+            cameraTrack.enabled = this.localVideoEnabled;
+            if (this.vbEnabled) {
+                await this.vbManager.refreshSource(cam);
+                const vbTrack = this.getLiveTrack(this.vbManager.getOutputStream(), "video");
+                if (!vbTrack) {
+                    throw new Error(ErrorMessages.CALL_VB_OUTPUT_TRACK_UNAVAILABLE);
+                }
+                vbTrack.enabled = this.localVideoEnabled;
+                this.connectionEngine.onLocalTrackSignal(vbTrack, true);
+                this.media.setLocalTrack(this.localVideo, vbTrack);
+                return;
+            }
+            await this.replaceVideoTrack(cameraTrack);
+        }
+        catch (e) {
+            Logger.error(ErrorMessages.CALL_VIDEO_TRACK_SWITCH_FAILED, e);
+        }
+        finally {
+            this.cameraViewportRefreshBusy = false;
+        }
     }
     async getPublishTracks() {
         const stream = await this.ensureCameraStream();
@@ -6052,6 +6125,11 @@ class CallController {
             this.videoToggleBusy = false;
             this.screenToggleBusy = false;
             this.vbToggleBusy = false;
+            if (this.cameraViewportRefreshTimer !== null) {
+                window.clearTimeout(this.cameraViewportRefreshTimer);
+                this.cameraViewportRefreshTimer = null;
+            }
+            this.cameraViewportRefreshBusy = false;
             this.roster.reset();
             this.bus.emit("recording-changed", false);
             this.bus.emit("joined", false);
@@ -6606,6 +6684,9 @@ class UIController {
         this.mLocalAudioPlayback = document.getElementById("mLocalAudioPlayback");
         this.mLocalVideoPlayback = document.getElementById("mLocalVideoPlayback");
         this.prevMediaBytes = null;
+        this.latestMediaIo = null;
+        this.latestNetworkRisk = null;
+        this.latestConnectivity = null;
         this.audioMuted = false;
         this.videoMuted = false;
         this.holdEnabled = false;
@@ -6728,6 +6809,7 @@ class UIController {
             });
         });
         this.bus.on("connectivity", (s) => {
+            this.latestConnectivity = s;
             this.updateDebugState({
                 iceState: s.ice,
                 signalingState: s.signaling,
@@ -6739,6 +6821,16 @@ class UIController {
         });
         this.bus.on("media-io", (stats) => {
             this.renderMediaIo(stats);
+            this.latestMediaIo = stats;
+            if (this.connectionStatus) {
+                this.renderConnectionStatus(this.connectionStatus);
+            }
+        });
+        this.bus.on("network-risk", (signal) => {
+            this.latestNetworkRisk = signal;
+            if (this.connectionStatus) {
+                this.renderConnectionStatus(this.connectionStatus);
+            }
         });
         this.bus.on("janus-slowlink", (signal) => {
             this.participantNet.recordSlowLink(signal);
@@ -7309,9 +7401,24 @@ class UIController {
         });
     }
     resolveVisibleConnectionStatus(status) {
-        // Keep hard failures visible as-is.
-        if (status.severity === "error" || status.state === "FAILED") {
-            return status;
+        if (navigator.onLine === false) {
+            return this.overrideStatus("SYSTEM", "error", "FAILED", "Your internet connection was lost.", "Reconnect to continue the call.");
+        }
+        const transportBlocked = this.getTransportBlockedStatus(status);
+        if (transportBlocked) {
+            return transportBlocked;
+        }
+        const failedOverride = this.getFailedStatusOverride(status);
+        if (failedOverride) {
+            return failedOverride;
+        }
+        const mediaFlowOverride = this.getMediaFlowStatusOverride(status);
+        if (mediaFlowOverride) {
+            return mediaFlowOverride;
+        }
+        const networkOverride = this.getNetworkStatusOverride(status);
+        if (networkOverride) {
+            return networkOverride;
         }
         const inSetupPhase = status.state === "NEGOTIATING" || status.state === "WAITING_REMOTE";
         if (!inSetupPhase) {
@@ -7328,6 +7435,99 @@ class UIController {
             };
         }
         return status;
+    }
+    overrideStatus(owner, severity, state, primaryText, secondaryText) {
+        return { owner, severity, state, primaryText, secondaryText };
+    }
+    getTransportBlockedStatus(status) {
+        const detail = `${status.primaryText} ${status.secondaryText}`.toLowerCase();
+        const hasTurnBlockHint = detail.includes("turn server unreachable") ||
+            detail.includes("stun/ice server unreachable") ||
+            detail.includes("turn tls connection failed") ||
+            detail.includes("turn authentication failed") ||
+            detail.includes("dtls handshake failed") ||
+            detail.includes("browser offline") ||
+            detail.includes("firewall");
+        if (!hasTurnBlockHint) {
+            return null;
+        }
+        if (status.state === "PEER_RETRYING" || status.state === "RETRYING") {
+            return this.overrideStatus("SYSTEM", "warn", "PEER_RETRYING", "Secure media connection is blocked.", "Your network or firewall may be preventing the call from connecting.");
+        }
+        if (status.state === "FAILED") {
+            return this.overrideStatus("SYSTEM", "error", "FAILED", "Secure media connection is blocked.", "Your network or firewall may be preventing the call from connecting.");
+        }
+        return null;
+    }
+    getFailedStatusOverride(status) {
+        if (status.state !== "FAILED" && status.severity !== "error") {
+            return null;
+        }
+        const detail = `${status.primaryText} ${status.secondaryText}`.toLowerCase();
+        if (detail.includes("permission") ||
+            detail.includes("camera") ||
+            detail.includes("microphone") ||
+            detail.includes("mic") ||
+            detail.includes("notallowederror")) {
+            return this.overrideStatus("SYSTEM", "error", "FAILED", "Connection failed.", "Camera or microphone access is blocked. Allow access and reconnect.");
+        }
+        if (detail.includes("offline")) {
+            return this.overrideStatus("SYSTEM", "error", "FAILED", "Connection failed.", "Your internet connection appears to be offline.");
+        }
+        return this.overrideStatus("SYSTEM", "error", "FAILED", "Connection failed.", "The media connection could not be established. Please reconnect.");
+    }
+    getMediaFlowStatusOverride(status) {
+        const stats = this.latestMediaIo;
+        if (!stats)
+            return null;
+        const canExplainConnectedMediaFlow = status.state === "CONNECTED" ||
+            status.state === "DEGRADED" ||
+            status.state === "LOCAL_SLOW" ||
+            status.state === "REMOTE_SLOW" ||
+            status.state === "OPTIMIZING";
+        if (!canExplainConnectedMediaFlow) {
+            return null;
+        }
+        if (stats.matrix.remoteReceivingYourVideo === "No" && !this.videoMuted) {
+            return this.overrideStatus("LOCAL", "warn", "DEGRADED", "The call is connected, but your video is not reaching the participant.", "We are retrying your media path now.");
+        }
+        if (stats.matrix.remoteReceivingYourAudio === "No" && !this.audioMuted) {
+            return this.overrideStatus("LOCAL", "warn", "DEGRADED", "The call is connected, but your audio is not reaching the participant.", "Check mute and network stability while we retry.");
+        }
+        if (stats.matrix.localVideoPlaybackStatus === "Stalled") {
+            return this.overrideStatus("REMOTE", "warn", "DEGRADED", "Video playback is stalled.", "Media may be arriving slowly or playback may be stuck. Retrying now.");
+        }
+        if (stats.matrix.localReceivingYourVideo === "No") {
+            return this.overrideStatus("REMOTE", "warn", "DEGRADED", "The call is connected, but the participant's video is not reaching you.", "Waiting for their browser or network to start sending video.");
+        }
+        if (stats.matrix.localReceivingYourAudio === "No") {
+            return this.overrideStatus("REMOTE", "warn", "DEGRADED", "The call is connected, but the participant's audio is not reaching you.", "Waiting for incoming audio to recover.");
+        }
+        return null;
+    }
+    getNetworkStatusOverride(status) {
+        const risk = this.latestNetworkRisk;
+        if (risk && (risk.likelyDisconnect || risk.mode === "low")) {
+            return this.overrideStatus("LOCAL", "warn", "LOCAL_SLOW", "Your network is slow.", "Video may take longer to connect. Try a stronger network or stop heavy downloads.");
+        }
+        if (status.state === "REMOTE_SLOW") {
+            return this.overrideStatus("REMOTE", "warn", "REMOTE_SLOW", "The participant's network is slow.", "Your connection is active. Waiting for their media to start.");
+        }
+        if (status.state === "DEGRADED" || status.state === "OPTIMIZING" || this.isConnectionStateUnstable()) {
+            return this.overrideStatus("SYSTEM", "warn", "DEGRADED", "The connection is unstable.", "We are trying a more stable route now.");
+        }
+        if (status.state === "RETRYING") {
+            return this.overrideStatus("SYSTEM", "warn", "RETRYING", "Reconnecting the call...", "Trying a new media route now.");
+        }
+        return null;
+    }
+    isConnectionStateUnstable() {
+        const connectivity = this.latestConnectivity;
+        if (!connectivity)
+            return false;
+        const ice = String(connectivity.ice || "").toLowerCase();
+        const connection = String(connectivity.connection || "").toLowerCase();
+        return ice === "disconnected" || ice === "failed" || connection === "disconnected" || connection === "failed";
     }
     setupRemoteFallbackMonitor() {
         const refresh = () => {
@@ -7489,6 +7689,7 @@ class UIController {
         el.style.border = `1px solid ${border}`;
     }
     renderMediaIo(stats) {
+        this.latestMediaIo = stats;
         const prev = this.prevMediaBytes;
         const audioMinDeltaBytesSent = 64;
         const videoMinDeltaBytesSent = 512;

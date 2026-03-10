@@ -23,13 +23,13 @@ const CONNECTION_MESSAGES: Record<ConnectionProductState, ConnectionMessageGroup
     rotate: true,
     primary: [
       "Preparing camera and microphone...",
-      "Setting up your media devices...",
-      "Finalizing media permissions..."
+      "Preparing camera and microphone...",
+      "Preparing camera and microphone..."
     ],
     secondary: [
-      "This usually takes a few seconds.",
-      "Checking browser access to media devices.",
-      "Almost done."
+      "Please allow camera and microphone access if your browser asks.",
+      "Please allow camera and microphone access if your browser asks.",
+      "Please allow camera and microphone access if your browser asks."
     ]
   },
   NEGOTIATING: {
@@ -38,13 +38,13 @@ const CONNECTION_MESSAGES: Record<ConnectionProductState, ConnectionMessageGroup
     rotate: true,
     primary: [
       "Connecting your call...",
-      "Negotiating secure media channels...",
-      "Establishing video path..."
+      "Connecting your call...",
+      "Connecting your call..."
     ],
     secondary: [
-      "Please stay on this screen.",
-      "Optimizing signaling and media routing.",
-      "Finalizing connection details."
+      "Setting up the secure media connection.",
+      "Setting up the secure media connection.",
+      "Setting up the secure media connection."
     ]
   },
   WAITING_REMOTE: {
@@ -53,13 +53,13 @@ const CONNECTION_MESSAGES: Record<ConnectionProductState, ConnectionMessageGroup
     rotate: true,
     primary: [
       "Waiting for the other participant...",
-      "Waiting for participant to join...",
-      "Standing by for remote join..."
+      "Waiting for the other participant...",
+      "Waiting for the other participant..."
     ],
     secondary: [
-      "Keep this screen open while they join.",
-      "Share the link if they have not joined yet.",
-      "This screen will update automatically."
+      "The call will continue automatically when they join.",
+      "The call will continue automatically when they join.",
+      "The call will continue automatically when they join."
     ]
   },
   NETWORK_CHECK: {
@@ -82,14 +82,14 @@ const CONNECTION_MESSAGES: Record<ConnectionProductState, ConnectionMessageGroup
     severity: "warn",
     rotate: true,
     primary: [
-      "Your network seems slow...",
-      "Your connection is unstable right now...",
-      "Your upload speed is lower than required..."
+      "Your network is slow.",
+      "Your network is slow.",
+      "Your network is slow."
     ],
     secondary: [
-      "Try a stronger network or pause heavy downloads.",
-      "The other participant may see delayed video.",
-      "We are still trying to stabilize your connection."
+      "Video may take longer to connect. Try a stronger network or stop heavy downloads.",
+      "Video may take longer to connect. Try a stronger network or stop heavy downloads.",
+      "Video may take longer to connect. Try a stronger network or stop heavy downloads."
     ]
   },
   REMOTE_SLOW: {
@@ -97,14 +97,14 @@ const CONNECTION_MESSAGES: Record<ConnectionProductState, ConnectionMessageGroup
     severity: "warn",
     rotate: true,
     primary: [
-      "Other participant's network is slow...",
-      "Waiting for the other participant's browser to send video...",
-      "Still waiting for the participant's network..."
+      "The participant's network is slow.",
+      "The participant's network is slow.",
+      "The participant's network is slow."
     ],
     secondary: [
-      "Your connection looks active. Waiting on remote media.",
-      "The other side may need a few more seconds.",
-      "Their video should appear once their network stabilizes."
+      "Your connection is active. Waiting for their media to start.",
+      "Your connection is active. Waiting for their media to start.",
+      "Your connection is active. Waiting for their media to start."
     ]
   },
   OPTIMIZING: {
@@ -134,14 +134,14 @@ const CONNECTION_MESSAGES: Record<ConnectionProductState, ConnectionMessageGroup
     severity: "warn",
     rotate: true,
     primary: [
-      "Connection is unstable...",
-      "Call quality is temporarily degraded...",
-      "Recovering from network instability..."
+      "The connection is unstable.",
+      "The connection is unstable.",
+      "The connection is unstable."
     ],
     secondary: [
-      "Trying to restore stable media.",
-      "You may see temporary freezes.",
-      "Automatic recovery is in progress."
+      "We are trying a more stable route now.",
+      "We are trying a more stable route now.",
+      "We are trying a more stable route now."
     ]
   },
   SERVER_RETRYING: {
@@ -164,14 +164,14 @@ const CONNECTION_MESSAGES: Record<ConnectionProductState, ConnectionMessageGroup
     severity: "warn",
     rotate: true,
     primary: [
-      "Peer connection failed. Retrying...",
-      "TURN/ICE connection failed. Retrying...",
-      "Rebuilding media connection..."
+      "Secure media connection failed. Retrying...",
+      "Secure media connection failed. Retrying...",
+      "Secure media connection failed. Retrying..."
     ],
     secondary: [
-      "Trying a new media path now.",
-      "Refreshing peer connectivity.",
-      "Call media recovery is in progress."
+      "We could not establish a stable TURN/ICE media path.",
+      "We could not establish a stable TURN/ICE media path.",
+      "We could not establish a stable TURN/ICE media path."
     ]
   },
   RETRYING: {
@@ -179,14 +179,14 @@ const CONNECTION_MESSAGES: Record<ConnectionProductState, ConnectionMessageGroup
     severity: "warn",
     rotate: true,
     primary: [
-      "Reconnecting call...",
-      "Trying to recover connection...",
-      "Attempting a new network route..."
+      "Reconnecting the call...",
+      "Reconnecting the call...",
+      "Reconnecting the call..."
     ],
     secondary: [
-      "Please stay on this screen.",
-      "This usually resolves in a few seconds.",
-      "Session recovery is in progress."
+      "Trying a new media route now.",
+      "Trying a new media route now.",
+      "Trying a new media route now."
     ]
   },
   FAILED: {
@@ -194,6 +194,6 @@ const CONNECTION_MESSAGES: Record<ConnectionProductState, ConnectionMessageGroup
     severity: "error",
     rotate: false,
     primary: ["Connection failed"],
-    secondary: ["Please reconnect to continue the call."]
+    secondary: ["The media connection could not be established. Please reconnect."]
   }
 };

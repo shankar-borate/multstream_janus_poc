@@ -87,6 +87,15 @@ class UIController {
   private mLocalAudioPlayback = document.getElementById("mLocalAudioPlayback") as HTMLDivElement;
   private mLocalVideoPlayback = document.getElementById("mLocalVideoPlayback") as HTMLDivElement;
   private prevMediaBytes: MediaIoSnapshot["bytes"] | null = null;
+  private latestMediaIo: MediaIoSnapshot | null = null;
+  private latestNetworkRisk: NetworkRiskSignal | null = null;
+  private latestConnectivity: {
+    ice: string;
+    signaling: string;
+    connection: string;
+    gathering: string;
+    ts: number;
+  } | null = null;
 
   private audioMuted = false;
   private videoMuted = false;
@@ -224,6 +233,7 @@ class UIController {
       });
     });
     this.bus.on<any>("connectivity", (s) => {
+        this.latestConnectivity = s;
         this.updateDebugState({
           iceState: s.ice,
           signalingState: s.signaling,
@@ -235,6 +245,16 @@ class UIController {
     });
     this.bus.on<MediaIoSnapshot>("media-io", (stats) => {
       this.renderMediaIo(stats);
+      this.latestMediaIo = stats;
+      if (this.connectionStatus) {
+        this.renderConnectionStatus(this.connectionStatus);
+      }
+    });
+    this.bus.on<NetworkRiskSignal>("network-risk", (signal) => {
+      this.latestNetworkRisk = signal;
+      if (this.connectionStatus) {
+        this.renderConnectionStatus(this.connectionStatus);
+      }
     });
     this.bus.on<JanusSlowLinkSignal>("janus-slowlink", (signal) => {
       this.participantNet.recordSlowLink(signal);
@@ -838,10 +858,36 @@ class UIController {
   }
 
   private resolveVisibleConnectionStatus(status: ConnectionStatusView): ConnectionStatusView {
-    // Keep hard failures visible as-is.
-    if (status.severity === "error" || status.state === "FAILED") {
-      return status;
+    if (navigator.onLine === false) {
+      return this.overrideStatus(
+        "SYSTEM",
+        "error",
+        "FAILED",
+        "Your internet connection was lost.",
+        "Reconnect to continue the call."
+      );
     }
+
+    const transportBlocked = this.getTransportBlockedStatus(status);
+    if (transportBlocked) {
+      return transportBlocked;
+    }
+
+    const failedOverride = this.getFailedStatusOverride(status);
+    if (failedOverride) {
+      return failedOverride;
+    }
+
+    const mediaFlowOverride = this.getMediaFlowStatusOverride(status);
+    if (mediaFlowOverride) {
+      return mediaFlowOverride;
+    }
+
+    const networkOverride = this.getNetworkStatusOverride(status);
+    if (networkOverride) {
+      return networkOverride;
+    }
+
     const inSetupPhase = status.state === "NEGOTIATING" || status.state === "WAITING_REMOTE";
     if (!inSetupPhase) {
       return status;
@@ -857,6 +903,214 @@ class UIController {
       };
     }
     return status;
+  }
+
+  private overrideStatus(
+    owner: ConnectionOwner,
+    severity: ConnectionSeverity,
+    state: ConnectionProductState,
+    primaryText: string,
+    secondaryText: string
+  ): ConnectionStatusView {
+    return { owner, severity, state, primaryText, secondaryText };
+  }
+
+  private getTransportBlockedStatus(status: ConnectionStatusView): ConnectionStatusView | null {
+    const detail = `${status.primaryText} ${status.secondaryText}`.toLowerCase();
+    const hasTurnBlockHint =
+      detail.includes("turn server unreachable") ||
+      detail.includes("stun/ice server unreachable") ||
+      detail.includes("turn tls connection failed") ||
+      detail.includes("turn authentication failed") ||
+      detail.includes("dtls handshake failed") ||
+      detail.includes("browser offline") ||
+      detail.includes("firewall");
+
+    if (!hasTurnBlockHint) {
+      return null;
+    }
+
+    if (status.state === "PEER_RETRYING" || status.state === "RETRYING") {
+      return this.overrideStatus(
+        "SYSTEM",
+        "warn",
+        "PEER_RETRYING",
+        "Secure media connection is blocked.",
+        "Your network or firewall may be preventing the call from connecting."
+      );
+    }
+
+    if (status.state === "FAILED") {
+      return this.overrideStatus(
+        "SYSTEM",
+        "error",
+        "FAILED",
+        "Secure media connection is blocked.",
+        "Your network or firewall may be preventing the call from connecting."
+      );
+    }
+
+    return null;
+  }
+
+  private getFailedStatusOverride(status: ConnectionStatusView): ConnectionStatusView | null {
+    if (status.state !== "FAILED" && status.severity !== "error") {
+      return null;
+    }
+
+    const detail = `${status.primaryText} ${status.secondaryText}`.toLowerCase();
+    if (
+      detail.includes("permission") ||
+      detail.includes("camera") ||
+      detail.includes("microphone") ||
+      detail.includes("mic") ||
+      detail.includes("notallowederror")
+    ) {
+      return this.overrideStatus(
+        "SYSTEM",
+        "error",
+        "FAILED",
+        "Connection failed.",
+        "Camera or microphone access is blocked. Allow access and reconnect."
+      );
+    }
+
+    if (detail.includes("offline")) {
+      return this.overrideStatus(
+        "SYSTEM",
+        "error",
+        "FAILED",
+        "Connection failed.",
+        "Your internet connection appears to be offline."
+      );
+    }
+
+    return this.overrideStatus(
+      "SYSTEM",
+      "error",
+      "FAILED",
+      "Connection failed.",
+      "The media connection could not be established. Please reconnect."
+    );
+  }
+
+  private getMediaFlowStatusOverride(status: ConnectionStatusView): ConnectionStatusView | null {
+    const stats = this.latestMediaIo;
+    if (!stats) return null;
+    const canExplainConnectedMediaFlow =
+      status.state === "CONNECTED" ||
+      status.state === "DEGRADED" ||
+      status.state === "LOCAL_SLOW" ||
+      status.state === "REMOTE_SLOW" ||
+      status.state === "OPTIMIZING";
+    if (!canExplainConnectedMediaFlow) {
+      return null;
+    }
+
+    if (stats.matrix.remoteReceivingYourVideo === "No" && !this.videoMuted) {
+      return this.overrideStatus(
+        "LOCAL",
+        "warn",
+        "DEGRADED",
+        "The call is connected, but your video is not reaching the participant.",
+        "We are retrying your media path now."
+      );
+    }
+
+    if (stats.matrix.remoteReceivingYourAudio === "No" && !this.audioMuted) {
+      return this.overrideStatus(
+        "LOCAL",
+        "warn",
+        "DEGRADED",
+        "The call is connected, but your audio is not reaching the participant.",
+        "Check mute and network stability while we retry."
+      );
+    }
+
+    if (stats.matrix.localVideoPlaybackStatus === "Stalled") {
+      return this.overrideStatus(
+        "REMOTE",
+        "warn",
+        "DEGRADED",
+        "Video playback is stalled.",
+        "Media may be arriving slowly or playback may be stuck. Retrying now."
+      );
+    }
+
+    if (stats.matrix.localReceivingYourVideo === "No") {
+      return this.overrideStatus(
+        "REMOTE",
+        "warn",
+        "DEGRADED",
+        "The call is connected, but the participant's video is not reaching you.",
+        "Waiting for their browser or network to start sending video."
+      );
+    }
+
+    if (stats.matrix.localReceivingYourAudio === "No") {
+      return this.overrideStatus(
+        "REMOTE",
+        "warn",
+        "DEGRADED",
+        "The call is connected, but the participant's audio is not reaching you.",
+        "Waiting for incoming audio to recover."
+      );
+    }
+
+    return null;
+  }
+
+  private getNetworkStatusOverride(status: ConnectionStatusView): ConnectionStatusView | null {
+    const risk = this.latestNetworkRisk;
+    if (risk && (risk.likelyDisconnect || risk.mode === "low")) {
+      return this.overrideStatus(
+        "LOCAL",
+        "warn",
+        "LOCAL_SLOW",
+        "Your network is slow.",
+        "Video may take longer to connect. Try a stronger network or stop heavy downloads."
+      );
+    }
+
+    if (status.state === "REMOTE_SLOW") {
+      return this.overrideStatus(
+        "REMOTE",
+        "warn",
+        "REMOTE_SLOW",
+        "The participant's network is slow.",
+        "Your connection is active. Waiting for their media to start."
+      );
+    }
+
+    if (status.state === "DEGRADED" || status.state === "OPTIMIZING" || this.isConnectionStateUnstable()) {
+      return this.overrideStatus(
+        "SYSTEM",
+        "warn",
+        "DEGRADED",
+        "The connection is unstable.",
+        "We are trying a more stable route now."
+      );
+    }
+
+    if (status.state === "RETRYING") {
+      return this.overrideStatus(
+        "SYSTEM",
+        "warn",
+        "RETRYING",
+        "Reconnecting the call...",
+        "Trying a new media route now."
+      );
+    }
+
+    return null;
+  }
+
+  private isConnectionStateUnstable(): boolean {
+    const connectivity = this.latestConnectivity;
+    if (!connectivity) return false;
+    const ice = String(connectivity.ice || "").toLowerCase();
+    const connection = String(connectivity.connection || "").toLowerCase();
+    return ice === "disconnected" || ice === "failed" || connection === "disconnected" || connection === "failed";
   }
 
   private setupRemoteFallbackMonitor() {
@@ -1035,6 +1289,7 @@ class UIController {
   }
 
   private renderMediaIo(stats: MediaIoSnapshot) {
+    this.latestMediaIo = stats;
     const prev = this.prevMediaBytes;
     const audioMinDeltaBytesSent = 64;
     const videoMinDeltaBytesSent = 512;

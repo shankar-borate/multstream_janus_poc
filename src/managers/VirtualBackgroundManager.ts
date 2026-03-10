@@ -179,6 +179,11 @@ class VirtualBackgroundManager {
     }
   }
 
+  async refreshSource(stream: MediaStream): Promise<void> {
+    await this.prepareSourceStream(stream);
+    await this.waitForInputVideoFrame(this.sourceReadyTimeoutMs);
+  }
+
   disable(){
     this.running = false;
     this.segInFlight = false;

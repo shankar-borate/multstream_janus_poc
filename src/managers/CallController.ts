@@ -39,6 +39,8 @@ class CallController {
   private cameraStreamOrientation: "portrait" | "landscape" | null = null;
   private cameraFacingMode: "user" | "environment" = "user";
   private cameraStreamFacingMode: "user" | "environment" | null = null;
+  private cameraViewportRefreshTimer: number | null = null;
+  private cameraViewportRefreshBusy = false;
   private publisherPc: RTCPeerConnection | null = null;
   private subscriberPcs = new Map<number, RTCPeerConnection>();
   private localAudioEnabled = true;
@@ -67,6 +69,9 @@ class CallController {
   private lastPublisherTransportErrorReason: string | null = null;
   private lastPublisherTransportErrorAt = 0;
   private recordingController: RecordingController;
+  private readonly onViewportChanged = () => {
+    this.scheduleViewportCameraRefresh();
+  };
 
   constructor(
     private bus: EventBus,
@@ -111,6 +116,7 @@ class CallController {
       leave: () => this.leave(),
       canRecord: () => this.userType === "agent"
     });
+    this.registerViewportListeners();
     this.bus.emit("connection-status", this.connectionEngine.getStatus());
     this.gateway.init();
     this.monitoringStat = new CallMonitoringStat(this.bus, this.remoteVideo, {
@@ -918,7 +924,72 @@ class CallController {
   }
 
   private getViewportOrientation(): "portrait" | "landscape" {
+    if (typeof window.matchMedia === "function" && window.matchMedia("(orientation: portrait)").matches) {
+      return "portrait";
+    }
     return window.innerHeight >= window.innerWidth ? "portrait" : "landscape";
+  }
+
+  private registerViewportListeners(): void {
+    window.addEventListener("orientationchange", this.onViewportChanged);
+    window.addEventListener("resize", this.onViewportChanged);
+    window.visualViewport?.addEventListener("resize", this.onViewportChanged);
+  }
+
+  private scheduleViewportCameraRefresh(): void {
+    if (!this.isIOSDevice()) return;
+    if (this.cameraViewportRefreshTimer !== null) {
+      window.clearTimeout(this.cameraViewportRefreshTimer);
+    }
+    this.cameraViewportRefreshTimer = window.setTimeout(() => {
+      this.cameraViewportRefreshTimer = null;
+      void this.refreshCameraForViewportChange();
+    }, 350);
+  }
+
+  private async refreshCameraForViewportChange(): Promise<void> {
+    if (!this.isIOSDevice() || !this.plugin || !this.joinedRoom || this.isLeaving) return;
+    if (this.screenEnabled || this.cameraSwapBusy || this.screenToggleBusy || this.vbToggleBusy) return;
+    if (this.cameraViewportRefreshBusy) return;
+
+    const desiredOrientation = this.getViewportOrientation();
+    const desiredProfileKey = this.getCurrentCameraProfileKey();
+    const desiredFacingMode = this.cameraFacingMode;
+    const needsRefresh =
+      !this.cameraStream ||
+      this.cameraStreamOrientation !== desiredOrientation ||
+      this.cameraProfileKey !== desiredProfileKey ||
+      this.cameraStreamFacingMode !== desiredFacingMode;
+
+    if (!needsRefresh) return;
+
+    this.cameraViewportRefreshBusy = true;
+    try {
+      const cam = await this.ensureCameraStream();
+      const cameraTrack = this.getLiveTrack(cam, "video");
+      if (!cameraTrack) {
+        throw new Error(ErrorMessages.CALL_CAMERA_MIC_TRACK_UNAVAILABLE);
+      }
+
+      cameraTrack.enabled = this.localVideoEnabled;
+      if (this.vbEnabled) {
+        await this.vbManager.refreshSource(cam);
+        const vbTrack = this.getLiveTrack(this.vbManager.getOutputStream(), "video");
+        if (!vbTrack) {
+          throw new Error(ErrorMessages.CALL_VB_OUTPUT_TRACK_UNAVAILABLE);
+        }
+        vbTrack.enabled = this.localVideoEnabled;
+        this.connectionEngine.onLocalTrackSignal(vbTrack, true);
+        this.media.setLocalTrack(this.localVideo, vbTrack);
+        return;
+      }
+
+      await this.replaceVideoTrack(cameraTrack);
+    } catch (e: any) {
+      Logger.error(ErrorMessages.CALL_VIDEO_TRACK_SWITCH_FAILED, e);
+    } finally {
+      this.cameraViewportRefreshBusy = false;
+    }
   }
 
   private async getPublishTracks(): Promise<any[]> {
@@ -1652,6 +1723,11 @@ class CallController {
       this.videoToggleBusy = false;
       this.screenToggleBusy = false;
       this.vbToggleBusy = false;
+      if (this.cameraViewportRefreshTimer !== null) {
+        window.clearTimeout(this.cameraViewportRefreshTimer);
+        this.cameraViewportRefreshTimer = null;
+      }
+      this.cameraViewportRefreshBusy = false;
       this.roster.reset();
 
       this.bus.emit("recording-changed", false);
