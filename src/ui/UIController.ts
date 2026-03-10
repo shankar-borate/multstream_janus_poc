@@ -73,6 +73,12 @@ class UIController {
   private diagPanelBtn = document.getElementById("diagPanelBtn") as HTMLButtonElement;
   private diagPanelClose = document.getElementById("diagPanelClose") as HTMLButtonElement;
   private callMeta = document.getElementById("callMeta") as HTMLDivElement;
+  private audioInputHud = document.getElementById("audioInputHud") as HTMLDivElement;
+  private audioInputHudIcon = document.getElementById("audioInputHudIcon") as HTMLDivElement;
+  private audioInputHudLabel = document.getElementById("audioInputHudLabel") as HTMLDivElement;
+  private diagAudioInputCard = document.getElementById("diagAudioInputCard") as HTMLDivElement;
+  private diagAudioInputLabel = document.getElementById("diagAudioInputLabel") as HTMLDivElement;
+  private diagAudioInputDetail = document.getElementById("diagAudioInputDetail") as HTMLDivElement;
   private diagAudioSent = document.getElementById("diagAudioSent") as HTMLSpanElement;
   private diagAudioRecv = document.getElementById("diagAudioRecv") as HTMLSpanElement;
   private diagVideoSent = document.getElementById("diagVideoSent") as HTMLSpanElement;
@@ -96,6 +102,12 @@ class UIController {
     gathering: string;
     ts: number;
   } | null = null;
+  private activeAudioInput: ActiveAudioInputInfo = {
+    label: "Microphone inactive",
+    detail: "Start a call to see the active input.",
+    deviceId: null,
+    source: "unavailable"
+  };
 
   private audioMuted = false;
   private videoMuted = false;
@@ -141,6 +153,7 @@ class UIController {
     this.updateHoldUI();
     this.updateSwapCameraButton();
     this.applyHoldControlState();
+    this.renderAudioInputInfo();
 
     this.bus.on<boolean>("joined", j=>{
         this.joined = j;
@@ -162,6 +175,7 @@ class UIController {
         muted
           ? '<i class="fa-solid fa-microphone-slash"></i>'
           : '<i class="fa-solid fa-microphone"></i>';
+      this.renderAudioInputInfo();
       this.applyConnectionOverlays();
       this.bridge.emit({ type: "AUDIO_MUTED", muted });
     });
@@ -230,6 +244,14 @@ class UIController {
         callId: ctx?.callId,
         roomId: ctx?.roomId,
         participantId: ctx?.participantId
+      });
+    });
+    this.bus.on<ActiveAudioInputInfo>("audio-input-info", (info) => {
+      this.activeAudioInput = info;
+      this.renderAudioInputInfo();
+      this.updateDebugState({
+        activeAudioInput: info.label,
+        activeAudioInputSource: info.source
       });
     });
     this.bus.on<any>("connectivity", (s) => {
@@ -1251,6 +1273,66 @@ class UIController {
       text: `${this.formatBytes(delta)} [${symbol}]`,
       color
     };
+  }
+
+  private getAudioInputVisualState(): "active" | "pending" | "inactive" {
+    const source = this.activeAudioInput?.source;
+    if (source === "pending") return "pending";
+    if (source === "unavailable") return "inactive";
+    return "active";
+  }
+
+  private getAudioInputIconMarkup(state: "active" | "pending" | "inactive"): string {
+    if (this.audioMuted) {
+      return '<i class="fa-solid fa-microphone-slash"></i>';
+    }
+    if (state === "pending") {
+      return '<i class="fa-solid fa-circle-notch"></i>';
+    }
+    if (state === "inactive") {
+      return '<i class="fa-solid fa-microphone-slash"></i>';
+    }
+    return '<i class="fa-solid fa-microphone-lines"></i>';
+  }
+
+  private renderAudioInputInfo() {
+    const info = this.activeAudioInput;
+    const state = this.getAudioInputVisualState();
+    const title = info.detail ? `${info.label}. ${info.detail}` : info.label;
+
+    if (this.audioInputHud) {
+      this.audioInputHud.classList.toggle("muted", this.audioMuted);
+      this.audioInputHud.classList.toggle("pending", state === "pending");
+      this.audioInputHud.classList.toggle("inactive", state === "inactive");
+      this.audioInputHud.title = title;
+      this.audioInputHud.setAttribute("aria-label", title);
+    }
+
+    if (this.audioInputHudIcon) {
+      this.audioInputHudIcon.innerHTML = this.getAudioInputIconMarkup(state);
+      this.audioInputHudIcon.setAttribute("aria-hidden", "true");
+    }
+
+    if (this.audioInputHudLabel) {
+      this.audioInputHudLabel.textContent = info.label;
+      this.audioInputHudLabel.title = info.label;
+    }
+
+    if (this.diagAudioInputCard) {
+      this.diagAudioInputCard.classList.toggle("pending", state === "pending");
+      this.diagAudioInputCard.classList.toggle("inactive", state === "inactive");
+      this.diagAudioInputCard.title = title;
+    }
+
+    if (this.diagAudioInputLabel) {
+      this.diagAudioInputLabel.textContent = info.label;
+      this.diagAudioInputLabel.title = info.label;
+    }
+
+    if (this.diagAudioInputDetail) {
+      this.diagAudioInputDetail.textContent = info.detail;
+      this.diagAudioInputDetail.title = info.detail;
+    }
   }
 
   private renderStatusBadge(el: HTMLElement, value: string) {

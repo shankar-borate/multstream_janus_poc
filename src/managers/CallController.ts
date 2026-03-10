@@ -68,6 +68,7 @@ class CallController {
   private suppressSessionDestroyedRetryUntil = 0;
   private lastPublisherTransportErrorReason: string | null = null;
   private lastPublisherTransportErrorAt = 0;
+  private lastAudioInputInfoKey = "";
   private recordingController: RecordingController;
   private readonly onViewportChanged = () => {
     this.scheduleViewportCameraRefresh();
@@ -195,6 +196,7 @@ class CallController {
       roomId: cfg.roomId,
       participantId: cfg.participantId ?? null
     });
+    this.emitPendingAudioInputInfo();
     this.bus.emit("hold-changed", false);
     this.updateRemoteHoldState();
     this.connectionEngine.onJoinStarted();
@@ -266,6 +268,124 @@ class CallController {
     this.bus.emit("remote-hold-changed", remoteHoldActive);
   }
 
+  private emitAudioInputInfo(info: ActiveAudioInputInfo): void {
+    const nextKey = JSON.stringify(info);
+    if (this.lastAudioInputInfoKey === nextKey) return;
+    this.lastAudioInputInfoKey = nextKey;
+    this.bus.emit("audio-input-info", info);
+  }
+
+  private emitPendingAudioInputInfo(): void {
+    this.emitAudioInputInfo({
+      label: "Waiting for microphone",
+      detail: "Microphone info appears after media starts.",
+      deviceId: null,
+      source: "pending"
+    });
+  }
+
+  private emitInactiveAudioInputInfo(): void {
+    this.emitAudioInputInfo({
+      label: "Microphone inactive",
+      detail: "Start a call to see the active input.",
+      deviceId: null,
+      source: "unavailable"
+    });
+  }
+
+  private async refreshAudioInputInfo(stream: MediaStream | null | undefined): Promise<void> {
+    const track = this.getLiveTrack(stream, "audio");
+    const info = await this.describeAudioInputTrack(track);
+    this.emitAudioInputInfo(info);
+  }
+
+  private async describeAudioInputTrack(track: MediaStreamTrack | null): Promise<ActiveAudioInputInfo> {
+    if (!track) {
+      return {
+        label: "Microphone unavailable",
+        detail: "No active microphone was detected.",
+        deviceId: null,
+        source: "unavailable"
+      };
+    }
+
+    const settings = typeof track.getSettings === "function" ? track.getSettings() : ({} as MediaTrackSettings);
+    const rawLabel = String(track.label || "").trim();
+    const deviceId =
+      typeof settings.deviceId === "string" && settings.deviceId.trim().length > 0
+        ? settings.deviceId.trim()
+        : null;
+
+    if (rawLabel) {
+      return {
+        label: rawLabel,
+        detail: "Selected automatically by your browser.",
+        deviceId,
+        source: "track"
+      };
+    }
+
+    const enumeratedLabel = await this.lookupAudioInputLabel(deviceId);
+    if (enumeratedLabel) {
+      return {
+        label: enumeratedLabel,
+        detail: "Selected automatically by your browser.",
+        deviceId,
+        source: "enumerated"
+      };
+    }
+
+    if (this.isMobileDevice()) {
+      return {
+        label: this.getMobileAudioFallbackLabel(),
+        detail: "This browser hides the exact microphone name on this device.",
+        deviceId,
+        source: "mobile-fallback"
+      };
+    }
+
+    return {
+      label: "Default microphone",
+      detail: "Exact microphone name is not available in this browser.",
+      deviceId,
+      source: "default-fallback"
+    };
+  }
+
+  private async lookupAudioInputLabel(deviceId: string | null): Promise<string | null> {
+    if (!deviceId) return null;
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== "function") return null;
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const match = devices.find((device: MediaDeviceInfo) =>
+        device.kind === "audioinput" &&
+        device.deviceId === deviceId &&
+        String(device.label || "").trim().length > 0
+      );
+      return match ? String(match.label || "").trim() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private isMobileDevice(): boolean {
+    const ua = navigator.userAgent || "";
+    const mobileUa = /Android|iPhone|iPad|iPod/i.test(ua);
+    const iPadDesktopUa = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+    return mobileUa || iPadDesktopUa;
+  }
+
+  private getMobileAudioFallbackLabel(): string {
+    const ua = navigator.userAgent || "";
+    if (/iPad/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)) {
+      return "Tablet microphone";
+    }
+    if (/Android|iPhone|iPod/i.test(ua)) {
+      return "Phone microphone";
+    }
+    return "Default microphone";
+  }
+
   private syncAdvertisedHoldState() {
     this.sendPeerTelemetry({
       type: "vcx-peer-hold",
@@ -313,6 +433,7 @@ class CallController {
     this.currentRoomId = null;
     this.roster.reset();
     this.recordingController.reset();
+    this.emitInactiveAudioInputInfo();
     this.bus.emit("joined", false);
     this.bus.emit("hold-changed", false);
     this.updateRemoteHoldState();
@@ -1744,6 +1865,7 @@ class CallController {
       this.cameraStreamOrientation = null;
       this.cameraStreamFacingMode = null;
       this.cameraProfileKey = "";
+      this.emitInactiveAudioInputInfo();
       this.callId = null;
 
       Logger.setStatus(ErrorMessages.CALL_LEFT);
@@ -1945,6 +2067,7 @@ class CallController {
         this.cameraStreamOrientation = desiredOrientation;
         this.cameraProfileKey = desiredProfileKey;
         this.cameraStreamFacingMode = desiredFacingMode;
+        void this.refreshAudioInputInfo(nextStream);
 
         const nextAudio = nextStream.getAudioTracks()[0];
         if (nextAudio && (!this.screenEnabled || !this.mixedAudioTrack)) {
@@ -1978,6 +2101,7 @@ class CallController {
       if (!this.cameraStreamFacingMode) {
         this.cameraStreamFacingMode = desiredFacingMode;
       }
+      void this.refreshAudioInputInfo(this.cameraStream);
       return this.cameraStream;
     } catch (e: any) {
       Logger.error(ErrorMessages.CALL_CAMERA_ACCESS_FAILED, e);

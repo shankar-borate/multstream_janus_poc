@@ -112,6 +112,12 @@ type NetworkRiskSignal = {
   likelyDisconnect: boolean;
   message: string;
 };
+type ActiveAudioInputInfo = {
+  label: string;
+  detail: string;
+  deviceId: string | null;
+  source: "track" | "enumerated" | "mobile-fallback" | "default-fallback" | "pending" | "unavailable";
+};
 type MediaStatusMatrix = {
   remoteReceivingYourVideo: YesNoUnknown;
   remoteReceivingYourAudio: YesNoUnknown;

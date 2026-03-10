@@ -4621,6 +4621,7 @@ class CallController {
         this.suppressSessionDestroyedRetryUntil = 0;
         this.lastPublisherTransportErrorReason = null;
         this.lastPublisherTransportErrorAt = 0;
+        this.lastAudioInputInfoKey = "";
         this.onViewportChanged = () => {
             this.scheduleViewportCameraRefresh();
         };
@@ -4736,6 +4737,7 @@ class CallController {
             roomId: cfg.roomId,
             participantId: cfg.participantId ?? null
         });
+        this.emitPendingAudioInputInfo();
         this.bus.emit("hold-changed", false);
         this.updateRemoteHoldState();
         this.connectionEngine.onJoinStarted();
@@ -4794,6 +4796,112 @@ class CallController {
         this.connectionEngine.setRemoteHoldState(remoteHoldActive);
         this.bus.emit("remote-hold-changed", remoteHoldActive);
     }
+    emitAudioInputInfo(info) {
+        const nextKey = JSON.stringify(info);
+        if (this.lastAudioInputInfoKey === nextKey)
+            return;
+        this.lastAudioInputInfoKey = nextKey;
+        this.bus.emit("audio-input-info", info);
+    }
+    emitPendingAudioInputInfo() {
+        this.emitAudioInputInfo({
+            label: "Waiting for microphone",
+            detail: "Microphone info appears after media starts.",
+            deviceId: null,
+            source: "pending"
+        });
+    }
+    emitInactiveAudioInputInfo() {
+        this.emitAudioInputInfo({
+            label: "Microphone inactive",
+            detail: "Start a call to see the active input.",
+            deviceId: null,
+            source: "unavailable"
+        });
+    }
+    async refreshAudioInputInfo(stream) {
+        const track = this.getLiveTrack(stream, "audio");
+        const info = await this.describeAudioInputTrack(track);
+        this.emitAudioInputInfo(info);
+    }
+    async describeAudioInputTrack(track) {
+        if (!track) {
+            return {
+                label: "Microphone unavailable",
+                detail: "No active microphone was detected.",
+                deviceId: null,
+                source: "unavailable"
+            };
+        }
+        const settings = typeof track.getSettings === "function" ? track.getSettings() : {};
+        const rawLabel = String(track.label || "").trim();
+        const deviceId = typeof settings.deviceId === "string" && settings.deviceId.trim().length > 0
+            ? settings.deviceId.trim()
+            : null;
+        if (rawLabel) {
+            return {
+                label: rawLabel,
+                detail: "Selected automatically by your browser.",
+                deviceId,
+                source: "track"
+            };
+        }
+        const enumeratedLabel = await this.lookupAudioInputLabel(deviceId);
+        if (enumeratedLabel) {
+            return {
+                label: enumeratedLabel,
+                detail: "Selected automatically by your browser.",
+                deviceId,
+                source: "enumerated"
+            };
+        }
+        if (this.isMobileDevice()) {
+            return {
+                label: this.getMobileAudioFallbackLabel(),
+                detail: "This browser hides the exact microphone name on this device.",
+                deviceId,
+                source: "mobile-fallback"
+            };
+        }
+        return {
+            label: "Default microphone",
+            detail: "Exact microphone name is not available in this browser.",
+            deviceId,
+            source: "default-fallback"
+        };
+    }
+    async lookupAudioInputLabel(deviceId) {
+        if (!deviceId)
+            return null;
+        if (!navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== "function")
+            return null;
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const match = devices.find((device) => device.kind === "audioinput" &&
+                device.deviceId === deviceId &&
+                String(device.label || "").trim().length > 0);
+            return match ? String(match.label || "").trim() : null;
+        }
+        catch {
+            return null;
+        }
+    }
+    isMobileDevice() {
+        const ua = navigator.userAgent || "";
+        const mobileUa = /Android|iPhone|iPad|iPod/i.test(ua);
+        const iPadDesktopUa = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+        return mobileUa || iPadDesktopUa;
+    }
+    getMobileAudioFallbackLabel() {
+        const ua = navigator.userAgent || "";
+        if (/iPad/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)) {
+            return "Tablet microphone";
+        }
+        if (/Android|iPhone|iPod/i.test(ua)) {
+            return "Phone microphone";
+        }
+        return "Default microphone";
+    }
     syncAdvertisedHoldState() {
         this.sendPeerTelemetry({
             type: "vcx-peer-hold",
@@ -4840,6 +4948,7 @@ class CallController {
         this.currentRoomId = null;
         this.roster.reset();
         this.recordingController.reset();
+        this.emitInactiveAudioInputInfo();
         this.bus.emit("joined", false);
         this.bus.emit("hold-changed", false);
         this.updateRemoteHoldState();
@@ -6144,6 +6253,7 @@ class CallController {
             this.cameraStreamOrientation = null;
             this.cameraStreamFacingMode = null;
             this.cameraProfileKey = "";
+            this.emitInactiveAudioInputInfo();
             this.callId = null;
             Logger.setStatus(ErrorMessages.CALL_LEFT);
         }
@@ -6347,6 +6457,7 @@ class CallController {
                 this.cameraStreamOrientation = desiredOrientation;
                 this.cameraProfileKey = desiredProfileKey;
                 this.cameraStreamFacingMode = desiredFacingMode;
+                void this.refreshAudioInputInfo(nextStream);
                 const nextAudio = nextStream.getAudioTracks()[0];
                 if (nextAudio && (!this.screenEnabled || !this.mixedAudioTrack)) {
                     nextAudio.enabled = this.localAudioEnabled;
@@ -6380,6 +6491,7 @@ class CallController {
             if (!this.cameraStreamFacingMode) {
                 this.cameraStreamFacingMode = desiredFacingMode;
             }
+            void this.refreshAudioInputInfo(this.cameraStream);
             return this.cameraStream;
         }
         catch (e) {
@@ -6670,6 +6782,12 @@ class UIController {
         this.diagPanelBtn = document.getElementById("diagPanelBtn");
         this.diagPanelClose = document.getElementById("diagPanelClose");
         this.callMeta = document.getElementById("callMeta");
+        this.audioInputHud = document.getElementById("audioInputHud");
+        this.audioInputHudIcon = document.getElementById("audioInputHudIcon");
+        this.audioInputHudLabel = document.getElementById("audioInputHudLabel");
+        this.diagAudioInputCard = document.getElementById("diagAudioInputCard");
+        this.diagAudioInputLabel = document.getElementById("diagAudioInputLabel");
+        this.diagAudioInputDetail = document.getElementById("diagAudioInputDetail");
         this.diagAudioSent = document.getElementById("diagAudioSent");
         this.diagAudioRecv = document.getElementById("diagAudioRecv");
         this.diagVideoSent = document.getElementById("diagVideoSent");
@@ -6687,6 +6805,12 @@ class UIController {
         this.latestMediaIo = null;
         this.latestNetworkRisk = null;
         this.latestConnectivity = null;
+        this.activeAudioInput = {
+            label: "Microphone inactive",
+            detail: "Start a call to see the active input.",
+            deviceId: null,
+            source: "unavailable"
+        };
         this.audioMuted = false;
         this.videoMuted = false;
         this.holdEnabled = false;
@@ -6722,6 +6846,7 @@ class UIController {
         this.updateHoldUI();
         this.updateSwapCameraButton();
         this.applyHoldControlState();
+        this.renderAudioInputInfo();
         this.bus.on("joined", j => {
             this.joined = j;
             this.setJoinedState(j);
@@ -6741,6 +6866,7 @@ class UIController {
                 muted
                     ? '<i class="fa-solid fa-microphone-slash"></i>'
                     : '<i class="fa-solid fa-microphone"></i>';
+            this.renderAudioInputInfo();
             this.applyConnectionOverlays();
             this.bridge.emit({ type: "AUDIO_MUTED", muted });
         });
@@ -6806,6 +6932,14 @@ class UIController {
                 callId: ctx?.callId,
                 roomId: ctx?.roomId,
                 participantId: ctx?.participantId
+            });
+        });
+        this.bus.on("audio-input-info", (info) => {
+            this.activeAudioInput = info;
+            this.renderAudioInputInfo();
+            this.updateDebugState({
+                activeAudioInput: info.label,
+                activeAudioInputSource: info.source
             });
         });
         this.bus.on("connectivity", (s) => {
@@ -7653,6 +7787,59 @@ class UIController {
             text: `${this.formatBytes(delta)} [${symbol}]`,
             color
         };
+    }
+    getAudioInputVisualState() {
+        const source = this.activeAudioInput?.source;
+        if (source === "pending")
+            return "pending";
+        if (source === "unavailable")
+            return "inactive";
+        return "active";
+    }
+    getAudioInputIconMarkup(state) {
+        if (this.audioMuted) {
+            return '<i class="fa-solid fa-microphone-slash"></i>';
+        }
+        if (state === "pending") {
+            return '<i class="fa-solid fa-circle-notch"></i>';
+        }
+        if (state === "inactive") {
+            return '<i class="fa-solid fa-microphone-slash"></i>';
+        }
+        return '<i class="fa-solid fa-microphone-lines"></i>';
+    }
+    renderAudioInputInfo() {
+        const info = this.activeAudioInput;
+        const state = this.getAudioInputVisualState();
+        const title = info.detail ? `${info.label}. ${info.detail}` : info.label;
+        if (this.audioInputHud) {
+            this.audioInputHud.classList.toggle("muted", this.audioMuted);
+            this.audioInputHud.classList.toggle("pending", state === "pending");
+            this.audioInputHud.classList.toggle("inactive", state === "inactive");
+            this.audioInputHud.title = title;
+            this.audioInputHud.setAttribute("aria-label", title);
+        }
+        if (this.audioInputHudIcon) {
+            this.audioInputHudIcon.innerHTML = this.getAudioInputIconMarkup(state);
+            this.audioInputHudIcon.setAttribute("aria-hidden", "true");
+        }
+        if (this.audioInputHudLabel) {
+            this.audioInputHudLabel.textContent = info.label;
+            this.audioInputHudLabel.title = info.label;
+        }
+        if (this.diagAudioInputCard) {
+            this.diagAudioInputCard.classList.toggle("pending", state === "pending");
+            this.diagAudioInputCard.classList.toggle("inactive", state === "inactive");
+            this.diagAudioInputCard.title = title;
+        }
+        if (this.diagAudioInputLabel) {
+            this.diagAudioInputLabel.textContent = info.label;
+            this.diagAudioInputLabel.title = info.label;
+        }
+        if (this.diagAudioInputDetail) {
+            this.diagAudioInputDetail.textContent = info.detail;
+            this.diagAudioInputDetail.title = info.detail;
+        }
     }
     renderStatusBadge(el, value) {
         const normalized = String(value || "").trim();
