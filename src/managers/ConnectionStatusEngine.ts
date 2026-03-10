@@ -32,6 +32,9 @@ class ConnectionStatusEngine {
   private localIceState: RTCIceConnectionState = "new";
   private localConnState: RTCPeerConnectionState = "new";
   private localSignalingState: RTCSignalingState = "stable";
+  private localAudioEnabled = true;
+  private localVideoEnabled = true;
+  private remoteHoldActive = false;
 
   private rotationCursor = 0;
   private nextRotationAt = 0;
@@ -102,6 +105,9 @@ class ConnectionStatusEngine {
     this.localIceState = "new";
     this.localConnState = "new";
     this.localSignalingState = "stable";
+    this.localAudioEnabled = true;
+    this.localVideoEnabled = true;
+    this.remoteHoldActive = false;
     this.fatalError = null;
     this.transition("MEDIA_PREP", true);
   }
@@ -170,6 +176,9 @@ class ConnectionStatusEngine {
     this.localIceState = "new";
     this.localConnState = "new";
     this.localSignalingState = "stable";
+    this.localAudioEnabled = true;
+    this.localVideoEnabled = true;
+    this.remoteHoldActive = false;
     this.serverRetryAttempt = 0;
     this.serverRetryMax = 0;
     this.peerRetryAttempt = 0;
@@ -178,6 +187,17 @@ class ConnectionStatusEngine {
     this.peerRetryReason = "";
     this.failedReason = "";
     this.transition("INIT", true);
+  }
+
+  setLocalMediaState(audioEnabled: boolean, videoEnabled: boolean) {
+    this.localAudioEnabled = audioEnabled;
+    this.localVideoEnabled = videoEnabled;
+    this.evaluate();
+  }
+
+  setRemoteHoldState(onHold: boolean) {
+    this.remoteHoldActive = onHold;
+    this.evaluate();
   }
 
   setFatalError(primary: string, secondary: string = "") {
@@ -464,11 +484,13 @@ class ConnectionStatusEngine {
     const now = Date.now();
     const liveRemoteVideo = this.hasLiveRemoteVideoTrack();
     const hasRemote = this.remoteParticipantCount > 0 || liveRemoteVideo;
+    const localMediaPaused = !this.localAudioEnabled && !this.localVideoEnabled;
     const localConnected = this.localIceState === "connected" || this.localIceState === "completed";
     const remoteConnected = Array.from(this.subscriberIceStates.values()).some(s => s === "connected" || s === "completed");
     const connectedIce = localConnected || remoteConnected;
     const mediaFlowing = this.remoteMediaFlowAt !== null && now - this.remoteMediaFlowAt <= APP_CONFIG.connectionStatus.mediaFlowRecentMs;
     const hasLocalVideo = this.localVideoTrackIds.size > 0;
+    const hasLocalMediaContext = hasLocalVideo || localMediaPaused;
 
     const anyFailed =
       this.localIceState === "failed" ||
@@ -507,7 +529,7 @@ class ConnectionStatusEngine {
     this.disconnectedSince = null;
     this.disconnectedRetryRaised = false;
 
-    if (hasRemote && !hasLocalVideo) {
+    if (hasRemote && !hasLocalVideo && !localMediaPaused) {
       this.transition("NEGOTIATING");
       return;
     }
@@ -519,9 +541,9 @@ class ConnectionStatusEngine {
     const remoteTrackRecent =
       this.remoteTrackSeenAt !== null &&
       now - this.remoteTrackSeenAt <= APP_CONFIG.connectionStatus.mediaFlowRecentMs;
-    const remoteMediaLive = liveRemoteVideo && (mediaFlowing || remoteTrackRecent);
+    const remoteMediaLive = this.remoteHoldActive || (liveRemoteVideo && (mediaFlowing || remoteTrackRecent));
     const transportReady = connectedIce || this.remoteNegotiationReady;
-    if (hasRemote && hasLocalVideo && remoteMediaLive && transportReady) {
+    if (hasRemote && hasLocalMediaContext && remoteMediaLive && transportReady) {
       this.transition("CONNECTED");
       return;
     }
@@ -562,7 +584,12 @@ class ConnectionStatusEngine {
     const remoteWaitingTooLong =
       remoteWaitAnchor !== null &&
       now - remoteWaitAnchor > APP_CONFIG.connectionStatus.remoteSlowWaitMs;
-    const remoteFlowStalled = hasRemote && this.remoteNegotiationReady && !liveRemoteVideo && remoteWaitingTooLong;
+    const remoteFlowStalled =
+      hasRemote &&
+      this.remoteNegotiationReady &&
+      !this.remoteHoldActive &&
+      !liveRemoteVideo &&
+      remoteWaitingTooLong;
     if (remoteFlowStalled) {
       this.transition("REMOTE_SLOW");
       return;
@@ -576,7 +603,7 @@ class ConnectionStatusEngine {
     }
 
     if (!hasRemote) {
-      this.transition(this.joinedAt && hasLocalVideo ? "WAITING_REMOTE" : "NEGOTIATING");
+      this.transition(this.joinedAt && hasLocalMediaContext ? "WAITING_REMOTE" : "NEGOTIATING");
       return;
     }
 

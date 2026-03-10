@@ -2867,6 +2867,9 @@ class ConnectionStatusEngine {
         this.localIceState = "new";
         this.localConnState = "new";
         this.localSignalingState = "stable";
+        this.localAudioEnabled = true;
+        this.localVideoEnabled = true;
+        this.remoteHoldActive = false;
         this.rotationCursor = 0;
         this.nextRotationAt = 0;
         this.tickTimer = null;
@@ -2928,6 +2931,9 @@ class ConnectionStatusEngine {
         this.localIceState = "new";
         this.localConnState = "new";
         this.localSignalingState = "stable";
+        this.localAudioEnabled = true;
+        this.localVideoEnabled = true;
+        this.remoteHoldActive = false;
         this.fatalError = null;
         this.transition("MEDIA_PREP", true);
     }
@@ -2988,6 +2994,9 @@ class ConnectionStatusEngine {
         this.localIceState = "new";
         this.localConnState = "new";
         this.localSignalingState = "stable";
+        this.localAudioEnabled = true;
+        this.localVideoEnabled = true;
+        this.remoteHoldActive = false;
         this.serverRetryAttempt = 0;
         this.serverRetryMax = 0;
         this.peerRetryAttempt = 0;
@@ -2996,6 +3005,15 @@ class ConnectionStatusEngine {
         this.peerRetryReason = "";
         this.failedReason = "";
         this.transition("INIT", true);
+    }
+    setLocalMediaState(audioEnabled, videoEnabled) {
+        this.localAudioEnabled = audioEnabled;
+        this.localVideoEnabled = videoEnabled;
+        this.evaluate();
+    }
+    setRemoteHoldState(onHold) {
+        this.remoteHoldActive = onHold;
+        this.evaluate();
     }
     setFatalError(primary, secondary = "") {
         this.fatalError = { primary, secondary };
@@ -3262,11 +3280,13 @@ class ConnectionStatusEngine {
         const now = Date.now();
         const liveRemoteVideo = this.hasLiveRemoteVideoTrack();
         const hasRemote = this.remoteParticipantCount > 0 || liveRemoteVideo;
+        const localMediaPaused = !this.localAudioEnabled && !this.localVideoEnabled;
         const localConnected = this.localIceState === "connected" || this.localIceState === "completed";
         const remoteConnected = Array.from(this.subscriberIceStates.values()).some(s => s === "connected" || s === "completed");
         const connectedIce = localConnected || remoteConnected;
         const mediaFlowing = this.remoteMediaFlowAt !== null && now - this.remoteMediaFlowAt <= APP_CONFIG.connectionStatus.mediaFlowRecentMs;
         const hasLocalVideo = this.localVideoTrackIds.size > 0;
+        const hasLocalMediaContext = hasLocalVideo || localMediaPaused;
         const anyFailed = this.localIceState === "failed" ||
             this.localConnState === "failed" ||
             Array.from(this.subscriberIceStates.values()).some(s => s === "failed") ||
@@ -3297,7 +3317,7 @@ class ConnectionStatusEngine {
         }
         this.disconnectedSince = null;
         this.disconnectedRetryRaised = false;
-        if (hasRemote && !hasLocalVideo) {
+        if (hasRemote && !hasLocalVideo && !localMediaPaused) {
             this.transition("NEGOTIATING");
             return;
         }
@@ -3307,9 +3327,9 @@ class ConnectionStatusEngine {
         // so we accept recent remote track signal as a bounded fallback.
         const remoteTrackRecent = this.remoteTrackSeenAt !== null &&
             now - this.remoteTrackSeenAt <= APP_CONFIG.connectionStatus.mediaFlowRecentMs;
-        const remoteMediaLive = liveRemoteVideo && (mediaFlowing || remoteTrackRecent);
+        const remoteMediaLive = this.remoteHoldActive || (liveRemoteVideo && (mediaFlowing || remoteTrackRecent));
         const transportReady = connectedIce || this.remoteNegotiationReady;
-        if (hasRemote && hasLocalVideo && remoteMediaLive && transportReady) {
+        if (hasRemote && hasLocalMediaContext && remoteMediaLive && transportReady) {
             this.transition("CONNECTED");
             return;
         }
@@ -3340,7 +3360,11 @@ class ConnectionStatusEngine {
         const remoteWaitAnchor = this.remoteParticipantSeenAt ?? this.joinedAt;
         const remoteWaitingTooLong = remoteWaitAnchor !== null &&
             now - remoteWaitAnchor > APP_CONFIG.connectionStatus.remoteSlowWaitMs;
-        const remoteFlowStalled = hasRemote && this.remoteNegotiationReady && !liveRemoteVideo && remoteWaitingTooLong;
+        const remoteFlowStalled = hasRemote &&
+            this.remoteNegotiationReady &&
+            !this.remoteHoldActive &&
+            !liveRemoteVideo &&
+            remoteWaitingTooLong;
         if (remoteFlowStalled) {
             this.transition("REMOTE_SLOW");
             return;
@@ -3352,7 +3376,7 @@ class ConnectionStatusEngine {
             return;
         }
         if (!hasRemote) {
-            this.transition(this.joinedAt && hasLocalVideo ? "WAITING_REMOTE" : "NEGOTIATING");
+            this.transition(this.joinedAt && hasLocalMediaContext ? "WAITING_REMOTE" : "NEGOTIATING");
             return;
         }
         if (!connectedIce) {
@@ -4675,8 +4699,10 @@ class CallController {
         }
         this.activeJoinCfg = cfg;
         this.isLeaving = false;
-        this.localAudioEnabled = true;
-        this.localVideoEnabled = true;
+        if (!opts?.internalRetry) {
+            this.localAudioEnabled = true;
+            this.localVideoEnabled = true;
+        }
         this.holdEnabled = false;
         this.holdToggleBusy = false;
         this.holdResumeAudioEnabled = true;
@@ -4701,8 +4727,9 @@ class CallController {
             participantId: cfg.participantId ?? null
         });
         this.bus.emit("hold-changed", false);
-        this.bus.emit("remote-hold-changed", false);
+        this.updateRemoteHoldState();
         this.connectionEngine.onJoinStarted();
+        this.syncConnectionIntentionalState();
         try {
             const server = UrlConfig.getVcxServer().server;
             const clientId = UrlConfig.getVcxServer().client_id;
@@ -4749,6 +4776,22 @@ class CallController {
         this.suppressSessionDestroyedRetryUntil = Date.now() + 5000;
         this.gateway.destroy();
     }
+    syncConnectionIntentionalState() {
+        this.connectionEngine.setLocalMediaState(this.localAudioEnabled, this.localVideoEnabled);
+    }
+    updateRemoteHoldState() {
+        const remoteHoldActive = Array.from(this.peerHoldStateByFeed.values()).some(Boolean);
+        this.connectionEngine.setRemoteHoldState(remoteHoldActive);
+        this.bus.emit("remote-hold-changed", remoteHoldActive);
+    }
+    syncAdvertisedHoldState() {
+        this.sendPeerTelemetry({
+            type: "vcx-peer-hold",
+            ts: Date.now(),
+            onHold: this.holdEnabled || (!this.localAudioEnabled && !this.localVideoEnabled),
+            fromParticipantId: this.selfId ?? null
+        });
+    }
     cleanupForRetry() {
         this.suppressRemoteFeedRetry = true;
         this.stopAdaptiveNetworkMonitor();
@@ -4777,8 +4820,6 @@ class CallController {
         this.subscriberPcs.clear();
         this.lastPublisherTransportErrorReason = null;
         this.lastPublisherTransportErrorAt = 0;
-        this.localAudioEnabled = true;
-        this.localVideoEnabled = true;
         this.cameraFacingMode = "user";
         this.cameraStreamFacingMode = null;
         this.cameraSwapBusy = false;
@@ -4790,9 +4831,8 @@ class CallController {
         this.roster.reset();
         this.recordingController.reset();
         this.bus.emit("joined", false);
-        this.bus.emit("mute-changed", false);
         this.bus.emit("hold-changed", false);
-        this.bus.emit("remote-hold-changed", false);
+        this.updateRemoteHoldState();
         this.suppressPublisherCleanupRetry = true;
         this.destroyGatewayControlled();
     }
@@ -5062,7 +5102,7 @@ class CallController {
                         return;
                     }
                     this.peerHoldStateByFeed.set(feedId, payload.onHold === true);
-                    this.bus.emit("remote-hold-changed", Array.from(this.peerHoldStateByFeed.values()).some(Boolean));
+                    this.updateRemoteHoldState();
                 },
                 onSlowLink: (feedId, payload) => {
                     this.bus.emit("janus-slowlink", {
@@ -5080,7 +5120,7 @@ class CallController {
                     this.peerTelemetryByFeed.delete(feedId);
                     this.peerNetworkTelemetryByFeed.delete(feedId);
                     this.peerHoldStateByFeed.delete(feedId);
-                    this.bus.emit("remote-hold-changed", Array.from(this.peerHoldStateByFeed.values()).some(Boolean));
+                    this.updateRemoteHoldState();
                     this.connectionEngine.unregisterSubscriber(feedId);
                     if (this.isLeaving || this.suppressRemoteFeedRetry) {
                         Logger.warn(`Remote feed ${feedId} cleanup ignored (controlled cleanup)`);
@@ -5094,7 +5134,7 @@ class CallController {
                 onRemoteFeedRetryExhausted: (feedId, attempts) => {
                     this.subscriberPcs.delete(feedId);
                     this.peerHoldStateByFeed.delete(feedId);
-                    this.bus.emit("remote-hold-changed", Array.from(this.peerHoldStateByFeed.values()).some(Boolean));
+                    this.updateRemoteHoldState();
                     this.connectionEngine.onRemoteFeedRetryExhausted(feedId, attempts);
                     Logger.setStatus(ErrorMessages.CALL_REMOTE_VIDEO_UNSTABLE);
                     Logger.error(ErrorMessages.callRemoteFeedRetryExhausted(this.callId ?? "n/a", cfg.roomId, feedId, attempts));
@@ -5103,9 +5143,11 @@ class CallController {
             this.publish();
             this.reconcile(cfg, data["publishers"]);
             this.bus.emit("joined", true);
+            this.bus.emit("mute-changed", !this.localAudioEnabled);
             this.bus.emit("video-mute-changed", !this.localVideoEnabled);
             this.startParticipantSync(cfg);
             this.startMediaStatsLoop();
+            window.setTimeout(() => this.syncAdvertisedHoldState(), 500);
         }
         if (event === "event") {
             this.reconcile(cfg, data["publishers"]);
@@ -5237,7 +5279,7 @@ class CallController {
         this.peerTelemetryByFeed.delete(feedId);
         this.peerNetworkTelemetryByFeed.delete(feedId);
         this.peerHoldStateByFeed.delete(feedId);
-        this.bus.emit("remote-hold-changed", Array.from(this.peerHoldStateByFeed.values()).some(Boolean));
+        this.updateRemoteHoldState();
         this.remoteFeeds?.removeFeed(feedId);
         this.publishParticipants(cfg);
     }
@@ -5328,6 +5370,8 @@ class CallController {
         if (!audioTrack || !videoTrack) {
             throw new Error(ErrorMessages.CALL_CAMERA_MIC_TRACK_UNAVAILABLE);
         }
+        audioTrack.enabled = this.localAudioEnabled;
+        videoTrack.enabled = this.localVideoEnabled;
         // Ensure local preview and connectivity state are updated even when
         // browser/Janus onlocaltrack callback is delayed or missing.
         this.connectionEngine.onLocalTrackSignal(videoTrack, true);
@@ -5391,8 +5435,8 @@ class CallController {
                 this.plugin.send({
                     message: {
                         request: "configure",
-                        audio: true,
-                        video: true,
+                        audio: this.localAudioEnabled,
+                        video: this.localVideoEnabled,
                         data: APP_CONFIG.mediaTelemetry.enablePeerTelemetry,
                         bitrate: videoCfg.bitrate_bps,
                         bitrate_cap: videoCfg.bitrate_cap,
@@ -5757,6 +5801,8 @@ class CallController {
         }
         finally {
             this.audioToggleBusy = false;
+            this.syncConnectionIntentionalState();
+            this.syncAdvertisedHoldState();
             this.bus.emit("mute-changed", !this.localAudioEnabled);
         }
         return this.localAudioEnabled;
@@ -5814,7 +5860,6 @@ class CallController {
                 }
                 if (activeVideoTrack) {
                     activeVideoTrack.enabled = false;
-                    this.connectionEngine.onLocalTrackSignal(activeVideoTrack, false);
                     this.media.setLocalTrack(this.localVideo, activeVideoTrack);
                 }
                 this.localVideoEnabled = false;
@@ -5826,6 +5871,8 @@ class CallController {
         }
         finally {
             this.videoToggleBusy = false;
+            this.syncConnectionIntentionalState();
+            this.syncAdvertisedHoldState();
             this.bus.emit("video-mute-changed", !this.localVideoEnabled);
         }
         return this.localVideoEnabled;
@@ -5888,12 +5935,7 @@ class CallController {
         }
         finally {
             this.holdToggleBusy = false;
-            this.sendPeerTelemetry({
-                type: "vcx-peer-hold",
-                ts: Date.now(),
-                onHold: this.holdEnabled,
-                fromParticipantId: this.selfId ?? null
-            });
+            this.syncAdvertisedHoldState();
             this.bus.emit("hold-changed", this.holdEnabled);
         }
         return this.holdEnabled;
@@ -6016,7 +6058,7 @@ class CallController {
             this.bus.emit("mute-changed", false);
             this.bus.emit("video-mute-changed", false);
             this.bus.emit("hold-changed", false);
-            this.bus.emit("remote-hold-changed", false);
+            this.updateRemoteHoldState();
             this.connectionEngine.onLeft();
             this.media.clearLocal(this.localVideo);
             this.media.clearRemote(this.remoteVideo);
@@ -6339,7 +6381,7 @@ class CallController {
             return;
         try {
             await this.replacePublishedTrack("video", track);
-            this.connectionEngine.onLocalTrackSignal(track, track.enabled !== false);
+            this.connectionEngine.onLocalTrackSignal(track, true);
             this.media.setLocalTrack(this.localVideo, track);
         }
         catch (e) {

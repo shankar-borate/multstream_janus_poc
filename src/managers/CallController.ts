@@ -162,8 +162,10 @@ class CallController {
     }
     this.activeJoinCfg = cfg;
     this.isLeaving = false;
-    this.localAudioEnabled = true;
-    this.localVideoEnabled = true;
+    if (!opts?.internalRetry) {
+      this.localAudioEnabled = true;
+      this.localVideoEnabled = true;
+    }
     this.holdEnabled = false;
     this.holdToggleBusy = false;
     this.holdResumeAudioEnabled = true;
@@ -188,8 +190,9 @@ class CallController {
       participantId: cfg.participantId ?? null
     });
     this.bus.emit("hold-changed", false);
-    this.bus.emit("remote-hold-changed", false);
+    this.updateRemoteHoldState();
     this.connectionEngine.onJoinStarted();
+    this.syncConnectionIntentionalState();
     try {
       const server = UrlConfig.getVcxServer().server;
       const clientId = UrlConfig.getVcxServer().client_id;
@@ -247,6 +250,25 @@ class CallController {
     this.gateway.destroy();
   }
 
+  private syncConnectionIntentionalState() {
+    this.connectionEngine.setLocalMediaState(this.localAudioEnabled, this.localVideoEnabled);
+  }
+
+  private updateRemoteHoldState() {
+    const remoteHoldActive = Array.from(this.peerHoldStateByFeed.values()).some(Boolean);
+    this.connectionEngine.setRemoteHoldState(remoteHoldActive);
+    this.bus.emit("remote-hold-changed", remoteHoldActive);
+  }
+
+  private syncAdvertisedHoldState() {
+    this.sendPeerTelemetry({
+      type: "vcx-peer-hold",
+      ts: Date.now(),
+      onHold: this.holdEnabled || (!this.localAudioEnabled && !this.localVideoEnabled),
+      fromParticipantId: this.selfId ?? null
+    });
+  }
+
   private cleanupForRetry() {
     this.suppressRemoteFeedRetry = true;
     this.stopAdaptiveNetworkMonitor();
@@ -275,8 +297,6 @@ class CallController {
     this.subscriberPcs.clear();
     this.lastPublisherTransportErrorReason = null;
     this.lastPublisherTransportErrorAt = 0;
-    this.localAudioEnabled = true;
-    this.localVideoEnabled = true;
     this.cameraFacingMode = "user";
     this.cameraStreamFacingMode = null;
     this.cameraSwapBusy = false;
@@ -288,9 +308,8 @@ class CallController {
     this.roster.reset();
     this.recordingController.reset();
     this.bus.emit("joined", false);
-    this.bus.emit("mute-changed", false);
     this.bus.emit("hold-changed", false);
-    this.bus.emit("remote-hold-changed", false);
+    this.updateRemoteHoldState();
 
     this.suppressPublisherCleanupRetry = true;
     this.destroyGatewayControlled();
@@ -619,7 +638,7 @@ class CallController {
               return;
             }
             this.peerHoldStateByFeed.set(feedId, payload.onHold === true);
-            this.bus.emit("remote-hold-changed", Array.from(this.peerHoldStateByFeed.values()).some(Boolean));
+            this.updateRemoteHoldState();
           },
           onSlowLink: (feedId: number, payload: JanusSlowLinkEvent) => {
             this.bus.emit("janus-slowlink", {
@@ -637,7 +656,7 @@ class CallController {
             this.peerTelemetryByFeed.delete(feedId);
             this.peerNetworkTelemetryByFeed.delete(feedId);
             this.peerHoldStateByFeed.delete(feedId);
-            this.bus.emit("remote-hold-changed", Array.from(this.peerHoldStateByFeed.values()).some(Boolean));
+            this.updateRemoteHoldState();
             this.connectionEngine.unregisterSubscriber(feedId);
             if (this.isLeaving || this.suppressRemoteFeedRetry) {
               Logger.warn(`Remote feed ${feedId} cleanup ignored (controlled cleanup)`);
@@ -651,7 +670,7 @@ class CallController {
           onRemoteFeedRetryExhausted: (feedId: number, attempts: number) => {
             this.subscriberPcs.delete(feedId);
             this.peerHoldStateByFeed.delete(feedId);
-            this.bus.emit("remote-hold-changed", Array.from(this.peerHoldStateByFeed.values()).some(Boolean));
+            this.updateRemoteHoldState();
             this.connectionEngine.onRemoteFeedRetryExhausted(feedId, attempts);
             Logger.setStatus(ErrorMessages.CALL_REMOTE_VIDEO_UNSTABLE);
             Logger.error(ErrorMessages.callRemoteFeedRetryExhausted(this.callId ?? "n/a", cfg.roomId, feedId, attempts));
@@ -662,9 +681,11 @@ class CallController {
       this.publish();
       this.reconcile(cfg, data["publishers"]);
       this.bus.emit("joined", true);
+      this.bus.emit("mute-changed", !this.localAudioEnabled);
       this.bus.emit("video-mute-changed", !this.localVideoEnabled);
       this.startParticipantSync(cfg);
       this.startMediaStatsLoop();
+      window.setTimeout(() => this.syncAdvertisedHoldState(), 500);
     }
 
     if (event === "event") {
@@ -805,7 +826,7 @@ class CallController {
     this.peerTelemetryByFeed.delete(feedId);
     this.peerNetworkTelemetryByFeed.delete(feedId);
     this.peerHoldStateByFeed.delete(feedId);
-    this.bus.emit("remote-hold-changed", Array.from(this.peerHoldStateByFeed.values()).some(Boolean));
+    this.updateRemoteHoldState();
     this.remoteFeeds?.removeFeed(feedId);
     this.publishParticipants(cfg);
   }
@@ -909,6 +930,9 @@ class CallController {
       throw new Error(ErrorMessages.CALL_CAMERA_MIC_TRACK_UNAVAILABLE);
     }
 
+    audioTrack.enabled = this.localAudioEnabled;
+    videoTrack.enabled = this.localVideoEnabled;
+
     // Ensure local preview and connectivity state are updated even when
     // browser/Janus onlocaltrack callback is delayed or missing.
     this.connectionEngine.onLocalTrackSignal(videoTrack, true);
@@ -986,8 +1010,8 @@ class CallController {
         this.plugin.send({
           message: {
             request: "configure",
-            audio: true,
-            video: true,
+            audio: this.localAudioEnabled,
+            video: this.localVideoEnabled,
             data: APP_CONFIG.mediaTelemetry.enablePeerTelemetry,
             bitrate: videoCfg.bitrate_bps,
             bitrate_cap: videoCfg.bitrate_cap,
@@ -1369,6 +1393,8 @@ class CallController {
       Logger.setStatus(MediaErrorUtils.getCameraMicErrorMessage(e));
     } finally {
       this.audioToggleBusy = false;
+      this.syncConnectionIntentionalState();
+      this.syncAdvertisedHoldState();
       this.bus.emit("mute-changed", !this.localAudioEnabled);
     }
     return this.localAudioEnabled;
@@ -1421,7 +1447,6 @@ class CallController {
         }
         if (activeVideoTrack) {
           activeVideoTrack.enabled = false;
-          this.connectionEngine.onLocalTrackSignal(activeVideoTrack, false);
           this.media.setLocalTrack(this.localVideo, activeVideoTrack);
         }
         this.localVideoEnabled = false;
@@ -1431,6 +1456,8 @@ class CallController {
       Logger.setStatus(MediaErrorUtils.getCameraMicErrorMessage(e));
     } finally {
       this.videoToggleBusy = false;
+      this.syncConnectionIntentionalState();
+      this.syncAdvertisedHoldState();
       this.bus.emit("video-mute-changed", !this.localVideoEnabled);
     }
     return this.localVideoEnabled;
@@ -1496,12 +1523,7 @@ class CallController {
       Logger.setStatus(MediaErrorUtils.getCameraMicErrorMessage(e));
     } finally {
       this.holdToggleBusy = false;
-      this.sendPeerTelemetry({
-        type: "vcx-peer-hold",
-        ts: Date.now(),
-        onHold: this.holdEnabled,
-        fromParticipantId: this.selfId ?? null
-      });
+      this.syncAdvertisedHoldState();
       this.bus.emit("hold-changed", this.holdEnabled);
     }
 
@@ -1637,7 +1659,7 @@ class CallController {
       this.bus.emit("mute-changed", false);
       this.bus.emit("video-mute-changed", false);
       this.bus.emit("hold-changed", false);
-      this.bus.emit("remote-hold-changed", false);
+      this.updateRemoteHoldState();
       this.connectionEngine.onLeft();
 
       this.media.clearLocal(this.localVideo);
@@ -1960,7 +1982,7 @@ class CallController {
     if (!this.plugin) return;
     try {
       await this.replacePublishedTrack("video", track);
-      this.connectionEngine.onLocalTrackSignal(track, track.enabled !== false);
+      this.connectionEngine.onLocalTrackSignal(track, true);
       this.media.setLocalTrack(this.localVideo, track);
     } catch (e: any) {
       Logger.error(ErrorMessages.CALL_REPLACE_VIDEO_TRACK_FAILED, e);
