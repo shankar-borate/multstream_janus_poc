@@ -1563,15 +1563,15 @@ class CallController {
     await this.recordingController.start(source, renderedParticipantCount);
   }
 
-  public stopRecording(source: "manual" | "auto") {
-    this.recordingController.stop(source);
+  public async stopRecording(source: "manual" | "auto") {
+    await this.recordingController.stop(source);
   }
 
   // =====================================
   // LEAVE
   // =====================================
 
-  leave() {
+  async leave() {
 
     try {
       this.isLeaving = true;
@@ -1587,7 +1587,7 @@ class CallController {
       this.serverRetryAttempt = 0;
       this.peerRetryAttempt = 0;
 
-      this.recordingController.stopOnLeave();
+      await this.recordingController.stopOnLeave();
 
       try {
         if (this.joinedRoom) {

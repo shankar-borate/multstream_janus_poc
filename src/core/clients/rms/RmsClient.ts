@@ -46,4 +46,11 @@ class RmsClient {
     }
     return recordingId;
   }
+
+  async stopRecording(recordingId: number): Promise<void> {
+    await this.http.request<RmsStopRecordingResponse>({
+      method: "PUT",
+      path: `/rms/meetings/recordings/${encodeURIComponent(String(recordingId))}`
+    });
+  }
 }

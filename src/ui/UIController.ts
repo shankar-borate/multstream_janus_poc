@@ -353,7 +353,7 @@ class UIController {
     if (this.btnRecord) {
       this.btnRecord.onclick = () => {
         if (this.recording) {
-          this.stopRecording("manual");
+          void this.stopRecording("manual");
         } else {
           void this.startRecording("manual");
         }
@@ -447,15 +447,17 @@ class UIController {
   }
 
   private syncAutoRecordingByParticipants(participantCount: number) {
-    const shouldRecord = participantCount === 2;
+    if (!this.canRecord) return;
+    const requiredParticipants = APP_CONFIG.recording.autoStartParticipantThreshold;
+    const shouldRecord = participantCount === requiredParticipants;
 
     if (shouldRecord && !this.recording) {
       void this.startRecording("auto");
       return;
     }
 
-    if (!shouldRecord && this.recording) {
-      this.stopRecording("auto");
+    if (participantCount < requiredParticipants && this.recording) {
+      void this.stopRecording("auto");
     }
   }
 
@@ -463,8 +465,12 @@ class UIController {
     await this.controller.startRecording(source, this.renderedParticipantCount);
   }
 
-  private stopRecording(source: "manual" | "auto") {
-    this.controller.stopRecording(source);
+  private async stopRecording(source: "manual" | "auto") {
+    try {
+      await this.controller.stopRecording(source);
+    } catch (e: any) {
+      Logger.error(ErrorMessages.callRecordingLog(`ui stop failed source=${source}`), e);
+    }
   }
 
   private updateRecordUI() {
@@ -1525,7 +1531,7 @@ class UIController {
           break;
 
         case "STOP_RECORDING":
-          this.stopRecording("manual");
+          void this.stopRecording("manual");
           break;
 
         case "TOGGLE_RECORDING":

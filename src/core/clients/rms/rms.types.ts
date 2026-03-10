@@ -39,3 +39,15 @@ interface RmsCreateRecordingResponse {
   alwaysCreateNewRecording?: boolean;
   autoConnect?: boolean;
 }
+
+interface RmsStopRecordingResponse {
+  meetingId?: number;
+  recordingId?: number;
+  autoRecording?: boolean;
+  to?: number;
+  recordingMethod?: number;
+  recordingType?: number;
+  alwaysCreateNewMeeting?: boolean;
+  alwaysCreateNewRecording?: boolean;
+  autoConnect?: boolean;
+}

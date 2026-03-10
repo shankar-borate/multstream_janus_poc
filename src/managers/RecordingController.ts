@@ -17,6 +17,7 @@ class RecordingController {
   private recording = false;
   private currentRecordingId: number | null = null;
   private createInFlight = false;
+  private stopInFlight = false;
   private readonly recordingRetryDelayMs = 700;
 
   constructor(private readonly deps: RecordingControllerDeps) {}
@@ -37,6 +38,7 @@ class RecordingController {
     this.recording = false;
     this.currentRecordingId = null;
     this.createInFlight = false;
+    this.stopInFlight = false;
     this.deps.bus.emit("recording-changed", false);
   }
 
@@ -58,7 +60,7 @@ class RecordingController {
       );
       return;
     }
-    if (this.recording || this.createInFlight) return;
+    if (this.recording || this.createInFlight || this.stopInFlight) return;
 
     const groupId = this.groupId;
     const meetingId = this.meetingId;
@@ -86,30 +88,22 @@ class RecordingController {
     }
   }
 
-  stop(source: "manual" | "auto") {
-    if (!this.recording) return;
+  async stop(source: "manual" | "auto"): Promise<void> {
+    if (!this.deps.canRecord() || !this.recording || this.stopInFlight) return;
     Logger.user(`${source} stop recording`);
-    this.disableRecording(1);
+    this.stopInFlight = true;
+    await this.disableRecording(1, this.currentRecordingId);
   }
 
-  stopOnLeave() {
-    const plugin = this.deps.getPlugin();
-    if (this.recording && plugin) {
-      try {
-        plugin.send({
-          message: {
-            request: "enable_recording",
-            record: false,
-            room: this.deps.getCurrentRoomId()
-          }
-        });
-      } catch (e: any) {
-        Logger.error(ErrorMessages.CALL_RECORDING_STOP_ON_LEAVE_FAILED, e);
-      }
+  async stopOnLeave(): Promise<void> {
+    if (!this.deps.canRecord() || !this.recording || this.stopInFlight) return;
+    Logger.user("leave stop recording");
+    this.stopInFlight = true;
+    try {
+      await this.disableRecording(1, this.currentRecordingId);
+    } catch (e: any) {
+      Logger.error(ErrorMessages.CALL_RECORDING_STOP_ON_LEAVE_FAILED, e);
     }
-    this.recording = false;
-    this.currentRecordingId = null;
-    this.deps.bus.emit("recording-changed", false);
   }
 
   private endCallOnRecordingFailure(message: string, err?: unknown) {
@@ -117,8 +111,38 @@ class RecordingController {
     Logger.setStatus(ErrorMessages.CALL_RECORDING_FAILED_ENDING);
     this.recording = false;
     this.currentRecordingId = null;
+    this.stopInFlight = false;
     this.deps.bus.emit("recording-changed", false);
     if (!this.deps.isLeaving()) this.deps.leave();
+  }
+
+  private async stopRmsRecording(recordingId: number): Promise<void> {
+    const server = this.deps.getServer();
+    const http = new HttpClient(server.server, server.client_id);
+    const rms = new RmsClient(http);
+    await rms.stopRecording(recordingId);
+    Logger.user(`[rms] recording stopped recordingId=${recordingId}`);
+  }
+
+  private async finalizeRecordingStopped(recordingId: number | null): Promise<void> {
+    this.recording = false;
+    this.currentRecordingId = null;
+    Logger.setStatus(ErrorMessages.CALL_RECORDING_STOPPED);
+    this.deps.bus.emit("recording-changed", false);
+
+    if (!Number.isFinite(recordingId as number)) {
+      this.stopInFlight = false;
+      return;
+    }
+
+    try {
+      await this.stopRmsRecording(recordingId as number);
+    } catch (e: any) {
+      Logger.error(ErrorMessages.callRecordingLog(`rms stop failed recordingId=${recordingId}`), e);
+      ApiErrorUtils.handle(e);
+    } finally {
+      this.stopInFlight = false;
+    }
   }
 
   private enableRecording(recordingId: number, attempt: number) {
@@ -157,34 +181,40 @@ class RecordingController {
     });
   }
 
-  private disableRecording(attempt: number) {
+  private disableRecording(attempt: number, recordingId: number | null): Promise<void> {
     const plugin = this.deps.getPlugin();
-    if (!plugin || !this.recording) return;
+    if (!plugin || !this.recording) {
+      this.stopInFlight = false;
+      return Promise.resolve();
+    }
 
-    plugin.send({
-      message: {
-        request: "enable_recording",
-        record: false,
-        room: this.deps.getCurrentRoomId()
-      },
-      success: () => {
-        this.recording = false;
-        this.currentRecordingId = null;
-        Logger.setStatus(ErrorMessages.CALL_RECORDING_STOPPED);
-        this.deps.bus.emit("recording-changed", false);
-      },
-      error: (e: any) => {
-        Logger.error(ErrorMessages.callRecordingStopFailed(attempt), e);
-        if (attempt < 2) {
-          Logger.setStatus(ErrorMessages.CALL_RECORDING_STOP_RETRYING);
-          window.setTimeout(
-            () => this.disableRecording(attempt + 1),
-            this.recordingRetryDelayMs
-          );
-          return;
+    return new Promise((resolve, reject) => {
+      plugin.send({
+        message: {
+          request: "enable_recording",
+          record: false,
+          room: this.deps.getCurrentRoomId()
+        },
+        success: () => {
+          void this.finalizeRecordingStopped(recordingId)
+            .then(resolve)
+            .catch(reject);
+        },
+        error: (e: any) => {
+          Logger.error(ErrorMessages.callRecordingStopFailed(attempt), e);
+          if (attempt < 2) {
+            Logger.setStatus(ErrorMessages.CALL_RECORDING_STOP_RETRYING);
+            window.setTimeout(() => {
+              void this.disableRecording(attempt + 1, recordingId)
+                .then(resolve)
+                .catch(reject);
+            }, this.recordingRetryDelayMs);
+            return;
+          }
+          this.endCallOnRecordingFailure("stop failed after retry", e);
+          reject(e);
         }
-        this.endCallOnRecordingFailure("stop failed after retry", e);
-      }
+      });
     });
   }
 }
