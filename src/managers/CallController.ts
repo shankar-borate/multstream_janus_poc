@@ -77,10 +77,12 @@ class CallController {
   constructor(
     private bus: EventBus,
     private localVideo: HTMLVideoElement,
-    private remoteVideo: HTMLVideoElement
+    private remoteVideo: HTMLVideoElement,
+    private remoteAudio: HTMLAudioElement
   ) {
     this.gateway = new JanusGateway();
-    this.media = new MediaManager();
+    this.media = new MediaManager(this.remoteAudio);
+    this.media.clearRemote(this.remoteVideo);
     this.vbManager = new VirtualBackgroundManager();
     this.vbManager.setSourceProvider(async () => {
       try {

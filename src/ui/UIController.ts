@@ -37,6 +37,7 @@ class UIController {
   private participantNet = new ParticipantNetworkStatsManager();
   private localVideoEl = document.getElementById("localVideo") as HTMLVideoElement;
   private remoteVideoEl = document.getElementById("remoteVideo") as HTMLVideoElement;
+  private remoteAudioEl = document.getElementById("remoteAudio") as HTMLAudioElement;
   private remoteFallback = document.getElementById("remoteFallback") as HTMLDivElement;
   private remoteFallbackDefault = document.getElementById("remoteFallbackDefault") as HTMLDivElement;
   private remoteHoldBackdrop = document.getElementById("remoteHoldBackdrop") as HTMLDivElement;
@@ -145,8 +146,9 @@ class UIController {
 
     const localVideo = this.localVideoEl;
     const remoteVideo = this.remoteVideoEl;
+    const remoteAudio = this.remoteAudioEl;
 
-    this.controller = new CallController(this.bus, localVideo, remoteVideo);
+    this.controller = new CallController(this.bus, localVideo, remoteVideo, remoteAudio);
     this.applyRecordingAccess();
     this.applySwapCameraAccess();
     this.updateScreenshotUiCopy();

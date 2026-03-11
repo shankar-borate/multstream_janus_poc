@@ -439,6 +439,7 @@ ErrorMessages.JANUS_DESTROY_FAILED = "Janus destroy failed";
 ErrorMessages.MEDIA_LOCAL_VIDEO_PLAY_FAILED = "Local video play failed";
 ErrorMessages.MEDIA_STOP_REPLACED_REMOTE_TRACK_FAILED = "Stopping replaced remote track failed";
 ErrorMessages.MEDIA_REMOTE_VIDEO_PLAY_FAILED = "Remote video play failed";
+ErrorMessages.MEDIA_REMOTE_AUDIO_PLAY_FAILED = "Remote audio play failed";
 ErrorMessages.NETWORK_QUALITY_STATS_SAMPLING_FAILED = "[network-quality] stats sampling failed";
 ErrorMessages.NETWORK_QUALITY_DETAILS_ERROR = "src=webrtc-stats error";
 ErrorMessages.REMOTE_ATTACH_ERROR_PREFIX = "Remote attach error: ";
@@ -1482,11 +1483,17 @@ class ParticipantRoster {
     reset() { this.ids.clear(); this.selfId = undefined; }
 }
 class MediaManager {
-    constructor() {
+    constructor(remoteAudioEl = null) {
+        this.remoteAudioEl = remoteAudioEl;
         this.localPreviewStream = null;
-        this.remotePlayPromise = null;
-        this.remoteGestureUnmuteBound = false;
-        this.remoteAutoplayBlocked = false;
+        this.remoteVideoStream = new MediaStream();
+        this.remoteAudioStream = new MediaStream();
+        this.remoteVideoPlayPromise = null;
+        this.remoteAudioPlayPromise = null;
+        this.remotePlaybackGestureBound = false;
+        this.remoteVideoEl = null;
+        this.bindRemotePlaybackActivation();
+        this.configureRemoteAudioElement();
     }
     setLocalTrack(video, track) {
         if (!this.localPreviewStream)
@@ -1502,38 +1509,29 @@ class MediaManager {
         });
     }
     setRemoteTrack(video, track) {
-        const ms = video.srcObject || new MediaStream();
-        video.autoplay = true;
-        video.playsInline = true;
-        // Keep one active track per kind for this single remote renderer.
-        ms.getTracks().forEach(t => {
-            if (t.kind === track.kind && t.id !== track.id) {
-                ms.removeTrack(t);
-                try {
-                    t.stop();
-                }
-                catch (e) {
-                    Logger.error(ErrorMessages.MEDIA_STOP_REPLACED_REMOTE_TRACK_FAILED, e);
-                }
-            }
-        });
-        ms.addTrack(track);
-        if (video.srcObject !== ms) {
-            video.srcObject = ms;
+        this.configureRemoteVideoElement(video);
+        this.configureRemoteAudioElement();
+        if (track.kind === "audio") {
+            this.replaceRemoteTrackInStream(this.remoteAudioStream, track);
+            this.ensureRemoteAudioPlayback();
+            return;
         }
-        this.ensureRemotePlayback(video);
+        this.replaceRemoteTrackInStream(this.remoteVideoStream, track);
+        this.ensureRemoteVideoPlayback(video);
     }
     removeRemoteTrack(video, track) {
-        const ms = video.srcObject;
-        if (!ms)
-            return;
-        ms.getTracks().forEach(t => {
-            if (t === track || t.id === track.id) {
-                ms.removeTrack(t);
+        this.configureRemoteVideoElement(video);
+        this.configureRemoteAudioElement();
+        if (track.kind === "audio") {
+            this.removeRemoteTrackFromStream(this.remoteAudioStream, track);
+            if (this.remoteAudioStream.getAudioTracks().length === 0) {
+                this.remoteAudioEl?.pause();
             }
-        });
-        if (ms.getTracks().length === 0) {
-            video.srcObject = null;
+            return;
+        }
+        this.removeRemoteTrackFromStream(this.remoteVideoStream, track);
+        if (this.remoteVideoStream.getVideoTracks().length === 0) {
+            video.pause();
         }
     }
     clearLocal(video) {
@@ -1544,86 +1542,124 @@ class MediaManager {
         this.localPreviewStream = null;
     }
     clearRemote(video) {
-        this.remotePlayPromise = null;
-        const ms = video.srcObject;
-        if (ms)
-            ms.getTracks().forEach(t => t.stop());
+        this.remoteVideoPlayPromise = null;
+        this.remoteAudioPlayPromise = null;
+        this.configureRemoteVideoElement(video);
+        this.configureRemoteAudioElement();
+        this.clearStreamTracks(this.remoteVideoStream);
+        this.clearStreamTracks(this.remoteAudioStream);
         video.pause();
-        video.srcObject = null;
+        this.remoteAudioEl?.pause();
     }
-    ensureRemotePlayback(video) {
-        if (!video.paused)
-            return;
-        if (this.remotePlayPromise)
-            return;
-        if (this.remoteAutoplayBlocked) {
-            video.muted = true;
+    configureRemoteVideoElement(video) {
+        this.remoteVideoEl = video;
+        video.autoplay = true;
+        video.playsInline = true;
+        video.muted = true;
+        if (video.srcObject !== this.remoteVideoStream) {
+            video.srcObject = this.remoteVideoStream;
         }
-        const playNormal = video.play();
-        this.remotePlayPromise = playNormal;
-        playNormal
-            .then(() => {
-            if (video.muted) {
-                this.bindGestureUnmute(video);
+    }
+    configureRemoteAudioElement() {
+        if (!this.remoteAudioEl)
+            return;
+        this.remoteAudioEl.autoplay = true;
+        this.remoteAudioEl.muted = false;
+        this.remoteAudioEl.playsInline = true;
+        if (this.remoteAudioEl.srcObject !== this.remoteAudioStream) {
+            this.remoteAudioEl.srcObject = this.remoteAudioStream;
+        }
+    }
+    replaceRemoteTrackInStream(stream, track) {
+        stream.getTracks().forEach((existing) => {
+            if (existing.kind === track.kind && existing.id !== track.id) {
+                stream.removeTrack(existing);
             }
-        })
-            .catch((e) => {
-            // Normal when track/srcObject is reloaded during renegotiation.
-            if (e?.name === "AbortError")
-                return;
-            if (e?.name !== "NotAllowedError") {
-                Logger.error(ErrorMessages.MEDIA_REMOTE_VIDEO_PLAY_FAILED, e);
-                return;
-            }
-            this.remoteAutoplayBlocked = true;
-            Logger.warn("Remote autoplay blocked. Retrying muted playback.");
-            if (this.remotePlayPromise === playNormal) {
-                this.remotePlayPromise = null;
-            }
-            if (!video.paused || this.remotePlayPromise !== null)
-                return;
-            video.muted = true;
-            const playMuted = video.play();
-            this.remotePlayPromise = playMuted;
-            playMuted
-                .then(() => this.bindGestureUnmute(video))
-                .catch((inner) => {
-                if (inner?.name === "AbortError")
-                    return;
-                Logger.error(ErrorMessages.MEDIA_REMOTE_VIDEO_PLAY_FAILED, inner);
-            })
-                .finally(() => {
-                if (this.remotePlayPromise === playMuted) {
-                    this.remotePlayPromise = null;
-                }
-            });
-        })
-            .finally(() => {
-            if (this.remotePlayPromise === playNormal) {
-                this.remotePlayPromise = null;
+        });
+        if (!stream.getTracks().some((existing) => existing.id === track.id)) {
+            stream.addTrack(track);
+        }
+    }
+    removeRemoteTrackFromStream(stream, track) {
+        stream.getTracks().forEach((existing) => {
+            if (existing === track || existing.id === track.id) {
+                stream.removeTrack(existing);
             }
         });
     }
-    bindGestureUnmute(video) {
-        if (this.remoteGestureUnmuteBound)
+    clearStreamTracks(stream) {
+        stream.getTracks().forEach((track) => {
+            stream.removeTrack(track);
+        });
+    }
+    ensureRemoteVideoPlayback(video) {
+        if (this.remoteVideoStream.getVideoTracks().length === 0)
             return;
-        this.remoteGestureUnmuteBound = true;
-        const tryUnmute = () => {
-            if (!video.srcObject || !video.muted)
+        this.primeRemoteVideoPlayback(video);
+    }
+    ensureRemoteAudioPlayback() {
+        if (this.remoteAudioStream.getAudioTracks().length === 0)
+            return;
+        this.primeRemoteAudioPlayback();
+    }
+    primeRemoteVideoPlayback(video) {
+        if (!video.paused)
+            return;
+        if (this.remoteVideoPlayPromise)
+            return;
+        const playRemoteVideo = video.play();
+        this.remoteVideoPlayPromise = playRemoteVideo;
+        playRemoteVideo
+            .catch((e) => {
+            if (e?.name === "AbortError" || e?.name === "NotSupportedError")
                 return;
-            video.muted = false;
-            void video.play()
-                .then(() => {
-                this.remoteAutoplayBlocked = false;
-            })
-                .catch(() => {
-                this.remoteAutoplayBlocked = true;
-                video.muted = true;
-            });
+            Logger.error(ErrorMessages.MEDIA_REMOTE_VIDEO_PLAY_FAILED, e);
+        })
+            .finally(() => {
+            if (this.remoteVideoPlayPromise === playRemoteVideo) {
+                this.remoteVideoPlayPromise = null;
+            }
+        });
+    }
+    primeRemoteAudioPlayback() {
+        const audio = this.remoteAudioEl;
+        if (!audio)
+            return;
+        if (!audio.paused)
+            return;
+        if (this.remoteAudioPlayPromise)
+            return;
+        const playRemoteAudio = audio.play();
+        this.remoteAudioPlayPromise = playRemoteAudio;
+        playRemoteAudio
+            .catch((e) => {
+            if (e?.name === "AbortError" || e?.name === "NotSupportedError")
+                return;
+            if (e?.name === "NotAllowedError") {
+                Logger.warn("Remote audio autoplay blocked. Waiting for user interaction.");
+                return;
+            }
+            Logger.error(ErrorMessages.MEDIA_REMOTE_AUDIO_PLAY_FAILED, e);
+        })
+            .finally(() => {
+            if (this.remoteAudioPlayPromise === playRemoteAudio) {
+                this.remoteAudioPlayPromise = null;
+            }
+        });
+    }
+    bindRemotePlaybackActivation() {
+        if (this.remotePlaybackGestureBound)
+            return;
+        this.remotePlaybackGestureBound = true;
+        const activate = () => {
+            if (this.remoteVideoEl) {
+                this.primeRemoteVideoPlayback(this.remoteVideoEl);
+            }
+            this.primeRemoteAudioPlayback();
         };
-        window.addEventListener("click", tryUnmute, { passive: true });
-        window.addEventListener("touchstart", tryUnmute, { passive: true });
-        window.addEventListener("keydown", tryUnmute);
+        window.addEventListener("click", activate, { passive: true });
+        window.addEventListener("touchstart", activate, { passive: true });
+        window.addEventListener("keydown", activate);
     }
 }
 class VirtualBackgroundManager {
@@ -4563,10 +4599,11 @@ class RecordingController {
 // import { HttpClient } from "../core/http/HttpClient";
 // import { ImsClient } from "../core/clients/ims/ImsClient";
 class CallController {
-    constructor(bus, localVideo, remoteVideo) {
+    constructor(bus, localVideo, remoteVideo, remoteAudio) {
         this.bus = bus;
         this.localVideo = localVideo;
         this.remoteVideo = remoteVideo;
+        this.remoteAudio = remoteAudio;
         this.roster = new ParticipantRoster();
         this.plugin = null;
         this.privateId = null;
@@ -4626,7 +4663,8 @@ class CallController {
             this.scheduleViewportCameraRefresh();
         };
         this.gateway = new JanusGateway();
-        this.media = new MediaManager();
+        this.media = new MediaManager(this.remoteAudio);
+        this.media.clearRemote(this.remoteVideo);
         this.vbManager = new VirtualBackgroundManager();
         this.vbManager.setSourceProvider(async () => {
             try {
@@ -6748,6 +6786,7 @@ class UIController {
         this.participantNet = new ParticipantNetworkStatsManager();
         this.localVideoEl = document.getElementById("localVideo");
         this.remoteVideoEl = document.getElementById("remoteVideo");
+        this.remoteAudioEl = document.getElementById("remoteAudio");
         this.remoteFallback = document.getElementById("remoteFallback");
         this.remoteFallbackDefault = document.getElementById("remoteFallbackDefault");
         this.remoteHoldBackdrop = document.getElementById("remoteHoldBackdrop");
@@ -6839,7 +6878,8 @@ class UIController {
         this.logger = new Logger(document.getElementById("statusLine"), document.getElementById("sessionInfo"));
         const localVideo = this.localVideoEl;
         const remoteVideo = this.remoteVideoEl;
-        this.controller = new CallController(this.bus, localVideo, remoteVideo);
+        const remoteAudio = this.remoteAudioEl;
+        this.controller = new CallController(this.bus, localVideo, remoteVideo, remoteAudio);
         this.applyRecordingAccess();
         this.applySwapCameraAccess();
         this.updateScreenshotUiCopy();

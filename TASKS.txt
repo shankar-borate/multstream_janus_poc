@@ -1,0 +1,13 @@
+Pending List
+- iOS video is inclined
+- Audio issue if agent joins first. Audio goes to media volume
+- Wrong participant ids passed
+- 
+
+10 Mar 
+- Added more messages related to network
+- fixed issue stop recording
+- Tried adding multi people selection. But it failed as speaker selection is not reliable. So reverted
+- Showing only selected speaker
+- Fixed issue related to mute/unmute handling
+- Audio issue if agent joins first. Audio goes to media volume. Fixed but needs be tested

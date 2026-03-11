@@ -51,6 +51,7 @@ class ErrorMessages {
   static readonly MEDIA_LOCAL_VIDEO_PLAY_FAILED = "Local video play failed";
   static readonly MEDIA_STOP_REPLACED_REMOTE_TRACK_FAILED = "Stopping replaced remote track failed";
   static readonly MEDIA_REMOTE_VIDEO_PLAY_FAILED = "Remote video play failed";
+  static readonly MEDIA_REMOTE_AUDIO_PLAY_FAILED = "Remote audio play failed";
 
   static readonly NETWORK_QUALITY_STATS_SAMPLING_FAILED = "[network-quality] stats sampling failed";
   static readonly NETWORK_QUALITY_DETAILS_ERROR = "src=webrtc-stats error";
