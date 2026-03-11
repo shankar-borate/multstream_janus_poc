@@ -14,6 +14,7 @@ class UIController {
   private logger: Logger;
   private bus = new EventBus();
   private controller: CallController;
+  private networkPanelController: NetworkPanelController;
 
   private btnMute = document.getElementById("btnMute") as HTMLButtonElement;
   private btnUnpublish = document.getElementById("btnUnpublish") as HTMLButtonElement;
@@ -34,7 +35,6 @@ class UIController {
 
   private bridge = new ParentBridge();
   private net = new NetworkQualityManager();
-  private participantNet = new ParticipantNetworkStatsManager();
   private localVideoEl = document.getElementById("localVideo") as HTMLVideoElement;
   private remoteVideoEl = document.getElementById("remoteVideo") as HTMLVideoElement;
   private remoteAudioEl = document.getElementById("remoteAudio") as HTMLAudioElement;
@@ -54,19 +54,6 @@ class UIController {
   private remoteQ = document.getElementById("remoteQuality") as HTMLDivElement;
   private localQD = document.getElementById("localQualityDetails") as HTMLDivElement;
   private remoteQD = document.getElementById("remoteQualityDetails") as HTMLDivElement;
-  private networkSidePanel = document.getElementById("networkSidePanel") as HTMLDivElement;
-  private networkSideHead = document.getElementById("networkSideHead") as HTMLDivElement;
-  private networkSideToggle = document.getElementById("networkSideToggle") as HTMLSpanElement;
-  private networkSideUpdated = document.getElementById("networkSideUpdated") as HTMLDivElement;
-  private networkSideBody = document.getElementById("networkSideBody") as HTMLDivElement;
-  private networkPanelBtn = document.getElementById("networkPanelBtn") as HTMLButtonElement;
-  private networkPanelPopup = document.getElementById("networkPanelPopup") as HTMLDivElement;
-  private networkPopupCard = document.getElementById("networkPopupCard") as HTMLDivElement;
-  private networkPopupHead = document.getElementById("networkPopupHead") as HTMLDivElement;
-  private networkPopupToggle = document.getElementById("networkPopupToggle") as HTMLButtonElement;
-  private networkPanelClose = document.getElementById("networkPanelClose") as HTMLButtonElement;
-  private networkPopupUpdated = document.getElementById("networkPopupUpdated") as HTMLDivElement;
-  private networkPopupBody = document.getElementById("networkPopupBody") as HTMLDivElement;
   private diagPanel = document.getElementById("diagPanel") as HTMLDivElement;
   private diagPanelHead = document.getElementById("diagPanelHead") as HTMLDivElement;
   private diagPanelToggle = document.getElementById("diagPanelToggle") as HTMLSpanElement;
@@ -129,8 +116,6 @@ class UIController {
   private connectionStatus: ConnectionStatusView | null = null;
   private remoteVideoMonitorTimer: number | null = null;
   private diagPanelMinimized = false;
-  private networkSidePanelMinimized = false;
-  private networkPopupMinimized = false;
 
   constructor() {
     const qn = this.getQueryParam("name");
@@ -149,6 +134,7 @@ class UIController {
     const remoteAudio = this.remoteAudioEl;
 
     this.controller = new CallController(this.bus, localVideo, remoteVideo, remoteAudio);
+    this.networkPanelController = new NetworkPanelController(this.bus, () => this.controller.getParticipantNetworkPeers());
     this.applyRecordingAccess();
     this.applySwapCameraAccess();
     this.updateScreenshotUiCopy();
@@ -280,12 +266,6 @@ class UIController {
         this.renderConnectionStatus(this.connectionStatus);
       }
     });
-    this.bus.on<JanusSlowLinkSignal>("janus-slowlink", (signal) => {
-      this.participantNet.recordSlowLink(signal);
-    });
-    this.bus.on<{ feedId: number; payload: PeerNetworkTelemetry }>("peer-network-telemetry", (evt) => {
-      this.participantNet.recordRemoteNetworkTelemetry(evt.feedId, evt.payload);
-    });
     this.bus.on<any>("call-ended", (payload) => {
       Logger.user(`Call ended event received: ${payload?.reason || "unknown"}`);
       this.setEndedState(true);
@@ -294,7 +274,6 @@ class UIController {
     this.wire();
     this.setupNetworkUI();
     this.setupDiagnosticsPanel();
-    this.setupParticipantNetworkPanel();
     this.setupParentBridge();
     this.setupScreenshotDialog();
     this.setupRemoteFallbackMonitor();
@@ -1521,310 +1500,6 @@ class UIController {
       Logger.setStatus("Back online. Reconnecting media if needed...");
     });
     sync();
-  }
-
-  private setupParticipantNetworkPanel() {
-    if (
-      !this.networkSidePanel ||
-      !this.networkSideHead ||
-      !this.networkSideToggle ||
-      !this.networkSideUpdated ||
-      !this.networkSideBody ||
-      !this.networkPanelBtn ||
-      !this.networkPanelPopup ||
-      !this.networkPopupCard ||
-      !this.networkPopupHead ||
-      !this.networkPopupToggle ||
-      !this.networkPopupUpdated ||
-      !this.networkPopupBody ||
-      !this.networkPanelClose
-    ) {
-      return;
-    }
-
-    const closePopup = () => {
-      this.networkPanelPopup.classList.remove("show");
-    };
-    const openPopup = () => {
-      this.networkPanelPopup.classList.add("show");
-    };
-    const applySideMinimizedState = () => {
-      this.networkSidePanel.classList.toggle("minimized", this.networkSidePanelMinimized);
-      this.networkSideToggle.textContent = this.networkSidePanelMinimized ? "+" : "-";
-      this.networkSideHead.setAttribute("aria-expanded", String(!this.networkSidePanelMinimized));
-    };
-    const applyPopupMinimizedState = () => {
-      this.networkPopupCard.classList.toggle("minimized", this.networkPopupMinimized);
-      this.networkPopupToggle.textContent = this.networkPopupMinimized ? "+" : "-";
-      this.networkPopupHead.setAttribute("aria-expanded", String(!this.networkPopupMinimized));
-      this.networkPopupToggle.setAttribute(
-        "aria-label",
-        this.networkPopupMinimized ? "Maximize network panel" : "Minimize network panel"
-      );
-    };
-    const toggleSideMinimized = () => {
-      this.networkSidePanelMinimized = !this.networkSidePanelMinimized;
-      applySideMinimizedState();
-    };
-    const togglePopupMinimized = () => {
-      this.networkPopupMinimized = !this.networkPopupMinimized;
-      applyPopupMinimizedState();
-    };
-
-    this.networkPanelBtn.onclick = () => {
-      if (!this.isParticipantNetworkPopupMode()) {
-        toggleSideMinimized();
-        return;
-      }
-      if (this.networkPanelPopup.classList.contains("show")) {
-        closePopup();
-      } else {
-        openPopup();
-      }
-    };
-    this.networkSideHead.onclick = () => toggleSideMinimized();
-    this.networkSideHead.onkeydown = (ev: KeyboardEvent) => {
-      if (ev.key !== "Enter" && ev.key !== " ") return;
-      ev.preventDefault();
-      toggleSideMinimized();
-    };
-    this.networkPopupHead.onclick = (ev: MouseEvent) => {
-      const target = ev.target as HTMLElement;
-      if (target?.closest("#networkPanelClose") || target?.closest("#networkPopupToggle")) return;
-      togglePopupMinimized();
-    };
-    this.networkPopupHead.onkeydown = (ev: KeyboardEvent) => {
-      if (ev.key !== "Enter" && ev.key !== " ") return;
-      ev.preventDefault();
-      togglePopupMinimized();
-    };
-    this.networkPopupToggle.onclick = (ev: MouseEvent) => {
-      ev.stopPropagation();
-      togglePopupMinimized();
-    };
-    this.networkPanelClose.onclick = (ev: MouseEvent) => {
-      ev.stopPropagation();
-      closePopup();
-    };
-    this.networkPanelPopup.onclick = (ev: MouseEvent) => {
-      if (ev.target === this.networkPanelPopup) closePopup();
-    };
-    window.addEventListener("resize", () => {
-      if (!this.isParticipantNetworkPopupMode()) {
-        closePopup();
-      }
-    });
-    applySideMinimizedState();
-    applyPopupMinimizedState();
-
-    this.participantNet.start(
-      (snapshot: ParticipantNetworkSnapshot) => this.renderParticipantNetwork(snapshot),
-      () => this.controller.getParticipantNetworkPeers()
-    );
-  }
-
-  private isParticipantNetworkPopupMode(): boolean {
-    return window.innerWidth <= APP_CONFIG.networkQuality.participantPanel.popupBreakpointPx;
-  }
-
-  private renderParticipantNetwork(snapshot: ParticipantNetworkSnapshot) {
-    if (
-      !this.networkSideUpdated ||
-      !this.networkSideBody ||
-      !this.networkPopupUpdated ||
-      !this.networkPopupBody
-    ) {
-      return;
-    }
-    const updated = new Date(snapshot.updatedAt).toLocaleTimeString();
-    const content = this.renderParticipantNetworkRows(snapshot.rows);
-    this.networkSideUpdated.textContent = `Updated: ${updated}`;
-    this.networkPopupUpdated.textContent = `Updated: ${updated}`;
-    this.networkSideBody.innerHTML = content;
-    this.networkPopupBody.innerHTML = content;
-  }
-
-  private renderParticipantNetworkRows(rows: ParticipantNetworkRow[]): string {
-    if (!rows || rows.length === 0) {
-      return '<div class="network-empty">Pending stats...</div>';
-    }
-    return rows.map((row) => this.renderParticipantNetworkRow(row)).join("");
-  }
-
-  private renderParticipantNetworkRow(row: ParticipantNetworkRow): string {
-    const label = this.escapeHtml(row.label || "Participant");
-    const upload = this.renderParticipantMetric("Upload", row.upload);
-    const download = this.renderParticipantMetric("Download", row.download);
-    const remoteUpload = this.renderParticipantMetric("Remote Upload", row.remoteUpload);
-    const remoteDownload = this.renderParticipantMetric("Remote Download", row.remoteDownload);
-    const quality = this.renderParticipantQualityGrid(row);
-
-    return (
-      `<div class="network-row">` +
-      `<div class="network-row-header">${label}</div>` +
-      `<div class="network-row-grid">` +
-      upload + download + remoteUpload + remoteDownload +
-      `</div>` +
-      quality +
-      this.renderSlowLinkSummary(row) +
-      this.renderBottleneckSummary(row.likelyBottleneck) +
-      `<div class="network-row-strip">` +
-      `<span class="network-strip-seg ${this.tierClass(row.upload.tier)}"></span>` +
-      `<span class="network-strip-seg ${this.tierClass(row.download.tier)}"></span>` +
-      `<span class="network-strip-seg ${this.tierClass(row.remoteUpload.tier)}"></span>` +
-      `<span class="network-strip-seg ${this.tierClass(row.remoteDownload.tier)}"></span>` +
-      `</div>` +
-      `<div class="network-strip-legend">U | D | RU | RD</div>` +
-      `</div>`
-    );
-  }
-
-  private renderBottleneckSummary(value: "You" | "Remote" | "Both" | "Unknown"): string {
-    const cls =
-      value === "You" ? "bneck-you" :
-      value === "Remote" ? "bneck-remote" :
-      value === "Both" ? "bneck-both" :
-      "bneck-unknown";
-    return `<div class="network-bottleneck ${cls}">Likely bottleneck: ${value}</div>`;
-  }
-
-  private renderSlowLinkSummary(row: ParticipantNetworkRow): string {
-    const uplink = row.upload.slowLink || row.remoteDownload.slowLink;
-    const downlink = row.download.slowLink || row.remoteUpload.slowLink;
-    if (!uplink && !downlink) {
-      return '<div class="network-slowlink network-slowlink-none">SlowLink: None</div>';
-    }
-    const parts: string[] = [];
-    if (uplink) parts.push("Uplink");
-    if (downlink) parts.push("Downlink");
-    return `<div class="network-slowlink network-slowlink-active">SlowLink: ${parts.join(" + ")}</div>`;
-  }
-
-  private renderParticipantMetric(label: string, direction: ParticipantNetworkDirectionSnapshot): string {
-    const cls = this.tierClass(direction.tier);
-    const kbps = this.formatParticipantSpeed(direction.kbps);
-    const slowTag = direction.slowLink ? " SlowLink" : "";
-    return (
-      `<div class="network-metric">` +
-      `<div class="network-metric-label">${label}</div>` +
-      `<div class="network-metric-value ${cls}">${kbps} (${direction.tier}${slowTag})</div>` +
-      `</div>`
-    );
-  }
-
-  private renderParticipantQualityGrid(row: ParticipantNetworkRow): string {
-    const q = row.quality;
-    const localRtt = this.renderParticipantQualityMetric(
-      "Local RTT",
-      q.localRttMs,
-      "ms",
-      this.classifyRttTier(q.localRttMs)
-    );
-    const localJitter = this.renderParticipantQualityMetric(
-      "Local Jitter",
-      q.localJitterMs,
-      "ms",
-      this.classifyJitterTier(q.localJitterMs)
-    );
-    const localLoss = this.renderParticipantQualityMetric(
-      "Local Loss",
-      q.localLossPct,
-      "%",
-      this.classifyLossTier(q.localLossPct)
-    );
-    const remoteRtt = this.renderParticipantQualityMetric(
-      "Remote RTT",
-      q.remoteRttMs,
-      "ms",
-      this.classifyRttTier(q.remoteRttMs)
-    );
-    const remoteJitter = this.renderParticipantQualityMetric(
-      "Remote Jitter",
-      q.remoteJitterMs,
-      "ms",
-      this.classifyJitterTier(q.remoteJitterMs)
-    );
-    const remoteLoss = this.renderParticipantQualityMetric(
-      "Remote Loss",
-      q.remoteLossPct,
-      "%",
-      this.classifyLossTier(q.remoteLossPct)
-    );
-    return (
-      `<div class="network-row-grid network-row-grid-quality">` +
-      localRtt + localJitter + localLoss + remoteRtt + remoteJitter + remoteLoss +
-      `</div>`
-    );
-  }
-
-  private renderParticipantQualityMetric(
-    label: string,
-    value: number | null,
-    unit: "ms" | "%",
-    tier: ParticipantNetworkTier
-  ): string {
-    const cls = this.tierClass(tier);
-    const rendered = this.formatParticipantQualityValue(value, unit);
-    return (
-      `<div class="network-metric">` +
-      `<div class="network-metric-label">${label}</div>` +
-      `<div class="network-metric-value ${cls}">${rendered}${value !== null ? ` (${tier})` : ""}</div>` +
-      `</div>`
-    );
-  }
-
-  private classifyJitterTier(value: number | null): ParticipantNetworkTier {
-    if (value === null || !Number.isFinite(value)) return "Pending";
-    const goodMax = APP_CONFIG.networkQuality.thresholds.jitterGoodMs;
-    const mediumMax = goodMax * 2;
-    if (value <= goodMax) return "Good";
-    if (value <= mediumMax) return "Medium";
-    return "Low";
-  }
-
-  private classifyRttTier(value: number | null): ParticipantNetworkTier {
-    if (value === null || !Number.isFinite(value)) return "Pending";
-    const goodMax = APP_CONFIG.networkQuality.thresholds.rttGoodMs;
-    const mediumMax = goodMax * 2;
-    if (value <= goodMax) return "Good";
-    if (value <= mediumMax) return "Medium";
-    return "Low";
-  }
-
-  private classifyLossTier(value: number | null): ParticipantNetworkTier {
-    if (value === null || !Number.isFinite(value)) return "Pending";
-    const goodMax = APP_CONFIG.networkQuality.thresholds.lossGoodPct;
-    const mediumMax = goodMax * 2;
-    if (value <= goodMax) return "Good";
-    if (value <= mediumMax) return "Medium";
-    return "Low";
-  }
-
-  private formatParticipantQualityValue(value: number | null, unit: "ms" | "%"): string {
-    if (value === null || !Number.isFinite(value)) return "Pending";
-    return `${value.toFixed(1)} ${unit}`;
-  }
-
-  private formatParticipantSpeed(kbps: number | null): string {
-    if (kbps === null || !Number.isFinite(kbps)) return "Pending";
-    if (kbps >= 1000) return `${(kbps / 1000).toFixed(2)} Mbps`;
-    return `${kbps.toFixed(0)} kbps`;
-  }
-
-  private tierClass(tier: ParticipantNetworkTier): string {
-    if (tier === "Good") return "tier-good";
-    if (tier === "Medium") return "tier-medium";
-    if (tier === "Low") return "tier-low";
-    return "tier-pending";
-  }
-
-  private escapeHtml(text: string): string {
-    return String(text)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
   }
 
   private setupParentBridge() {

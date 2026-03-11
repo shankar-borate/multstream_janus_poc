@@ -57,11 +57,14 @@
     .call-meta{position:absolute;left:18px;bottom:18px;z-index:12;display:inline-flex;align-items:center;padding:6px 10px;border-radius:10px;background:rgba(255,255,255,.96);color:#111827;border:1px solid rgba(15,23,42,.12);box-shadow:0 8px 18px rgba(15,23,42,.12);font:600 12px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;white-space:nowrap;max-width:calc(100vw - 36px);overflow:hidden;text-overflow:ellipsis}
     .network-side-panel{position:absolute;right:18px;top:18px;z-index:32;width:min(340px,34vw);max-height:min(74vh,620px);overflow:auto;padding:10px;border-radius:10px;background:rgba(255,255,255,.96);border:1px solid rgba(148,163,184,.4);box-shadow:0 10px 22px rgba(15,23,42,.14);font:600 11px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;color:#0f172a}
     .network-panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer;user-select:none}
+    .network-panel-actions{display:flex;align-items:center;gap:6px}
     .network-panel-title{font-size:12px;font-weight:700;color:#0f172a}
     .network-panel-updated{margin-top:2px;color:#475569;font-size:10px}
     .network-panel-content{margin-top:8px}
     .network-side-panel.minimized .network-panel-updated,.network-side-panel.minimized .network-panel-content{display:none}
     .network-empty{margin-top:8px;color:#64748b}
+    .network-graph-link{border:0;background:transparent;color:#2563eb;font-size:10px;font-weight:800;padding:0 4px;text-decoration:underline;text-underline-offset:2px}
+    .network-graph-link:hover{color:#1d4ed8;text-decoration:none}
     .network-row{margin-top:8px;padding:8px;border:1px solid rgba(148,163,184,.35);border-radius:8px;background:#fff}
     .network-row-header{font-size:11px;font-weight:700;color:#0f172a;margin-bottom:6px}
     .network-row-grid{display:grid;grid-template-columns:1fr 1fr;column-gap:10px;row-gap:6px}
@@ -93,6 +96,45 @@
     .network-popup-close{border:0;background:#e2e8f0;color:#0f172a;width:24px;height:24px;border-radius:999px;font-weight:700}
     .network-popup-body{font:600 11px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace}
     .network-popup-card.minimized .network-panel-updated,.network-popup-card.minimized .network-popup-body{display:none}
+    .network-graph-dialog{position:absolute;inset:0;z-index:46;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(15,23,42,.48)}
+    .network-graph-dialog.show{display:flex}
+    .network-graph-card{width:min(980px,96vw);max-height:min(88vh,820px);overflow:auto;padding:16px;border-radius:16px;background:#fff;box-shadow:0 22px 46px rgba(15,23,42,.28);font:600 11px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;color:#0f172a}
+    .network-graph-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+    .network-graph-title{font-size:15px;font-weight:800;color:#0f172a}
+    .network-graph-updated{margin-top:3px;color:#475569;font-size:10px}
+    .network-graph-close{border:0;background:#e2e8f0;color:#0f172a;width:28px;height:28px;border-radius:999px;font-weight:800}
+    .network-graph-toolbar{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:14px}
+    .network-graph-field{display:flex;flex-direction:column;gap:6px;min-width:220px}
+    .network-graph-field span{font-size:10px;color:#475569}
+    .network-graph-select{min-width:220px;padding:8px 10px;border:1px solid rgba(148,163,184,.45);border-radius:10px;background:#fff;color:#0f172a;font:600 12px/1.2 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace}
+    .network-graph-toolbar-actions{display:flex;align-items:center;gap:8px}
+    .network-graph-btn{border:1px solid rgba(148,163,184,.38);background:#f8fafc;color:#0f172a;border-radius:999px;padding:7px 12px;font-size:10px;font-weight:800}
+    .network-graph-summary{margin-top:12px;padding:6px 8px;border-radius:8px}
+    .network-graph-metric-list{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px}
+    .network-graph-metric-chip{display:inline-flex;align-items:center;gap:8px;padding:7px 10px;border-radius:999px;background:#f8fafc;border:1px solid rgba(148,163,184,.35);color:#0f172a}
+    .network-graph-metric-chip input{margin:0}
+    .network-graph-metric-swatch{width:10px;height:10px;border-radius:999px;display:inline-flex;flex:none}
+    .network-graph-charts{margin-top:12px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    .network-graph-chart-card{padding:10px;border:1px solid rgba(148,163,184,.34);border-radius:12px;background:#fff}
+    .network-graph-chart-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px}
+    .network-graph-chart-title{font-size:12px;font-weight:800;color:#0f172a}
+    .network-graph-chart-meta{font-size:10px;color:#475569;text-align:right;white-space:nowrap}
+    .network-graph-chart-frame{height:180px;border-radius:10px;border:1px solid rgba(148,163,184,.28);background:linear-gradient(180deg, rgba(248,250,252,.98), rgba(241,245,249,.98))}
+    .network-graph-chart-svg{width:100%;height:100%;display:block}
+    .network-graph-chart-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:6px;font-size:10px;color:#64748b}
+    .network-graph-chart-empty{display:flex;align-items:center;justify-content:center;height:100%;font-size:11px;color:#64748b}
+    .connectivity-card{width:min(720px,96vw)}
+    .connectivity-status{margin-top:12px;display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;font-size:10px;font-weight:800}
+    .connectivity-status-info{color:#1d4ed8;background:#dbeafe}
+    .connectivity-status-warn{color:#92400e;background:#fef3c7}
+    .connectivity-status-error{color:#b91c1c;background:#fee2e2}
+    .connectivity-status-pending{color:#475569;background:#e2e8f0}
+    .connectivity-primary{margin-top:12px;font-size:14px;font-weight:800;color:#0f172a}
+    .connectivity-secondary{margin-top:4px;font-size:11px;color:#475569;line-height:1.45}
+    .connectivity-grid{margin-top:14px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    .connectivity-metric{padding:10px;border:1px solid rgba(148,163,184,.34);border-radius:12px;background:#fff}
+    .connectivity-label{font-size:10px;color:#475569}
+    .connectivity-value{margin-top:4px;font-size:12px;font-weight:800;color:#0f172a;word-break:break-word}
     @media (max-width: 768px){
       .call-meta{
         left:10px;
@@ -111,6 +153,14 @@
     @media (max-width: 900px){
       .network-side-panel{display:none}
       .network-panel-btn{display:inline-flex}
+      .network-graph-dialog{padding:10px}
+      .network-graph-card{width:min(96vw,680px);max-height:88vh;padding:14px}
+      .network-graph-toolbar{align-items:stretch}
+      .network-graph-field{min-width:0;width:100%}
+      .network-graph-select{width:100%;min-width:0}
+      .network-graph-toolbar-actions{width:100%;justify-content:flex-start}
+      .network-graph-charts{grid-template-columns:1fr}
+      .connectivity-grid{grid-template-columns:1fr}
     }
     @media (max-width: 900px), (max-height: 560px){
       .remote-wrap{padding:12px 12px 24px}
@@ -259,7 +309,12 @@
   <div id="networkSidePanel" class="network-side-panel">
     <div id="networkSideHead" class="network-panel-head" role="button" tabindex="0" aria-expanded="true">
       <span class="network-panel-title">Participant Network</span>
-      <span id="networkSideToggle" class="panel-toggle" aria-hidden="true">-</span>
+      <div class="network-panel-actions">
+        <button id="networkViewSummarySide" class="network-graph-link" type="button">Network</button>
+        <button id="networkViewGraphSide" class="network-graph-link" type="button">Graph</button>
+        <button id="networkViewConnectivitySide" class="network-graph-link" type="button">Connectivity</button>
+        <span id="networkSideToggle" class="panel-toggle" aria-hidden="true">-</span>
+      </div>
     </div>
     <div id="networkSideUpdated" class="network-panel-updated">Updated: -</div>
     <div id="networkSideBody" class="network-panel-content">
@@ -272,6 +327,9 @@
       <div id="networkPopupHead" class="network-popup-header" role="button" tabindex="0" aria-expanded="true">
         <span>Participant Network</span>
         <div class="network-popup-actions">
+          <button id="networkViewSummaryPopup" class="network-graph-link" type="button">Network</button>
+          <button id="networkViewGraphPopup" class="network-graph-link" type="button">Graph</button>
+          <button id="networkViewConnectivityPopup" class="network-graph-link" type="button">Connectivity</button>
           <button id="networkPopupToggle" class="network-popup-toggle" type="button">-</button>
           <button id="networkPanelClose" class="network-popup-close" type="button">x</button>
         </div>
@@ -279,6 +337,81 @@
       <div id="networkPopupUpdated" class="network-panel-updated">Updated: -</div>
       <div id="networkPopupBody" class="network-popup-body">
         <div class="network-empty">Pending stats...</div>
+      </div>
+    </div>
+  </div>
+  <div id="networkGraphDialog" class="network-graph-dialog" aria-hidden="true">
+    <div id="networkGraphCard" class="network-graph-card" role="dialog" aria-modal="true" aria-labelledby="networkGraphTitle">
+      <div class="network-graph-head">
+        <div>
+          <div id="networkGraphTitle" class="network-graph-title">Participant Network Graph</div>
+          <div id="networkGraphUpdated" class="network-graph-updated">Updated: -</div>
+        </div>
+        <button id="networkGraphClose" class="network-graph-close" type="button">x</button>
+      </div>
+      <div class="network-graph-toolbar">
+        <label class="network-graph-field">
+          <span>Participant</span>
+          <select id="networkGraphParticipant" class="network-graph-select"></select>
+        </label>
+        <div class="network-graph-toolbar-actions">
+          <button id="networkGraphSelectAll" class="network-graph-btn" type="button">All</button>
+          <button id="networkGraphClear" class="network-graph-btn" type="button">None</button>
+        </div>
+      </div>
+      <div id="networkGraphSummary" class="network-graph-summary bneck-unknown">Latest bottleneck: -</div>
+      <div id="networkGraphMetricList" class="network-graph-metric-list"></div>
+      <div id="networkGraphEmpty" class="network-empty">Waiting for graph samples...</div>
+      <div id="networkGraphCharts" class="network-graph-charts"></div>
+    </div>
+  </div>
+  <div id="connectivityDialog" class="network-graph-dialog" aria-hidden="true">
+    <div id="connectivityCard" class="network-graph-card connectivity-card" role="dialog" aria-modal="true" aria-labelledby="connectivityTitle">
+      <div class="network-graph-head">
+        <div>
+          <div id="connectivityTitle" class="network-graph-title">Connectivity</div>
+          <div id="connectivityUpdated" class="network-graph-updated">Updated: -</div>
+        </div>
+        <button id="connectivityClose" class="network-graph-close" type="button">x</button>
+      </div>
+      <div id="connectivityStatus" class="connectivity-status connectivity-status-pending">Pending</div>
+      <div id="connectivityPrimary" class="connectivity-primary">Waiting for connectivity data.</div>
+      <div id="connectivitySecondary" class="connectivity-secondary">
+        Start a call to see ICE, signaling, connection, and product-state details.
+      </div>
+      <div class="connectivity-grid">
+        <div class="connectivity-metric">
+          <div class="connectivity-label">Browser</div>
+          <div id="connectivityBrowser" class="connectivity-value">Pending</div>
+        </div>
+        <div class="connectivity-metric">
+          <div class="connectivity-label">ICE State</div>
+          <div id="connectivityIce" class="connectivity-value">Pending</div>
+        </div>
+        <div class="connectivity-metric">
+          <div class="connectivity-label">Peer Connection</div>
+          <div id="connectivityConnection" class="connectivity-value">Pending</div>
+        </div>
+        <div class="connectivity-metric">
+          <div class="connectivity-label">Signaling</div>
+          <div id="connectivitySignaling" class="connectivity-value">Pending</div>
+        </div>
+        <div class="connectivity-metric">
+          <div class="connectivity-label">ICE Gathering</div>
+          <div id="connectivityGathering" class="connectivity-value">Pending</div>
+        </div>
+        <div class="connectivity-metric">
+          <div class="connectivity-label">Status Owner</div>
+          <div id="connectivityOwner" class="connectivity-value">Pending</div>
+        </div>
+        <div class="connectivity-metric">
+          <div class="connectivity-label">Severity</div>
+          <div id="connectivitySeverity" class="connectivity-value">Pending</div>
+        </div>
+        <div class="connectivity-metric">
+          <div class="connectivity-label">Product State</div>
+          <div id="connectivityProductState" class="connectivity-value">Pending</div>
+        </div>
       </div>
     </div>
   </div>

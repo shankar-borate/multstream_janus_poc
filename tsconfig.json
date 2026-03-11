@@ -45,6 +45,7 @@
     "src/managers/RemoteFeedManager.ts",
     "src/managers/RecordingController.ts",
     "src/managers/CallController.ts",
+    "src/ui/NetworkPanelController.ts",
     "src/ui/UIController.ts",
     "src/app.ts"
   ]

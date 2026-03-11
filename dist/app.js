@@ -6754,6 +6754,991 @@ class CallController {
         catch { }
     }
 }
+const NETWORK_GRAPH_METRICS = [
+    { key: "upload", label: "Upload", unit: "kbps", color: "#2563eb" },
+    { key: "download", label: "Download", unit: "kbps", color: "#16a34a" },
+    { key: "remoteUpload", label: "Remote Upload", unit: "kbps", color: "#7c3aed" },
+    { key: "remoteDownload", label: "Remote Download", unit: "kbps", color: "#ea580c" },
+    { key: "localRttMs", label: "Local RTT", unit: "ms", color: "#0f766e" },
+    { key: "localJitterMs", label: "Local Jitter", unit: "ms", color: "#0891b2" },
+    { key: "localLossPct", label: "Local Loss", unit: "%", color: "#dc2626" },
+    { key: "remoteRttMs", label: "Remote RTT", unit: "ms", color: "#8b5cf6" },
+    { key: "remoteJitterMs", label: "Remote Jitter", unit: "ms", color: "#db2777" },
+    { key: "remoteLossPct", label: "Remote Loss", unit: "%", color: "#b91c1c" },
+    { key: "uplinkSlowLink", label: "Uplink SlowLink", unit: "flag", color: "#f59e0b" },
+    { key: "downlinkSlowLink", label: "Downlink SlowLink", unit: "flag", color: "#ef4444" }
+];
+class NetworkPanelController {
+    constructor(bus, peersProvider) {
+        this.bus = bus;
+        this.peersProvider = peersProvider;
+        this.participantNet = new ParticipantNetworkStatsManager();
+        this.joined = false;
+        this.networkSidePanel = document.getElementById("networkSidePanel");
+        this.networkSideHead = document.getElementById("networkSideHead");
+        this.networkSideToggle = document.getElementById("networkSideToggle");
+        this.networkSideUpdated = document.getElementById("networkSideUpdated");
+        this.networkSideBody = document.getElementById("networkSideBody");
+        this.networkPanelBtn = document.getElementById("networkPanelBtn");
+        this.networkPanelPopup = document.getElementById("networkPanelPopup");
+        this.networkPopupCard = document.getElementById("networkPopupCard");
+        this.networkPopupHead = document.getElementById("networkPopupHead");
+        this.networkPopupToggle = document.getElementById("networkPopupToggle");
+        this.networkPanelClose = document.getElementById("networkPanelClose");
+        this.networkPopupUpdated = document.getElementById("networkPopupUpdated");
+        this.networkPopupBody = document.getElementById("networkPopupBody");
+        this.networkViewSummarySide = document.getElementById("networkViewSummarySide");
+        this.networkViewGraphSide = document.getElementById("networkViewGraphSide");
+        this.networkViewConnectivitySide = document.getElementById("networkViewConnectivitySide");
+        this.networkViewSummaryPopup = document.getElementById("networkViewSummaryPopup");
+        this.networkViewGraphPopup = document.getElementById("networkViewGraphPopup");
+        this.networkViewConnectivityPopup = document.getElementById("networkViewConnectivityPopup");
+        this.networkGraphDialog = document.getElementById("networkGraphDialog");
+        this.networkGraphCard = document.getElementById("networkGraphCard");
+        this.networkGraphUpdated = document.getElementById("networkGraphUpdated");
+        this.networkGraphParticipant = document.getElementById("networkGraphParticipant");
+        this.networkGraphSummary = document.getElementById("networkGraphSummary");
+        this.networkGraphMetricList = document.getElementById("networkGraphMetricList");
+        this.networkGraphEmpty = document.getElementById("networkGraphEmpty");
+        this.networkGraphCharts = document.getElementById("networkGraphCharts");
+        this.networkGraphClose = document.getElementById("networkGraphClose");
+        this.networkGraphSelectAll = document.getElementById("networkGraphSelectAll");
+        this.networkGraphClear = document.getElementById("networkGraphClear");
+        this.connectivityDialog = document.getElementById("connectivityDialog");
+        this.connectivityCard = document.getElementById("connectivityCard");
+        this.connectivityUpdated = document.getElementById("connectivityUpdated");
+        this.connectivityClose = document.getElementById("connectivityClose");
+        this.connectivityStatus = document.getElementById("connectivityStatus");
+        this.connectivityPrimary = document.getElementById("connectivityPrimary");
+        this.connectivitySecondary = document.getElementById("connectivitySecondary");
+        this.connectivityBrowser = document.getElementById("connectivityBrowser");
+        this.connectivityIce = document.getElementById("connectivityIce");
+        this.connectivityConnection = document.getElementById("connectivityConnection");
+        this.connectivitySignaling = document.getElementById("connectivitySignaling");
+        this.connectivityGathering = document.getElementById("connectivityGathering");
+        this.connectivityOwner = document.getElementById("connectivityOwner");
+        this.connectivitySeverity = document.getElementById("connectivitySeverity");
+        this.connectivityProductState = document.getElementById("connectivityProductState");
+        this.networkSidePanelMinimized = false;
+        this.networkPopupMinimized = false;
+        this.networkGraphVisible = false;
+        this.connectivityVisible = false;
+        this.networkGraphMaxSamples = 90;
+        this.lastParticipantNetworkSnapshot = null;
+        this.networkGraphSelectedParticipantKey = null;
+        this.networkGraphSelectedMetrics = new Set(NETWORK_GRAPH_METRICS.map((metric) => metric.key));
+        this.networkGraphHistory = new Map();
+        this.latestConnectivity = null;
+        this.latestConnectionStatus = null;
+        this.connectivityUpdatedAt = 0;
+        this.setupParticipantNetworkPanel();
+        this.setupParticipantNetworkGraphDialog();
+        this.setupConnectivityDialog();
+        this.bindBus();
+        this.renderParticipantNetworkPending();
+        this.renderConnectivityDialog();
+        this.participantNet.start((snapshot) => {
+            if (!this.joined) {
+                this.renderParticipantNetworkPending();
+                return;
+            }
+            this.renderParticipantNetwork(snapshot);
+        }, () => this.peersProvider());
+    }
+    bindBus() {
+        this.bus.on("joined", (joined) => {
+            this.joined = joined;
+            if (!joined) {
+                this.reset();
+            }
+        });
+        this.bus.on("janus-slowlink", (signal) => {
+            this.participantNet.recordSlowLink(signal);
+        });
+        this.bus.on("peer-network-telemetry", (evt) => {
+            this.participantNet.recordRemoteNetworkTelemetry(evt.feedId, evt.payload);
+        });
+        this.bus.on("connectivity", (payload) => {
+            this.latestConnectivity = payload;
+            this.connectivityUpdatedAt = payload?.ts ?? Date.now();
+            this.renderConnectivityDialog();
+        });
+        this.bus.on("connection-status", (status) => {
+            this.latestConnectionStatus = status;
+            this.connectivityUpdatedAt = Date.now();
+            this.renderConnectivityDialog();
+        });
+    }
+    reset() {
+        this.lastParticipantNetworkSnapshot = null;
+        this.networkGraphHistory.clear();
+        this.networkGraphSelectedParticipantKey = null;
+        this.latestConnectivity = null;
+        this.latestConnectionStatus = null;
+        this.connectivityUpdatedAt = 0;
+        this.syncNetworkGraphParticipantOptions();
+        this.renderParticipantNetworkPending();
+        this.renderParticipantNetworkGraph();
+        this.renderConnectivityDialog();
+    }
+    setupParticipantNetworkPanel() {
+        if (!this.networkSidePanel ||
+            !this.networkSideHead ||
+            !this.networkSideToggle ||
+            !this.networkSideUpdated ||
+            !this.networkSideBody ||
+            !this.networkPanelBtn ||
+            !this.networkPanelPopup ||
+            !this.networkPopupCard ||
+            !this.networkPopupHead ||
+            !this.networkPopupToggle ||
+            !this.networkPopupUpdated ||
+            !this.networkPopupBody ||
+            !this.networkPanelClose) {
+            return;
+        }
+        const toggleSideMinimized = () => {
+            this.setParticipantNetworkSideMinimized(!this.networkSidePanelMinimized);
+        };
+        const togglePopupMinimized = () => {
+            this.setParticipantNetworkPopupMinimized(!this.networkPopupMinimized);
+        };
+        this.networkPanelBtn.onclick = () => {
+            this.closeParticipantNetworkGraphDialog();
+            this.closeConnectivityDialog();
+            if (!this.isParticipantNetworkPopupMode()) {
+                this.setParticipantNetworkSideMinimized(!this.networkSidePanelMinimized);
+                return;
+            }
+            if (this.networkPanelPopup.classList.contains("show")) {
+                this.closeParticipantNetworkPopup();
+            }
+            else {
+                this.showNetworkSummaryView();
+            }
+        };
+        if (this.networkViewSummarySide) {
+            this.networkViewSummarySide.onclick = (ev) => {
+                ev.stopPropagation();
+                this.showNetworkSummaryView();
+            };
+        }
+        if (this.networkViewGraphSide) {
+            this.networkViewGraphSide.onclick = (ev) => {
+                ev.stopPropagation();
+                this.openParticipantNetworkGraphDialog();
+            };
+        }
+        if (this.networkViewConnectivitySide) {
+            this.networkViewConnectivitySide.onclick = (ev) => {
+                ev.stopPropagation();
+                this.openConnectivityDialog();
+            };
+        }
+        if (this.networkViewSummaryPopup) {
+            this.networkViewSummaryPopup.onclick = (ev) => {
+                ev.stopPropagation();
+                this.showNetworkSummaryView();
+            };
+        }
+        if (this.networkViewGraphPopup) {
+            this.networkViewGraphPopup.onclick = (ev) => {
+                ev.stopPropagation();
+                this.openParticipantNetworkGraphDialog();
+            };
+        }
+        if (this.networkViewConnectivityPopup) {
+            this.networkViewConnectivityPopup.onclick = (ev) => {
+                ev.stopPropagation();
+                this.openConnectivityDialog();
+            };
+        }
+        this.networkSideHead.onclick = (ev) => {
+            const target = ev.target;
+            if (this.isNetworkHeaderAction(target))
+                return;
+            toggleSideMinimized();
+        };
+        this.networkSideHead.onkeydown = (ev) => {
+            const target = ev.target;
+            if (this.isNetworkHeaderAction(target))
+                return;
+            if (ev.key !== "Enter" && ev.key !== " ")
+                return;
+            ev.preventDefault();
+            toggleSideMinimized();
+        };
+        this.networkPopupHead.onclick = (ev) => {
+            const target = ev.target;
+            if (target?.closest("#networkPanelClose") ||
+                target?.closest("#networkPopupToggle") ||
+                this.isNetworkHeaderAction(target)) {
+                return;
+            }
+            togglePopupMinimized();
+        };
+        this.networkPopupHead.onkeydown = (ev) => {
+            const target = ev.target;
+            if (target?.closest("#networkPanelClose") ||
+                target?.closest("#networkPopupToggle") ||
+                this.isNetworkHeaderAction(target)) {
+                return;
+            }
+            if (ev.key !== "Enter" && ev.key !== " ")
+                return;
+            ev.preventDefault();
+            togglePopupMinimized();
+        };
+        this.networkPopupToggle.onclick = (ev) => {
+            ev.stopPropagation();
+            togglePopupMinimized();
+        };
+        this.networkPanelClose.onclick = (ev) => {
+            ev.stopPropagation();
+            this.closeParticipantNetworkPopup();
+        };
+        this.networkPanelPopup.onclick = (ev) => {
+            if (ev.target === this.networkPanelPopup)
+                this.closeParticipantNetworkPopup();
+        };
+        window.addEventListener("resize", () => {
+            if (!this.isParticipantNetworkPopupMode()) {
+                this.closeParticipantNetworkPopup();
+            }
+            if (this.networkGraphVisible) {
+                this.renderParticipantNetworkGraph();
+            }
+        });
+        this.applyParticipantNetworkSideMinimizedState();
+        this.applyParticipantNetworkPopupMinimizedState();
+    }
+    isNetworkHeaderAction(target) {
+        return !!(target?.closest("#networkViewSummarySide") ||
+            target?.closest("#networkViewGraphSide") ||
+            target?.closest("#networkViewConnectivitySide") ||
+            target?.closest("#networkViewSummaryPopup") ||
+            target?.closest("#networkViewGraphPopup") ||
+            target?.closest("#networkViewConnectivityPopup"));
+    }
+    showNetworkSummaryView() {
+        this.closeParticipantNetworkGraphDialog();
+        this.closeConnectivityDialog();
+        if (this.isParticipantNetworkPopupMode()) {
+            this.openParticipantNetworkPopup();
+            this.setParticipantNetworkPopupMinimized(false);
+            return;
+        }
+        this.closeParticipantNetworkPopup();
+        this.setParticipantNetworkSideMinimized(false);
+    }
+    openParticipantNetworkPopup() {
+        if (!this.networkPanelPopup)
+            return;
+        this.networkPanelPopup.classList.add("show");
+    }
+    closeParticipantNetworkPopup() {
+        if (!this.networkPanelPopup)
+            return;
+        this.networkPanelPopup.classList.remove("show");
+    }
+    applyParticipantNetworkSideMinimizedState() {
+        if (!this.networkSidePanel || !this.networkSideToggle || !this.networkSideHead)
+            return;
+        this.networkSidePanel.classList.toggle("minimized", this.networkSidePanelMinimized);
+        this.networkSideToggle.textContent = this.networkSidePanelMinimized ? "+" : "-";
+        this.networkSideHead.setAttribute("aria-expanded", String(!this.networkSidePanelMinimized));
+    }
+    applyParticipantNetworkPopupMinimizedState() {
+        if (!this.networkPopupCard || !this.networkPopupToggle || !this.networkPopupHead)
+            return;
+        this.networkPopupCard.classList.toggle("minimized", this.networkPopupMinimized);
+        this.networkPopupToggle.textContent = this.networkPopupMinimized ? "+" : "-";
+        this.networkPopupHead.setAttribute("aria-expanded", String(!this.networkPopupMinimized));
+        this.networkPopupToggle.setAttribute("aria-label", this.networkPopupMinimized ? "Maximize network panel" : "Minimize network panel");
+    }
+    setParticipantNetworkSideMinimized(minimized) {
+        this.networkSidePanelMinimized = minimized;
+        this.applyParticipantNetworkSideMinimizedState();
+    }
+    setParticipantNetworkPopupMinimized(minimized) {
+        this.networkPopupMinimized = minimized;
+        this.applyParticipantNetworkPopupMinimizedState();
+    }
+    renderParticipantNetworkPending() {
+        if (this.networkSideUpdated)
+            this.networkSideUpdated.textContent = "Updated: -";
+        if (this.networkPopupUpdated)
+            this.networkPopupUpdated.textContent = "Updated: -";
+        if (this.networkSideBody)
+            this.networkSideBody.innerHTML = '<div class="network-empty">Pending stats...</div>';
+        if (this.networkPopupBody)
+            this.networkPopupBody.innerHTML = '<div class="network-empty">Pending stats...</div>';
+    }
+    isParticipantNetworkPopupMode() {
+        return window.innerWidth <= APP_CONFIG.networkQuality.participantPanel.popupBreakpointPx;
+    }
+    renderParticipantNetwork(snapshot) {
+        this.lastParticipantNetworkSnapshot = snapshot;
+        this.recordParticipantNetworkHistory(snapshot);
+        if (this.networkGraphVisible) {
+            this.renderParticipantNetworkGraph();
+        }
+        if (!this.networkSideUpdated ||
+            !this.networkSideBody ||
+            !this.networkPopupUpdated ||
+            !this.networkPopupBody) {
+            return;
+        }
+        const updated = new Date(snapshot.updatedAt).toLocaleTimeString();
+        const content = this.renderParticipantNetworkRows(snapshot.rows);
+        this.networkSideUpdated.textContent = `Updated: ${updated}`;
+        this.networkPopupUpdated.textContent = `Updated: ${updated}`;
+        this.networkSideBody.innerHTML = content;
+        this.networkPopupBody.innerHTML = content;
+    }
+    recordParticipantNetworkHistory(snapshot) {
+        snapshot.rows.forEach((row) => {
+            const key = this.getParticipantNetworkHistoryKey(row);
+            const series = this.networkGraphHistory.get(key) ?? {
+                label: row.label || "Participant",
+                updatedAt: snapshot.updatedAt,
+                bottleneck: row.likelyBottleneck,
+                samples: []
+            };
+            series.label = row.label || series.label || "Participant";
+            series.updatedAt = snapshot.updatedAt;
+            series.bottleneck = row.likelyBottleneck;
+            series.samples.push(this.createParticipantNetworkGraphSample(snapshot.updatedAt, row));
+            if (series.samples.length > this.networkGraphMaxSamples) {
+                series.samples.splice(0, series.samples.length - this.networkGraphMaxSamples);
+            }
+            this.networkGraphHistory.set(key, series);
+        });
+        this.syncNetworkGraphParticipantOptions();
+    }
+    createParticipantNetworkGraphSample(ts, row) {
+        return {
+            ts,
+            upload: row.upload.kbps,
+            download: row.download.kbps,
+            remoteUpload: row.remoteUpload.kbps,
+            remoteDownload: row.remoteDownload.kbps,
+            localRttMs: row.quality.localRttMs,
+            localJitterMs: row.quality.localJitterMs,
+            localLossPct: row.quality.localLossPct,
+            remoteRttMs: row.quality.remoteRttMs,
+            remoteJitterMs: row.quality.remoteJitterMs,
+            remoteLossPct: row.quality.remoteLossPct,
+            uplinkSlowLink: row.upload.slowLink || row.remoteDownload.slowLink ? 1 : 0,
+            downlinkSlowLink: row.download.slowLink || row.remoteUpload.slowLink ? 1 : 0,
+            bottleneck: row.likelyBottleneck
+        };
+    }
+    getParticipantNetworkHistoryKey(row) {
+        const label = (row.label || "").trim();
+        if (label === "You" || label.startsWith("You ("))
+            return "self";
+        if (row.participantId !== null && Number.isFinite(row.participantId)) {
+            return `participant:${row.participantId}`;
+        }
+        return `participant:${label || "unknown"}`;
+    }
+    setupParticipantNetworkGraphDialog() {
+        if (!this.networkGraphDialog ||
+            !this.networkGraphCard ||
+            !this.networkGraphUpdated ||
+            !this.networkGraphParticipant ||
+            !this.networkGraphSummary ||
+            !this.networkGraphMetricList ||
+            !this.networkGraphEmpty ||
+            !this.networkGraphCharts ||
+            !this.networkGraphClose ||
+            !this.networkGraphSelectAll ||
+            !this.networkGraphClear) {
+            return;
+        }
+        this.renderNetworkGraphMetricControls();
+        this.syncNetworkGraphParticipantOptions();
+        this.networkGraphParticipant.onchange = () => {
+            this.networkGraphSelectedParticipantKey = this.networkGraphParticipant.value || null;
+            this.renderParticipantNetworkGraph();
+        };
+        this.networkGraphSelectAll.onclick = () => {
+            this.networkGraphSelectedMetrics = new Set(NETWORK_GRAPH_METRICS.map((metric) => metric.key));
+            this.renderNetworkGraphMetricControls();
+            this.renderParticipantNetworkGraph();
+        };
+        this.networkGraphClear.onclick = () => {
+            this.networkGraphSelectedMetrics.clear();
+            this.renderNetworkGraphMetricControls();
+            this.renderParticipantNetworkGraph();
+        };
+        this.networkGraphClose.onclick = () => this.closeParticipantNetworkGraphDialog();
+        this.networkGraphDialog.onclick = (ev) => {
+            if (ev.target === this.networkGraphDialog) {
+                this.closeParticipantNetworkGraphDialog();
+            }
+        };
+        window.addEventListener("keydown", (ev) => {
+            if (ev.key === "Escape" && this.networkGraphVisible) {
+                this.closeParticipantNetworkGraphDialog();
+            }
+        });
+    }
+    openParticipantNetworkGraphDialog() {
+        if (!this.networkGraphDialog)
+            return;
+        this.closeConnectivityDialog();
+        this.setParticipantNetworkSideMinimized(true);
+        this.setParticipantNetworkPopupMinimized(true);
+        this.networkGraphVisible = true;
+        this.networkGraphDialog.classList.add("show");
+        this.networkGraphDialog.setAttribute("aria-hidden", "false");
+        this.syncNetworkGraphParticipantOptions();
+        this.renderParticipantNetworkGraph();
+    }
+    closeParticipantNetworkGraphDialog() {
+        if (!this.networkGraphDialog)
+            return;
+        this.networkGraphVisible = false;
+        this.networkGraphDialog.classList.remove("show");
+        this.networkGraphDialog.setAttribute("aria-hidden", "true");
+    }
+    syncNetworkGraphParticipantOptions() {
+        if (!this.networkGraphParticipant)
+            return;
+        const orderedEntries = this.getOrderedParticipantNetworkGraphEntries();
+        if (orderedEntries.length === 0) {
+            this.networkGraphParticipant.innerHTML = '<option value="">No participant data</option>';
+            this.networkGraphParticipant.disabled = true;
+            this.networkGraphSelectedParticipantKey = null;
+            return;
+        }
+        if (!this.networkGraphSelectedParticipantKey ||
+            !orderedEntries.some(([key]) => key === this.networkGraphSelectedParticipantKey)) {
+            this.networkGraphSelectedParticipantKey = orderedEntries[0][0];
+        }
+        this.networkGraphParticipant.disabled = false;
+        this.networkGraphParticipant.innerHTML = orderedEntries
+            .map(([key, series]) => {
+            const selected = key === this.networkGraphSelectedParticipantKey ? " selected" : "";
+            return `<option value="${this.escapeHtml(key)}"${selected}>${this.escapeHtml(series.label)}</option>`;
+        })
+            .join("");
+        this.networkGraphParticipant.value = this.networkGraphSelectedParticipantKey;
+    }
+    getOrderedParticipantNetworkGraphEntries() {
+        const orderedKeys = [];
+        const seen = new Set();
+        const pushKey = (key) => {
+            if (!this.networkGraphHistory.has(key) || seen.has(key))
+                return;
+            seen.add(key);
+            orderedKeys.push(key);
+        };
+        if (this.lastParticipantNetworkSnapshot?.rows) {
+            this.lastParticipantNetworkSnapshot.rows.forEach((row) => {
+                pushKey(this.getParticipantNetworkHistoryKey(row));
+            });
+        }
+        Array.from(this.networkGraphHistory.entries())
+            .sort((a, b) => {
+            if (a[0] === "self")
+                return -1;
+            if (b[0] === "self")
+                return 1;
+            return a[1].label.localeCompare(b[1].label);
+        })
+            .forEach(([key]) => pushKey(key));
+        return orderedKeys.map((key) => [key, this.networkGraphHistory.get(key)]);
+    }
+    renderNetworkGraphMetricControls() {
+        if (!this.networkGraphMetricList)
+            return;
+        this.networkGraphMetricList.innerHTML = NETWORK_GRAPH_METRICS
+            .map((metric) => {
+            const checked = this.networkGraphSelectedMetrics.has(metric.key) ? " checked" : "";
+            return (`<label class="network-graph-metric-chip">` +
+                `<input type="checkbox" data-metric-key="${metric.key}"${checked}>` +
+                `<span class="network-graph-metric-swatch" style="background:${metric.color}"></span>` +
+                `<span>${this.escapeHtml(metric.label)}</span>` +
+                `</label>`);
+        })
+            .join("");
+        Array.from(this.networkGraphMetricList.querySelectorAll("input[data-metric-key]")).forEach((node) => {
+            const input = node;
+            input.onchange = () => {
+                const key = input.getAttribute("data-metric-key");
+                if (!key)
+                    return;
+                if (input.checked) {
+                    this.networkGraphSelectedMetrics.add(key);
+                }
+                else {
+                    this.networkGraphSelectedMetrics.delete(key);
+                }
+                this.renderParticipantNetworkGraph();
+            };
+        });
+    }
+    renderParticipantNetworkGraph() {
+        if (!this.networkGraphUpdated ||
+            !this.networkGraphSummary ||
+            !this.networkGraphEmpty ||
+            !this.networkGraphCharts) {
+            return;
+        }
+        const selectedKey = this.networkGraphSelectedParticipantKey;
+        const series = selectedKey ? this.networkGraphHistory.get(selectedKey) ?? null : null;
+        if (!series) {
+            this.networkGraphUpdated.textContent = "Updated: -";
+            this.applyNetworkGraphSummary("Unknown");
+            this.networkGraphEmpty.textContent = "Waiting for graph samples...";
+            this.networkGraphEmpty.style.display = "block";
+            this.networkGraphCharts.innerHTML = "";
+            return;
+        }
+        this.networkGraphUpdated.textContent =
+            `Updated: ${this.formatTimestamp(series.updatedAt)} | Samples: ${series.samples.length}`;
+        this.applyNetworkGraphSummary(series.bottleneck);
+        const selectedMetrics = NETWORK_GRAPH_METRICS.filter((metric) => this.networkGraphSelectedMetrics.has(metric.key));
+        if (selectedMetrics.length === 0) {
+            this.networkGraphEmpty.textContent = "Select at least one metric to render the graph.";
+            this.networkGraphEmpty.style.display = "block";
+            this.networkGraphCharts.innerHTML = "";
+            return;
+        }
+        this.networkGraphEmpty.style.display = "none";
+        this.networkGraphCharts.innerHTML = selectedMetrics
+            .map((metric) => this.renderParticipantMetricChart(metric, series))
+            .join("");
+    }
+    applyNetworkGraphSummary(value) {
+        if (!this.networkGraphSummary)
+            return;
+        const cls = this.getBottleneckClass(value);
+        this.networkGraphSummary.className = `network-graph-summary network-bottleneck ${cls}`;
+        this.networkGraphSummary.textContent = `Latest bottleneck: ${value}`;
+    }
+    renderParticipantMetricChart(metric, series) {
+        const samples = series.samples;
+        const latestValue = this.getLatestNetworkGraphMetricValue(samples, metric.key);
+        const values = samples
+            .map((sample) => this.getNetworkGraphMetricValue(sample, metric.key))
+            .filter((value) => value !== null && Number.isFinite(value));
+        const chartMeta = `<div class="network-graph-chart-meta">` +
+            `Latest: ${this.escapeHtml(this.formatNetworkGraphMetricValue(metric, latestValue))}` +
+            `</div>`;
+        if (samples.length === 0 || values.length === 0) {
+            return (`<div class="network-graph-chart-card">` +
+                `<div class="network-graph-chart-head">` +
+                `<div class="network-graph-chart-title">${this.escapeHtml(metric.label)}</div>` +
+                chartMeta +
+                `</div>` +
+                `<div class="network-graph-chart-frame">` +
+                `<div class="network-graph-chart-empty">Pending samples...</div>` +
+                `</div>` +
+                `<div class="network-graph-chart-footer"><span>Window: -</span><span>Samples: 0</span></div>` +
+                `</div>`);
+        }
+        const width = 430;
+        const height = 180;
+        const left = 46;
+        const right = 10;
+        const top = 12;
+        const bottom = 24;
+        const plotWidth = width - left - right;
+        const plotHeight = height - top - bottom;
+        const firstTs = samples[0].ts;
+        const lastTs = samples[samples.length - 1].ts;
+        const timeSpan = Math.max(1, lastTs - firstTs);
+        const bounds = this.getNetworkGraphBounds(metric, values);
+        const valueSpan = Math.max(0.0001, bounds.max - bounds.min);
+        const xFor = (ts) => left + ((ts - firstTs) / timeSpan) * plotWidth;
+        const yFor = (value) => top + (1 - ((value - bounds.min) / valueSpan)) * plotHeight;
+        const tickValues = metric.unit === "flag"
+            ? [1, 0]
+            : [bounds.max, bounds.max - valueSpan / 3, bounds.max - (2 * valueSpan) / 3, bounds.min];
+        const horizontalGrid = tickValues
+            .map((tick) => {
+            const y = yFor(tick);
+            return (`<line x1="${left}" y1="${y.toFixed(2)}" x2="${(left + plotWidth).toFixed(2)}" y2="${y.toFixed(2)}" stroke="rgba(148,163,184,.26)" stroke-width="1" />` +
+                `<text x="${(left - 6).toFixed(2)}" y="${(y + 3).toFixed(2)}" text-anchor="end" font-size="9" fill="#64748b">` +
+                `${this.escapeHtml(this.formatNetworkGraphAxisLabel(metric.unit, tick))}` +
+                `</text>`);
+        })
+            .join("");
+        const verticalGrid = [0, 0.5, 1]
+            .map((ratio) => {
+            const x = left + plotWidth * ratio;
+            return `<line x1="${x.toFixed(2)}" y1="${top}" x2="${x.toFixed(2)}" y2="${(top + plotHeight).toFixed(2)}" stroke="rgba(148,163,184,.18)" stroke-width="1" />`;
+        })
+            .join("");
+        const path = this.buildNetworkGraphPath(samples, metric, xFor, yFor);
+        const lastPoint = this.getLatestNetworkGraphPoint(samples, metric, xFor, yFor);
+        const pointMarker = lastPoint
+            ? `<circle cx="${lastPoint.x.toFixed(2)}" cy="${lastPoint.y.toFixed(2)}" r="3.5" fill="${metric.color}" stroke="#fff" stroke-width="1.5" />`
+            : "";
+        const activeDots = metric.unit === "flag"
+            ? samples
+                .map((sample) => {
+                const value = this.getNetworkGraphMetricValue(sample, metric.key);
+                if (value === null || !Number.isFinite(value))
+                    return "";
+                const x = xFor(sample.ts);
+                const y = yFor(value);
+                return `<circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="2.2" fill="${metric.color}" opacity=".92" />`;
+            })
+                .join("")
+            : "";
+        const frame = `<svg class="network-graph-chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="${this.escapeHtml(metric.label)} trend graph">` +
+            horizontalGrid +
+            verticalGrid +
+            `<path d="${path}" fill="none" stroke="${metric.color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />` +
+            activeDots +
+            pointMarker +
+            `</svg>`;
+        const rangeText = `${this.formatNetworkGraphMetricValue(metric, bounds.min)} to ${this.formatNetworkGraphMetricValue(metric, bounds.max)}`;
+        const footerLeft = `Window: ${this.formatTimestamp(firstTs)} -> ${this.formatTimestamp(lastTs)}`;
+        const footerRight = `Range: ${rangeText}`;
+        return (`<div class="network-graph-chart-card">` +
+            `<div class="network-graph-chart-head">` +
+            `<div class="network-graph-chart-title">${this.escapeHtml(metric.label)}</div>` +
+            chartMeta +
+            `</div>` +
+            `<div class="network-graph-chart-frame">${frame}</div>` +
+            `<div class="network-graph-chart-footer"><span>${this.escapeHtml(footerLeft)}</span><span>${this.escapeHtml(footerRight)}</span></div>` +
+            `</div>`);
+    }
+    buildNetworkGraphPath(samples, metric, xFor, yFor) {
+        let path = "";
+        let segmentOpen = false;
+        samples.forEach((sample) => {
+            const value = this.getNetworkGraphMetricValue(sample, metric.key);
+            if (value === null || !Number.isFinite(value)) {
+                segmentOpen = false;
+                return;
+            }
+            const x = xFor(sample.ts);
+            const y = yFor(value);
+            path += `${segmentOpen ? " L" : "M"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+            segmentOpen = true;
+        });
+        return path || "M 0 0";
+    }
+    getLatestNetworkGraphPoint(samples, metric, xFor, yFor) {
+        for (let i = samples.length - 1; i >= 0; i--) {
+            const value = this.getNetworkGraphMetricValue(samples[i], metric.key);
+            if (value === null || !Number.isFinite(value))
+                continue;
+            return {
+                x: xFor(samples[i].ts),
+                y: yFor(value)
+            };
+        }
+        return null;
+    }
+    getLatestNetworkGraphMetricValue(samples, key) {
+        for (let i = samples.length - 1; i >= 0; i--) {
+            const value = this.getNetworkGraphMetricValue(samples[i], key);
+            if (value !== null && Number.isFinite(value))
+                return value;
+        }
+        return null;
+    }
+    getNetworkGraphMetricValue(sample, key) {
+        switch (key) {
+            case "upload": return sample.upload;
+            case "download": return sample.download;
+            case "remoteUpload": return sample.remoteUpload;
+            case "remoteDownload": return sample.remoteDownload;
+            case "localRttMs": return sample.localRttMs;
+            case "localJitterMs": return sample.localJitterMs;
+            case "localLossPct": return sample.localLossPct;
+            case "remoteRttMs": return sample.remoteRttMs;
+            case "remoteJitterMs": return sample.remoteJitterMs;
+            case "remoteLossPct": return sample.remoteLossPct;
+            case "uplinkSlowLink": return sample.uplinkSlowLink;
+            case "downlinkSlowLink": return sample.downlinkSlowLink;
+            default: return null;
+        }
+    }
+    getNetworkGraphBounds(metric, values) {
+        if (metric.unit === "flag") {
+            return { min: 0, max: 1 };
+        }
+        let min = Math.min(...values);
+        let max = Math.max(...values);
+        if (min === max) {
+            const padding = min === 0 ? 1 : Math.max(1, Math.abs(min) * 0.15);
+            min = Math.max(0, min - padding);
+            max += padding;
+        }
+        else {
+            const padding = (max - min) * 0.12;
+            min = Math.max(0, min - padding);
+            max += padding;
+        }
+        if (metric.unit === "%") {
+            min = Math.max(0, min);
+            max = Math.min(100, Math.max(min + 1, max));
+        }
+        return { min, max: Math.max(min + 0.0001, max) };
+    }
+    formatNetworkGraphMetricValue(metric, value) {
+        if (value === null || !Number.isFinite(value))
+            return "Pending";
+        if (metric.unit === "flag")
+            return value >= 0.5 ? "Active" : "Clear";
+        if (metric.unit === "kbps")
+            return this.formatParticipantSpeed(value);
+        if (metric.unit === "ms")
+            return `${value.toFixed(1)} ms`;
+        return `${value.toFixed(2)} %`;
+    }
+    formatNetworkGraphAxisLabel(unit, value) {
+        if (unit === "flag")
+            return value >= 0.5 ? "Active" : "Clear";
+        if (unit === "kbps") {
+            if (value >= 1000)
+                return `${(value / 1000).toFixed(1)}M`;
+            return `${value.toFixed(0)}k`;
+        }
+        if (unit === "ms")
+            return `${value.toFixed(0)}ms`;
+        return `${value.toFixed(1)}%`;
+    }
+    setupConnectivityDialog() {
+        if (!this.connectivityDialog ||
+            !this.connectivityCard ||
+            !this.connectivityUpdated ||
+            !this.connectivityClose ||
+            !this.connectivityStatus ||
+            !this.connectivityPrimary ||
+            !this.connectivitySecondary) {
+            return;
+        }
+        this.connectivityClose.onclick = () => this.closeConnectivityDialog();
+        this.connectivityDialog.onclick = (ev) => {
+            if (ev.target === this.connectivityDialog) {
+                this.closeConnectivityDialog();
+            }
+        };
+        window.addEventListener("keydown", (ev) => {
+            if (ev.key === "Escape" && this.connectivityVisible) {
+                this.closeConnectivityDialog();
+            }
+        });
+    }
+    openConnectivityDialog() {
+        if (!this.connectivityDialog)
+            return;
+        this.closeParticipantNetworkGraphDialog();
+        this.setParticipantNetworkSideMinimized(true);
+        this.setParticipantNetworkPopupMinimized(true);
+        this.connectivityVisible = true;
+        this.connectivityDialog.classList.add("show");
+        this.connectivityDialog.setAttribute("aria-hidden", "false");
+        this.renderConnectivityDialog();
+    }
+    closeConnectivityDialog() {
+        if (!this.connectivityDialog)
+            return;
+        this.connectivityVisible = false;
+        this.connectivityDialog.classList.remove("show");
+        this.connectivityDialog.setAttribute("aria-hidden", "true");
+    }
+    renderConnectivityDialog() {
+        if (!this.connectivityUpdated ||
+            !this.connectivityStatus ||
+            !this.connectivityPrimary ||
+            !this.connectivitySecondary) {
+            return;
+        }
+        const status = this.latestConnectionStatus;
+        const connectivity = this.latestConnectivity;
+        this.connectivityUpdated.textContent = this.connectivityUpdatedAt > 0
+            ? `Updated: ${this.formatTimestamp(this.connectivityUpdatedAt)}`
+            : "Updated: -";
+        const severityClass = status?.severity === "error"
+            ? "connectivity-status-error"
+            : status?.severity === "warn"
+                ? "connectivity-status-warn"
+                : status?.severity === "info"
+                    ? "connectivity-status-info"
+                    : "connectivity-status-pending";
+        this.connectivityStatus.className = `connectivity-status ${severityClass}`;
+        this.connectivityStatus.textContent = status ? `${status.state} (${status.severity})` : "Pending";
+        this.connectivityPrimary.textContent = status?.primaryText ?? "Waiting for connectivity data.";
+        this.connectivitySecondary.textContent =
+            status?.secondaryText ?? "Start a call to see ICE, signaling, and transport details.";
+        this.setText(this.connectivityBrowser, navigator.onLine === false ? "Offline" : "Online");
+        this.setText(this.connectivityIce, connectivity?.ice ?? "Pending");
+        this.setText(this.connectivityConnection, connectivity?.connection ?? "Pending");
+        this.setText(this.connectivitySignaling, connectivity?.signaling ?? "Pending");
+        this.setText(this.connectivityGathering, connectivity?.gathering ?? "Pending");
+        this.setText(this.connectivityOwner, status?.owner ?? "Pending");
+        this.setText(this.connectivitySeverity, status?.severity ?? "Pending");
+        this.setText(this.connectivityProductState, status?.state ?? "Pending");
+    }
+    setText(el, value) {
+        if (!el)
+            return;
+        el.textContent = value;
+    }
+    renderParticipantNetworkRows(rows) {
+        if (!rows || rows.length === 0) {
+            return '<div class="network-empty">Pending stats...</div>';
+        }
+        return rows.map((row) => this.renderParticipantNetworkRow(row)).join("");
+    }
+    renderParticipantNetworkRow(row) {
+        const label = this.escapeHtml(row.label || "Participant");
+        const upload = this.renderParticipantMetric("Upload", row.upload);
+        const download = this.renderParticipantMetric("Download", row.download);
+        const remoteUpload = this.renderParticipantMetric("Remote Upload", row.remoteUpload);
+        const remoteDownload = this.renderParticipantMetric("Remote Download", row.remoteDownload);
+        const quality = this.renderParticipantQualityGrid(row);
+        return (`<div class="network-row">` +
+            `<div class="network-row-header">${label}</div>` +
+            `<div class="network-row-grid">` +
+            upload + download + remoteUpload + remoteDownload +
+            `</div>` +
+            quality +
+            this.renderSlowLinkSummary(row) +
+            this.renderBottleneckSummary(row.likelyBottleneck) +
+            `<div class="network-row-strip">` +
+            `<span class="network-strip-seg ${this.tierClass(row.upload.tier)}"></span>` +
+            `<span class="network-strip-seg ${this.tierClass(row.download.tier)}"></span>` +
+            `<span class="network-strip-seg ${this.tierClass(row.remoteUpload.tier)}"></span>` +
+            `<span class="network-strip-seg ${this.tierClass(row.remoteDownload.tier)}"></span>` +
+            `</div>` +
+            `<div class="network-strip-legend">U | D | RU | RD</div>` +
+            `</div>`);
+    }
+    renderBottleneckSummary(value) {
+        const cls = this.getBottleneckClass(value);
+        return `<div class="network-bottleneck ${cls}">Likely bottleneck: ${value}</div>`;
+    }
+    getBottleneckClass(value) {
+        return value === "You"
+            ? "bneck-you"
+            : value === "Remote"
+                ? "bneck-remote"
+                : value === "Both"
+                    ? "bneck-both"
+                    : "bneck-unknown";
+    }
+    renderSlowLinkSummary(row) {
+        const uplink = row.upload.slowLink || row.remoteDownload.slowLink;
+        const downlink = row.download.slowLink || row.remoteUpload.slowLink;
+        if (!uplink && !downlink) {
+            return '<div class="network-slowlink network-slowlink-none">SlowLink: None</div>';
+        }
+        const parts = [];
+        if (uplink)
+            parts.push("Uplink");
+        if (downlink)
+            parts.push("Downlink");
+        return `<div class="network-slowlink network-slowlink-active">SlowLink: ${parts.join(" + ")}</div>`;
+    }
+    renderParticipantMetric(label, direction) {
+        const cls = this.tierClass(direction.tier);
+        const kbps = this.formatParticipantSpeed(direction.kbps);
+        const slowTag = direction.slowLink ? " SlowLink" : "";
+        return (`<div class="network-metric">` +
+            `<div class="network-metric-label">${label}</div>` +
+            `<div class="network-metric-value ${cls}">${kbps} (${direction.tier}${slowTag})</div>` +
+            `</div>`);
+    }
+    renderParticipantQualityGrid(row) {
+        const q = row.quality;
+        const localRtt = this.renderParticipantQualityMetric("Local RTT", q.localRttMs, "ms", this.classifyRttTier(q.localRttMs));
+        const localJitter = this.renderParticipantQualityMetric("Local Jitter", q.localJitterMs, "ms", this.classifyJitterTier(q.localJitterMs));
+        const localLoss = this.renderParticipantQualityMetric("Local Loss", q.localLossPct, "%", this.classifyLossTier(q.localLossPct));
+        const remoteRtt = this.renderParticipantQualityMetric("Remote RTT", q.remoteRttMs, "ms", this.classifyRttTier(q.remoteRttMs));
+        const remoteJitter = this.renderParticipantQualityMetric("Remote Jitter", q.remoteJitterMs, "ms", this.classifyJitterTier(q.remoteJitterMs));
+        const remoteLoss = this.renderParticipantQualityMetric("Remote Loss", q.remoteLossPct, "%", this.classifyLossTier(q.remoteLossPct));
+        return (`<div class="network-row-grid network-row-grid-quality">` +
+            localRtt + localJitter + localLoss + remoteRtt + remoteJitter + remoteLoss +
+            `</div>`);
+    }
+    renderParticipantQualityMetric(label, value, unit, tier) {
+        const cls = this.tierClass(tier);
+        const rendered = this.formatParticipantQualityValue(value, unit);
+        return (`<div class="network-metric">` +
+            `<div class="network-metric-label">${label}</div>` +
+            `<div class="network-metric-value ${cls}">${rendered}${value !== null ? ` (${tier})` : ""}</div>` +
+            `</div>`);
+    }
+    classifyJitterTier(value) {
+        if (value === null || !Number.isFinite(value))
+            return "Pending";
+        const goodMax = APP_CONFIG.networkQuality.thresholds.jitterGoodMs;
+        const mediumMax = goodMax * 2;
+        if (value <= goodMax)
+            return "Good";
+        if (value <= mediumMax)
+            return "Medium";
+        return "Low";
+    }
+    classifyRttTier(value) {
+        if (value === null || !Number.isFinite(value))
+            return "Pending";
+        const goodMax = APP_CONFIG.networkQuality.thresholds.rttGoodMs;
+        const mediumMax = goodMax * 2;
+        if (value <= goodMax)
+            return "Good";
+        if (value <= mediumMax)
+            return "Medium";
+        return "Low";
+    }
+    classifyLossTier(value) {
+        if (value === null || !Number.isFinite(value))
+            return "Pending";
+        const goodMax = APP_CONFIG.networkQuality.thresholds.lossGoodPct;
+        const mediumMax = goodMax * 2;
+        if (value <= goodMax)
+            return "Good";
+        if (value <= mediumMax)
+            return "Medium";
+        return "Low";
+    }
+    formatParticipantQualityValue(value, unit) {
+        if (value === null || !Number.isFinite(value))
+            return "Pending";
+        return `${value.toFixed(1)} ${unit}`;
+    }
+    formatParticipantSpeed(kbps) {
+        if (kbps === null || !Number.isFinite(kbps))
+            return "Pending";
+        if (kbps >= 1000)
+            return `${(kbps / 1000).toFixed(2)} Mbps`;
+        return `${kbps.toFixed(0)} kbps`;
+    }
+    tierClass(tier) {
+        if (tier === "Good")
+            return "tier-good";
+        if (tier === "Medium")
+            return "tier-medium";
+        if (tier === "Low")
+            return "tier-low";
+        return "tier-pending";
+    }
+    formatTimestamp(value) {
+        if (!Number.isFinite(value))
+            return "-";
+        return new Date(value).toLocaleTimeString();
+    }
+    escapeHtml(text) {
+        return String(text)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+    }
+}
 // import {Dom} from "./Dom";
 // import {CallController} from "../managers/CallController";
 class UIController {
@@ -6783,7 +7768,6 @@ class UIController {
         this.autoJoinSeq = 0;
         this.bridge = new ParentBridge();
         this.net = new NetworkQualityManager();
-        this.participantNet = new ParticipantNetworkStatsManager();
         this.localVideoEl = document.getElementById("localVideo");
         this.remoteVideoEl = document.getElementById("remoteVideo");
         this.remoteAudioEl = document.getElementById("remoteAudio");
@@ -6801,19 +7785,6 @@ class UIController {
         this.remoteQ = document.getElementById("remoteQuality");
         this.localQD = document.getElementById("localQualityDetails");
         this.remoteQD = document.getElementById("remoteQualityDetails");
-        this.networkSidePanel = document.getElementById("networkSidePanel");
-        this.networkSideHead = document.getElementById("networkSideHead");
-        this.networkSideToggle = document.getElementById("networkSideToggle");
-        this.networkSideUpdated = document.getElementById("networkSideUpdated");
-        this.networkSideBody = document.getElementById("networkSideBody");
-        this.networkPanelBtn = document.getElementById("networkPanelBtn");
-        this.networkPanelPopup = document.getElementById("networkPanelPopup");
-        this.networkPopupCard = document.getElementById("networkPopupCard");
-        this.networkPopupHead = document.getElementById("networkPopupHead");
-        this.networkPopupToggle = document.getElementById("networkPopupToggle");
-        this.networkPanelClose = document.getElementById("networkPanelClose");
-        this.networkPopupUpdated = document.getElementById("networkPopupUpdated");
-        this.networkPopupBody = document.getElementById("networkPopupBody");
         this.diagPanel = document.getElementById("diagPanel");
         this.diagPanelHead = document.getElementById("diagPanelHead");
         this.diagPanelToggle = document.getElementById("diagPanelToggle");
@@ -6868,8 +7839,6 @@ class UIController {
         this.connectionStatus = null;
         this.remoteVideoMonitorTimer = null;
         this.diagPanelMinimized = false;
-        this.networkSidePanelMinimized = false;
-        this.networkPopupMinimized = false;
         const qn = this.getQueryParam("name");
         if (qn)
             Logger.setUserName(qn);
@@ -6880,6 +7849,7 @@ class UIController {
         const remoteVideo = this.remoteVideoEl;
         const remoteAudio = this.remoteAudioEl;
         this.controller = new CallController(this.bus, localVideo, remoteVideo, remoteAudio);
+        this.networkPanelController = new NetworkPanelController(this.bus, () => this.controller.getParticipantNetworkPeers());
         this.applyRecordingAccess();
         this.applySwapCameraAccess();
         this.updateScreenshotUiCopy();
@@ -7006,12 +7976,6 @@ class UIController {
                 this.renderConnectionStatus(this.connectionStatus);
             }
         });
-        this.bus.on("janus-slowlink", (signal) => {
-            this.participantNet.recordSlowLink(signal);
-        });
-        this.bus.on("peer-network-telemetry", (evt) => {
-            this.participantNet.recordRemoteNetworkTelemetry(evt.feedId, evt.payload);
-        });
         this.bus.on("call-ended", (payload) => {
             Logger.user(`Call ended event received: ${payload?.reason || "unknown"}`);
             this.setEndedState(true);
@@ -7019,7 +7983,6 @@ class UIController {
         this.wire();
         this.setupNetworkUI();
         this.setupDiagnosticsPanel();
-        this.setupParticipantNetworkPanel();
         this.setupParentBridge();
         this.setupScreenshotDialog();
         this.setupRemoteFallbackMonitor();
@@ -8040,257 +9003,6 @@ class UIController {
             Logger.setStatus("Back online. Reconnecting media if needed...");
         });
         sync();
-    }
-    setupParticipantNetworkPanel() {
-        if (!this.networkSidePanel ||
-            !this.networkSideHead ||
-            !this.networkSideToggle ||
-            !this.networkSideUpdated ||
-            !this.networkSideBody ||
-            !this.networkPanelBtn ||
-            !this.networkPanelPopup ||
-            !this.networkPopupCard ||
-            !this.networkPopupHead ||
-            !this.networkPopupToggle ||
-            !this.networkPopupUpdated ||
-            !this.networkPopupBody ||
-            !this.networkPanelClose) {
-            return;
-        }
-        const closePopup = () => {
-            this.networkPanelPopup.classList.remove("show");
-        };
-        const openPopup = () => {
-            this.networkPanelPopup.classList.add("show");
-        };
-        const applySideMinimizedState = () => {
-            this.networkSidePanel.classList.toggle("minimized", this.networkSidePanelMinimized);
-            this.networkSideToggle.textContent = this.networkSidePanelMinimized ? "+" : "-";
-            this.networkSideHead.setAttribute("aria-expanded", String(!this.networkSidePanelMinimized));
-        };
-        const applyPopupMinimizedState = () => {
-            this.networkPopupCard.classList.toggle("minimized", this.networkPopupMinimized);
-            this.networkPopupToggle.textContent = this.networkPopupMinimized ? "+" : "-";
-            this.networkPopupHead.setAttribute("aria-expanded", String(!this.networkPopupMinimized));
-            this.networkPopupToggle.setAttribute("aria-label", this.networkPopupMinimized ? "Maximize network panel" : "Minimize network panel");
-        };
-        const toggleSideMinimized = () => {
-            this.networkSidePanelMinimized = !this.networkSidePanelMinimized;
-            applySideMinimizedState();
-        };
-        const togglePopupMinimized = () => {
-            this.networkPopupMinimized = !this.networkPopupMinimized;
-            applyPopupMinimizedState();
-        };
-        this.networkPanelBtn.onclick = () => {
-            if (!this.isParticipantNetworkPopupMode()) {
-                toggleSideMinimized();
-                return;
-            }
-            if (this.networkPanelPopup.classList.contains("show")) {
-                closePopup();
-            }
-            else {
-                openPopup();
-            }
-        };
-        this.networkSideHead.onclick = () => toggleSideMinimized();
-        this.networkSideHead.onkeydown = (ev) => {
-            if (ev.key !== "Enter" && ev.key !== " ")
-                return;
-            ev.preventDefault();
-            toggleSideMinimized();
-        };
-        this.networkPopupHead.onclick = (ev) => {
-            const target = ev.target;
-            if (target?.closest("#networkPanelClose") || target?.closest("#networkPopupToggle"))
-                return;
-            togglePopupMinimized();
-        };
-        this.networkPopupHead.onkeydown = (ev) => {
-            if (ev.key !== "Enter" && ev.key !== " ")
-                return;
-            ev.preventDefault();
-            togglePopupMinimized();
-        };
-        this.networkPopupToggle.onclick = (ev) => {
-            ev.stopPropagation();
-            togglePopupMinimized();
-        };
-        this.networkPanelClose.onclick = (ev) => {
-            ev.stopPropagation();
-            closePopup();
-        };
-        this.networkPanelPopup.onclick = (ev) => {
-            if (ev.target === this.networkPanelPopup)
-                closePopup();
-        };
-        window.addEventListener("resize", () => {
-            if (!this.isParticipantNetworkPopupMode()) {
-                closePopup();
-            }
-        });
-        applySideMinimizedState();
-        applyPopupMinimizedState();
-        this.participantNet.start((snapshot) => this.renderParticipantNetwork(snapshot), () => this.controller.getParticipantNetworkPeers());
-    }
-    isParticipantNetworkPopupMode() {
-        return window.innerWidth <= APP_CONFIG.networkQuality.participantPanel.popupBreakpointPx;
-    }
-    renderParticipantNetwork(snapshot) {
-        if (!this.networkSideUpdated ||
-            !this.networkSideBody ||
-            !this.networkPopupUpdated ||
-            !this.networkPopupBody) {
-            return;
-        }
-        const updated = new Date(snapshot.updatedAt).toLocaleTimeString();
-        const content = this.renderParticipantNetworkRows(snapshot.rows);
-        this.networkSideUpdated.textContent = `Updated: ${updated}`;
-        this.networkPopupUpdated.textContent = `Updated: ${updated}`;
-        this.networkSideBody.innerHTML = content;
-        this.networkPopupBody.innerHTML = content;
-    }
-    renderParticipantNetworkRows(rows) {
-        if (!rows || rows.length === 0) {
-            return '<div class="network-empty">Pending stats...</div>';
-        }
-        return rows.map((row) => this.renderParticipantNetworkRow(row)).join("");
-    }
-    renderParticipantNetworkRow(row) {
-        const label = this.escapeHtml(row.label || "Participant");
-        const upload = this.renderParticipantMetric("Upload", row.upload);
-        const download = this.renderParticipantMetric("Download", row.download);
-        const remoteUpload = this.renderParticipantMetric("Remote Upload", row.remoteUpload);
-        const remoteDownload = this.renderParticipantMetric("Remote Download", row.remoteDownload);
-        const quality = this.renderParticipantQualityGrid(row);
-        return (`<div class="network-row">` +
-            `<div class="network-row-header">${label}</div>` +
-            `<div class="network-row-grid">` +
-            upload + download + remoteUpload + remoteDownload +
-            `</div>` +
-            quality +
-            this.renderSlowLinkSummary(row) +
-            this.renderBottleneckSummary(row.likelyBottleneck) +
-            `<div class="network-row-strip">` +
-            `<span class="network-strip-seg ${this.tierClass(row.upload.tier)}"></span>` +
-            `<span class="network-strip-seg ${this.tierClass(row.download.tier)}"></span>` +
-            `<span class="network-strip-seg ${this.tierClass(row.remoteUpload.tier)}"></span>` +
-            `<span class="network-strip-seg ${this.tierClass(row.remoteDownload.tier)}"></span>` +
-            `</div>` +
-            `<div class="network-strip-legend">U | D | RU | RD</div>` +
-            `</div>`);
-    }
-    renderBottleneckSummary(value) {
-        const cls = value === "You" ? "bneck-you" :
-            value === "Remote" ? "bneck-remote" :
-                value === "Both" ? "bneck-both" :
-                    "bneck-unknown";
-        return `<div class="network-bottleneck ${cls}">Likely bottleneck: ${value}</div>`;
-    }
-    renderSlowLinkSummary(row) {
-        const uplink = row.upload.slowLink || row.remoteDownload.slowLink;
-        const downlink = row.download.slowLink || row.remoteUpload.slowLink;
-        if (!uplink && !downlink) {
-            return '<div class="network-slowlink network-slowlink-none">SlowLink: None</div>';
-        }
-        const parts = [];
-        if (uplink)
-            parts.push("Uplink");
-        if (downlink)
-            parts.push("Downlink");
-        return `<div class="network-slowlink network-slowlink-active">SlowLink: ${parts.join(" + ")}</div>`;
-    }
-    renderParticipantMetric(label, direction) {
-        const cls = this.tierClass(direction.tier);
-        const kbps = this.formatParticipantSpeed(direction.kbps);
-        const slowTag = direction.slowLink ? " SlowLink" : "";
-        return (`<div class="network-metric">` +
-            `<div class="network-metric-label">${label}</div>` +
-            `<div class="network-metric-value ${cls}">${kbps} (${direction.tier}${slowTag})</div>` +
-            `</div>`);
-    }
-    renderParticipantQualityGrid(row) {
-        const q = row.quality;
-        const localRtt = this.renderParticipantQualityMetric("Local RTT", q.localRttMs, "ms", this.classifyRttTier(q.localRttMs));
-        const localJitter = this.renderParticipantQualityMetric("Local Jitter", q.localJitterMs, "ms", this.classifyJitterTier(q.localJitterMs));
-        const localLoss = this.renderParticipantQualityMetric("Local Loss", q.localLossPct, "%", this.classifyLossTier(q.localLossPct));
-        const remoteRtt = this.renderParticipantQualityMetric("Remote RTT", q.remoteRttMs, "ms", this.classifyRttTier(q.remoteRttMs));
-        const remoteJitter = this.renderParticipantQualityMetric("Remote Jitter", q.remoteJitterMs, "ms", this.classifyJitterTier(q.remoteJitterMs));
-        const remoteLoss = this.renderParticipantQualityMetric("Remote Loss", q.remoteLossPct, "%", this.classifyLossTier(q.remoteLossPct));
-        return (`<div class="network-row-grid network-row-grid-quality">` +
-            localRtt + localJitter + localLoss + remoteRtt + remoteJitter + remoteLoss +
-            `</div>`);
-    }
-    renderParticipantQualityMetric(label, value, unit, tier) {
-        const cls = this.tierClass(tier);
-        const rendered = this.formatParticipantQualityValue(value, unit);
-        return (`<div class="network-metric">` +
-            `<div class="network-metric-label">${label}</div>` +
-            `<div class="network-metric-value ${cls}">${rendered}${value !== null ? ` (${tier})` : ""}</div>` +
-            `</div>`);
-    }
-    classifyJitterTier(value) {
-        if (value === null || !Number.isFinite(value))
-            return "Pending";
-        const goodMax = APP_CONFIG.networkQuality.thresholds.jitterGoodMs;
-        const mediumMax = goodMax * 2;
-        if (value <= goodMax)
-            return "Good";
-        if (value <= mediumMax)
-            return "Medium";
-        return "Low";
-    }
-    classifyRttTier(value) {
-        if (value === null || !Number.isFinite(value))
-            return "Pending";
-        const goodMax = APP_CONFIG.networkQuality.thresholds.rttGoodMs;
-        const mediumMax = goodMax * 2;
-        if (value <= goodMax)
-            return "Good";
-        if (value <= mediumMax)
-            return "Medium";
-        return "Low";
-    }
-    classifyLossTier(value) {
-        if (value === null || !Number.isFinite(value))
-            return "Pending";
-        const goodMax = APP_CONFIG.networkQuality.thresholds.lossGoodPct;
-        const mediumMax = goodMax * 2;
-        if (value <= goodMax)
-            return "Good";
-        if (value <= mediumMax)
-            return "Medium";
-        return "Low";
-    }
-    formatParticipantQualityValue(value, unit) {
-        if (value === null || !Number.isFinite(value))
-            return "Pending";
-        return `${value.toFixed(1)} ${unit}`;
-    }
-    formatParticipantSpeed(kbps) {
-        if (kbps === null || !Number.isFinite(kbps))
-            return "Pending";
-        if (kbps >= 1000)
-            return `${(kbps / 1000).toFixed(2)} Mbps`;
-        return `${kbps.toFixed(0)} kbps`;
-    }
-    tierClass(tier) {
-        if (tier === "Good")
-            return "tier-good";
-        if (tier === "Medium")
-            return "tier-medium";
-        if (tier === "Low")
-            return "tier-low";
-        return "tier-pending";
-    }
-    escapeHtml(text) {
-        return String(text)
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;")
-            .replace(/'/g, "&#39;");
     }
     setupParentBridge() {
         this.bridge.onCommand((cmd) => {
