@@ -553,36 +553,64 @@ class Logger {
     static setLevel(level) {
         Logger.level = level;
     }
+    static onMessage(listener) {
+        Logger.messageListeners.add(listener);
+        return () => {
+            Logger.messageListeners.delete(listener);
+        };
+    }
     static canLog(level) {
         return Logger.LEVEL_PRIORITY[level] >= Logger.LEVEL_PRIORITY[Logger.level];
     }
+    static emitMessage(severity, msg) {
+        const message = String(msg ?? "").trim();
+        if (!message)
+            return;
+        const entry = {
+            message,
+            severity,
+            ts: Date.now(),
+            source: "local",
+            sourceLabel: null
+        };
+        Logger.messageListeners.forEach((listener) => {
+            try {
+                listener(entry);
+            }
+            catch (e) {
+                console.error(e);
+            }
+        });
+    }
+    static writeStatus(statusEl, msg, color) {
+        if (!statusEl)
+            return;
+        statusEl.textContent = msg;
+        statusEl.style.color = color;
+    }
+    writeInfo(msg) {
+        if (this.infoEl)
+            this.infoEl.textContent = msg;
+    }
     // Instance UI updates
     setStatus(msg) {
-        if (this.statusEl) {
-            this.statusEl.textContent = msg;
-            this.statusEl.style.color = Logger.STATUS_COLOR_DEFAULT;
-        }
+        Logger.writeStatus(this.statusEl, msg, Logger.STATUS_COLOR_DEFAULT);
         Logger.user(msg);
     }
     setInfo(msg) {
-        if (this.infoEl)
-            this.infoEl.textContent = msg;
-        if (msg)
+        this.writeInfo(msg);
+        if (msg) {
+            Logger.emitMessage("info", msg);
             Logger.flow(msg);
+        }
     }
     setErrorStatus(msg) {
-        if (this.statusEl) {
-            this.statusEl.textContent = msg;
-            this.statusEl.style.color = Logger.STATUS_COLOR_ERROR;
-        }
-        Logger.user(msg);
+        Logger.writeStatus(this.statusEl, msg, Logger.STATUS_COLOR_ERROR);
+        Logger.logError(msg);
     }
     setWarnStatus(msg) {
-        if (this.statusEl) {
-            this.statusEl.textContent = msg;
-            this.statusEl.style.color = Logger.STATUS_COLOR_WARN;
-        }
-        Logger.user(msg);
+        Logger.writeStatus(this.statusEl, msg, Logger.STATUS_COLOR_WARN);
+        Logger.logWarn(msg);
     }
     setStatusBySeverity(msg, severity) {
         if (severity === "error") {
@@ -627,32 +655,26 @@ class Logger {
     }
     static info(msg) { Logger.setInfo(msg); }
     static warn(msg) {
-        if (!Logger.canLog("warn"))
-            return;
-        console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#f59e0b;font-weight:bold");
         if (Logger.instance) {
-            Logger.instance.setWarnStatus(msg);
+            Logger.writeStatus(Logger.instance.statusEl, msg, Logger.STATUS_COLOR_WARN);
         }
+        Logger.logWarn(msg);
     }
     static error(msg, err) {
-        if (!Logger.canLog("error"))
-            return;
-        console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#fb7185;font-weight:bold");
-        if (err)
-            console.error(err);
         if (Logger.instance) {
-            Logger.instance.setErrorStatus(msg);
-            return;
+            Logger.writeStatus(Logger.instance.statusEl, msg, Logger.STATUS_COLOR_ERROR);
         }
-        Logger.user(msg);
+        Logger.logError(msg, err);
     }
     // Friendly narration logs
     static user(msg, data) {
+        Logger.emitMessage("info", msg);
         if (!Logger.canLog("info"))
             return;
         console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#22c55e;font-weight:bold", data ?? "");
     }
     static remote(msg, data) {
+        Logger.emitMessage("info", msg);
         if (!Logger.canLog("info"))
             return;
         console.log(`%cRemote(${Logger.remoteName}): ${msg}`, "color:#60a5fa;font-weight:bold", data ?? "");
@@ -667,11 +689,26 @@ class Logger {
             return;
         console.log(`%cFlow: ${msg}`, "color:#a78bfa;font-weight:bold", data ?? "");
     }
+    static logWarn(msg) {
+        Logger.emitMessage("warn", msg);
+        if (!Logger.canLog("warn"))
+            return;
+        console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#f59e0b;font-weight:bold");
+    }
+    static logError(msg, err) {
+        Logger.emitMessage("error", msg);
+        if (!Logger.canLog("error"))
+            return;
+        console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#fb7185;font-weight:bold");
+        if (err)
+            console.error(err);
+    }
 }
 Logger.instance = null;
 Logger.STATUS_COLOR_DEFAULT = "#111827";
 Logger.STATUS_COLOR_WARN = "#d97706";
 Logger.STATUS_COLOR_ERROR = "#dc2626";
+Logger.messageListeners = new Set();
 Logger.userName = "User";
 Logger.remoteName = "Remote";
 Logger.level = APP_CONFIG.logging.level;
@@ -2181,10 +2218,10 @@ class NetworkQualityManager {
                     const details = [
                         "src=webrtc-stats",
                         localMetrics
-                            ? `local(rtt=${Math.round(localMetrics.rttMs)}ms jitter=${Math.round(localMetrics.jitterMs)}ms loss=${localMetrics.lossPct.toFixed(1)}% bitrate=${Math.round(localMetrics.bitrateKbps)}kbps)`
+                            ? `local(rtt=${Math.round(localMetrics.rttMs)}ms jitter=${Math.round(localMetrics.jitterMs)}ms loss=${this.formatLoss(localMetrics.lossPct)} bitrate=${Math.round(localMetrics.bitrateKbps)}kbps)`
                             : "local(n/a)",
                         remoteMetrics
-                            ? `remote(rtt=${Math.round(remoteMetrics.rttMs)}ms jitter=${Math.round(remoteMetrics.jitterMs)}ms loss=${remoteMetrics.lossPct.toFixed(1)}% bitrate=${Math.round(remoteMetrics.bitrateKbps)}kbps)`
+                            ? `remote(rtt=${Math.round(remoteMetrics.rttMs)}ms jitter=${Math.round(remoteMetrics.jitterMs)}ms loss=${this.formatLoss(remoteMetrics.lossPct)} bitrate=${Math.round(remoteMetrics.bitrateKbps)}kbps)`
                             : "remote(n/a)"
                     ].join(" ");
                     cb(local, remote, details);
@@ -2193,7 +2230,7 @@ class NetworkQualityManager {
                 if (APP_CONFIG.networkQuality.useSimulatedFallback) {
                     const sim = this.sampleSimulatedMetrics();
                     const q = this.calc(sim.rttMs, sim.jitterMs, sim.lossPct, sim.bitrateKbps);
-                    cb(q, q, `[simulated] rtt=${Math.round(sim.rttMs)}ms jitter=${Math.round(sim.jitterMs)}ms loss=${sim.lossPct.toFixed(1)}% bitrate=${Math.round(sim.bitrateKbps)}kbps`);
+                    cb(q, q, `[simulated] rtt=${Math.round(sim.rttMs)}ms jitter=${Math.round(sim.jitterMs)}ms loss=${this.formatLoss(sim.lossPct)} bitrate=${Math.round(sim.bitrateKbps)}kbps`);
                     return;
                 }
                 cb("Low", "Low", "src=webrtc-stats unavailable");
@@ -2221,22 +2258,30 @@ class NetworkQualityManager {
     }
     calc(rtt, jitter, loss, bitrate) {
         let score = 0;
+        let checks = 0;
+        checks++;
         if (rtt < APP_CONFIG.networkQuality.thresholds.rttGoodMs)
             score++;
+        checks++;
         if (jitter < APP_CONFIG.networkQuality.thresholds.jitterGoodMs)
             score++;
-        if (loss < APP_CONFIG.networkQuality.thresholds.lossGoodPct)
-            score++;
+        if (loss !== null) {
+            checks++;
+            if (loss < APP_CONFIG.networkQuality.thresholds.lossGoodPct)
+                score++;
+        }
+        checks++;
         if (bitrate > APP_CONFIG.networkQuality.thresholds.bitrateGoodKbps)
             score++;
-        if (score >= 4)
+        if (score >= checks)
             return "High";
-        if (score >= 2)
+        if (score >= Math.max(2, Math.ceil(checks / 2)))
             return "Medium";
         return "Low";
     }
     async collectPeerMetrics(key, pc) {
         const report = await pc.getStats();
+        const minPacketsForLoss = APP_CONFIG.connectionStatus.packetLossMinPackets;
         let rttMs = 0;
         let jitterMs = 0;
         let packetsTotal = 0;
@@ -2255,16 +2300,20 @@ class NetworkQualityManager {
                 if (typeof anyS.jitter === "number") {
                     jitterMs = Math.max(jitterMs, anyS.jitter * 1000);
                 }
-                const recv = typeof anyS.packetsReceived === "number" ? anyS.packetsReceived : 0;
+                const recv = typeof anyS.packetsReceived === "number"
+                    ? anyS.packetsReceived
+                    : (typeof anyS.packetsSent === "number" ? anyS.packetsSent : 0);
                 const lost = typeof anyS.packetsLost === "number" ? anyS.packetsLost : 0;
-                packetsTotal += recv + lost;
-                packetsLost += lost;
+                if (recv > 0) {
+                    packetsTotal += recv + lost;
+                    packetsLost += lost;
+                }
                 const bytesReceived = typeof anyS.bytesReceived === "number" ? anyS.bytesReceived : 0;
                 const bytesSent = typeof anyS.bytesSent === "number" ? anyS.bytesSent : 0;
                 bytesTotal += bytesReceived + bytesSent;
             }
         });
-        const lossPct = packetsTotal > 0 ? (packetsLost / packetsTotal) * 100 : 0;
+        const lossPct = packetsTotal >= minPacketsForLoss ? (packetsLost / packetsTotal) * 100 : null;
         const bitrateKbps = this.computeBitrateKbps(key, bytesTotal);
         return { rttMs, jitterMs, lossPct, bitrateKbps };
     }
@@ -2274,17 +2323,25 @@ class NetworkQualityManager {
         const totals = metrics.reduce((acc, m) => {
             acc.rttMs += m.rttMs;
             acc.jitterMs += m.jitterMs;
-            acc.lossPct += m.lossPct;
+            if (m.lossPct !== null) {
+                acc.lossPct += m.lossPct;
+                acc.lossCount += 1;
+            }
             acc.bitrateKbps += m.bitrateKbps;
             return acc;
-        }, { rttMs: 0, jitterMs: 0, lossPct: 0, bitrateKbps: 0 });
+        }, { rttMs: 0, jitterMs: 0, lossPct: 0, lossCount: 0, bitrateKbps: 0 });
         const n = metrics.length;
         return {
             rttMs: totals.rttMs / n,
             jitterMs: totals.jitterMs / n,
-            lossPct: totals.lossPct / n,
+            lossPct: totals.lossCount > 0 ? totals.lossPct / totals.lossCount : null,
             bitrateKbps: totals.bitrateKbps / n
         };
+    }
+    formatLoss(lossPct) {
+        if (lossPct === null || !Number.isFinite(lossPct))
+            return "n/a";
+        return `${lossPct.toFixed(1)}%`;
     }
     computeBitrateKbps(key, bytes) {
         const now = Date.now();
@@ -2528,6 +2585,7 @@ class ParticipantNetworkStatsManager {
     }
     async collectPeerRates(key, pc) {
         const report = await pc.getStats();
+        const minPacketsForLoss = APP_CONFIG.connectionStatus.packetLossMinPackets;
         let sentBytes = 0;
         let receivedBytes = 0;
         let rttMs = null;
@@ -2562,13 +2620,13 @@ class ParticipantNetworkStatsManager {
                 const packetsReceivedOrSent = typeof anyS.packetsReceived === "number"
                     ? anyS.packetsReceived
                     : (typeof anyS.packetsSent === "number" ? anyS.packetsSent : 0);
-                if (packetsLost > 0 || packetsReceivedOrSent > 0) {
+                if (packetsReceivedOrSent > 0) {
                     lost += packetsLost;
                     total += packetsLost + packetsReceivedOrSent;
                 }
             }
         });
-        return this.computeRatesKbps(key, sentBytes, receivedBytes, rttMs, jitterMs, total > 0 ? (lost / total) * 100 : null);
+        return this.computeRatesKbps(key, sentBytes, receivedBytes, rttMs, jitterMs, total >= minPacketsForLoss ? (lost / total) * 100 : null);
     }
     computeRatesKbps(key, sentBytes, receivedBytes, rttMs, jitterMs, lossPct) {
         const now = Date.now();
@@ -3561,6 +3619,59 @@ class CallMonitoringStat {
         this.lastRemoteVideoTime = 0;
         this.localAudioPlaybackAt = 0;
         this.lastPeerNetworkTelemetryAt = 0;
+        this.activeOutages = new Map();
+        this.recentOutages = [];
+        this.maxRecentOutages = 12;
+        this.outageDefinitions = {
+            "local-receive-audio": {
+                label: "Participant audio not received locally",
+                kind: "audio",
+                scope: "local",
+                mode: "receive"
+            },
+            "local-receive-video": {
+                label: "Participant video not received locally",
+                kind: "video",
+                scope: "local",
+                mode: "receive"
+            },
+            "local-playback-audio": {
+                label: "Participant audio playback stalled locally",
+                kind: "audio",
+                scope: "local",
+                mode: "playback"
+            },
+            "local-playback-video": {
+                label: "Participant video playback stalled locally",
+                kind: "video",
+                scope: "local",
+                mode: "playback"
+            },
+            "remote-receive-audio": {
+                label: "Your audio not received by participant",
+                kind: "audio",
+                scope: "remote",
+                mode: "receive"
+            },
+            "remote-receive-video": {
+                label: "Your video not received by participant",
+                kind: "video",
+                scope: "remote",
+                mode: "receive"
+            },
+            "remote-playback-audio": {
+                label: "Your audio playback stalled for participant",
+                kind: "audio",
+                scope: "remote",
+                mode: "playback"
+            },
+            "remote-playback-video": {
+                label: "Your video playback stalled for participant",
+                kind: "video",
+                scope: "remote",
+                mode: "playback"
+            }
+        };
     }
     start() {
         this.stop();
@@ -3578,6 +3689,8 @@ class CallMonitoringStat {
         this.lastRemoteVideoTime = 0;
         this.localAudioPlaybackAt = 0;
         this.lastPeerNetworkTelemetryAt = 0;
+        this.activeOutages.clear();
+        this.recentOutages = [];
         this.mediaStatsTimer = window.setInterval(() => {
             void this.sample();
         }, APP_CONFIG.mediaTelemetry.sampleIntervalMs);
@@ -3588,8 +3701,10 @@ class CallMonitoringStat {
             window.clearInterval(this.mediaStatsTimer);
             this.mediaStatsTimer = null;
         }
+        const now = Date.now();
         this.mediaStatsStartedAt = 0;
         this.lastPeerNetworkTelemetryAt = 0;
+        this.resolveAllActiveOutages(now);
         this.bus.emit("media-io", {
             bytes: { audioSent: 0, audioReceived: 0, videoSent: 0, videoReceived: 0 },
             quality: { localJitterMs: null, localLossPct: null, remoteJitterMs: null, remoteLossPct: null },
@@ -3604,7 +3719,8 @@ class CallMonitoringStat {
                 localAudioPlaybackStatus: "Not possible",
                 localVideoPlaybackStatus: "Not possible"
             },
-            ts: Date.now()
+            outages: this.buildOutageSnapshot(now),
+            ts: now
         });
     }
     async sample() {
@@ -3618,6 +3734,7 @@ class CallMonitoringStat {
         const elapsedMs = this.mediaStatsStartedAt > 0 ? now - this.mediaStatsStartedAt : 0;
         const inWarmup = elapsedMs <= APP_CONFIG.mediaTelemetry.stallWindowMs;
         if (!publisher && subscribers.length === 0) {
+            this.resolveAllActiveOutages(now);
             const joined = this.callbacks.getJoinedRoom();
             const pendingOrNotPossible = (joined && inWarmup) ? "Pending" : "Not possible";
             const playbackPendingOrNotPossible = (joined && inWarmup) ? "Pending" : "Not possible";
@@ -3637,6 +3754,7 @@ class CallMonitoringStat {
                     localAudioPlaybackStatus: localPlaybackState,
                     localVideoPlaybackStatus: localPlaybackState
                 },
+                outages: this.buildOutageSnapshot(now),
                 ts: now
             });
             return;
@@ -3676,6 +3794,12 @@ class CallMonitoringStat {
             localOutgoingAudioTrack.readyState === "live" &&
             localOutgoingAudioTrack.enabled !== false &&
             !this.callbacks.isLocalAudioMuted();
+        const localOutgoingVideoTrack = this.callbacks.getPreferredVideoTrack();
+        const localOutgoingVideoActive = !!localOutgoingVideoTrack &&
+            localOutgoingVideoTrack.readyState === "live" &&
+            localOutgoingVideoTrack.enabled !== false &&
+            !this.callbacks.isLocalVideoMuted();
+        const remoteHoldActive = this.callbacks.isRemoteHoldActive();
         let remoteAudioReceiveStatus = remotePresent ? "Pending" : "Not possible";
         let remoteVideoReceiveStatus = remotePresent ? "Pending" : "Not possible";
         if (remotePresent) {
@@ -3755,12 +3879,27 @@ class CallMonitoringStat {
         if (remoteAudioReceiveStatus === "No" && remotePresent && localOutgoingAudioActive) {
             issues.push("your audio not working");
         }
-        if (localReceivingAudio === "No" && remotePresent) {
+        if (localReceivingAudio === "No" && remotePresent && !remoteHoldActive) {
             issues.push("participant audio not working");
         }
-        if (localReceivingVideo === "No" && remotePresent) {
+        if (localReceivingVideo === "No" && remotePresent && !remoteHoldActive) {
             issues.push("participant video not working");
         }
+        const outages = this.updateOutageTracking({
+            now,
+            remotePresent,
+            remoteHoldActive,
+            localOutgoingAudioActive,
+            localOutgoingVideoActive,
+            localReceivingAudio,
+            localReceivingVideo,
+            localAudioPlaybackStatus,
+            localVideoPlaybackStatus,
+            remoteAudioReceiveStatus,
+            remoteVideoReceiveStatus,
+            remoteAudioPlaybackStatus,
+            remoteVideoPlaybackStatus
+        });
         const snapshot = {
             bytes: {
                 audioSent: publisherMetrics.audioBytesSent,
@@ -3785,6 +3924,7 @@ class CallMonitoringStat {
                 localAudioPlaybackStatus,
                 localVideoPlaybackStatus
             },
+            outages,
             ts: now
         };
         this.bus.emit("media-io", snapshot);
@@ -3816,6 +3956,7 @@ class CallMonitoringStat {
     async collectPublisherMetrics(pc) {
         try {
             const report = await pc.getStats();
+            const minPacketsForLoss = APP_CONFIG.connectionStatus.packetLossMinPackets;
             let audioBytesSent = 0;
             let audioPacketsSent = 0;
             let videoBytesSent = 0;
@@ -3844,9 +3985,13 @@ class CallMonitoringStat {
                         localJitterMs = localJitterMs === null ? jitterMs : Math.max(localJitterMs, jitterMs);
                     }
                     const packetsLost = typeof anyS.packetsLost === "number" ? anyS.packetsLost : 0;
-                    const packetsReceived = typeof anyS.packetsReceived === "number" ? anyS.packetsReceived : 0;
-                    lost += packetsLost;
-                    total += packetsLost + packetsReceived;
+                    const packetsReceived = typeof anyS.packetsReceived === "number"
+                        ? anyS.packetsReceived
+                        : (typeof anyS.packetsSent === "number" ? anyS.packetsSent : 0);
+                    if (packetsReceived > 0) {
+                        lost += packetsLost;
+                        total += packetsLost + packetsReceived;
+                    }
                     if ((anyS.kind === "audio" || anyS.mediaType === "audio") && typeof anyS.packetsReceived === "number") {
                         remoteInboundAudioPacketsReceived = anyS.packetsReceived;
                     }
@@ -3862,7 +4007,7 @@ class CallMonitoringStat {
                 remoteInboundAudioPacketsReceived,
                 remoteInboundVideoPacketsReceived,
                 localJitterMs,
-                localLossPct: total > 0 ? (lost / total) * 100 : null
+                localLossPct: total >= minPacketsForLoss ? (lost / total) * 100 : null
             };
         }
         catch (e) {
@@ -3879,6 +4024,7 @@ class CallMonitoringStat {
         }
     }
     async collectSubscriberMetrics(subscribers) {
+        const minPacketsForLoss = APP_CONFIG.connectionStatus.packetLossMinPackets;
         let audioBytesReceived = 0;
         let videoBytesReceived = 0;
         let audioPacketsReceived = 0;
@@ -3917,8 +4063,10 @@ class CallMonitoringStat {
                         }
                         const packetsLost = typeof anyS.packetsLost === "number" ? anyS.packetsLost : 0;
                         const packetsReceived = typeof anyS.packetsReceived === "number" ? anyS.packetsReceived : 0;
-                        lost += packetsLost;
-                        total += packetsLost + packetsReceived;
+                        if (packetsReceived > 0) {
+                            lost += packetsLost;
+                            total += packetsLost + packetsReceived;
+                        }
                     }
                 });
             }
@@ -3933,7 +4081,7 @@ class CallMonitoringStat {
             videoPacketsReceived,
             videoFramesDecoded,
             remoteJitterMs,
-            remoteLossPct: total > 0 ? (lost / total) * 100 : null,
+            remoteLossPct: total >= minPacketsForLoss ? (lost / total) * 100 : null,
             hasAudioTrack,
             hasVideoTrack
         };
@@ -3999,6 +4147,96 @@ class CallMonitoringStat {
         return videoFramesDecodedDelta > 0 ||
             videoRecvDelta >= APP_CONFIG.mediaTelemetry.minRecvVideoBytesPerSample ||
             videoPacketsRecvDelta >= APP_CONFIG.mediaTelemetry.minRecvVideoPacketsPerSample;
+    }
+    updateOutageTracking(args) {
+        const { now, remotePresent, remoteHoldActive, localOutgoingAudioActive, localOutgoingVideoActive, localReceivingAudio, localReceivingVideo, localAudioPlaybackStatus, localVideoPlaybackStatus, remoteAudioReceiveStatus, remoteVideoReceiveStatus, remoteAudioPlaybackStatus, remoteVideoPlaybackStatus } = args;
+        this.syncOutage("local-receive-audio", remotePresent && !remoteHoldActive && localReceivingAudio === "No", "No", now);
+        this.syncOutage("local-receive-video", remotePresent && !remoteHoldActive && localReceivingVideo === "No", "No", now);
+        this.syncOutage("local-playback-audio", remotePresent && !remoteHoldActive && localAudioPlaybackStatus === "Stalled", "Stalled", now);
+        this.syncOutage("local-playback-video", remotePresent && !remoteHoldActive && localVideoPlaybackStatus === "Stalled", "Stalled", now);
+        this.syncOutage("remote-receive-audio", remotePresent && localOutgoingAudioActive && remoteAudioReceiveStatus === "No", "No", now);
+        this.syncOutage("remote-receive-video", remotePresent && localOutgoingVideoActive && remoteVideoReceiveStatus === "No", "No", now);
+        this.syncOutage("remote-playback-audio", remotePresent && localOutgoingAudioActive && remoteAudioPlaybackStatus === "Stalled", "Stalled", now);
+        this.syncOutage("remote-playback-video", remotePresent && localOutgoingVideoActive && remoteVideoPlaybackStatus === "Stalled", "Stalled", now);
+        return this.buildOutageSnapshot(now);
+    }
+    syncOutage(key, shouldBeActive, trigger, now) {
+        if (shouldBeActive) {
+            this.activateOutage(key, trigger, now);
+            return;
+        }
+        this.resolveOutage(key, now);
+    }
+    activateOutage(key, trigger, now) {
+        const existing = this.activeOutages.get(key);
+        if (existing) {
+            existing.trigger = trigger;
+            existing.lastObservedTs = now;
+            existing.durationMs = Math.max(0, now - existing.startTs);
+            return;
+        }
+        const definition = this.outageDefinitions[key];
+        const record = {
+            key,
+            label: definition.label,
+            kind: definition.kind,
+            scope: definition.scope,
+            mode: definition.mode,
+            trigger,
+            startTs: now,
+            endTs: null,
+            durationMs: 0,
+            active: true,
+            lastObservedTs: now
+        };
+        this.activeOutages.set(key, record);
+        console.log("VCX_MEDIA_OUTAGE_START=", this.toOutageLogPayload(record));
+    }
+    resolveOutage(key, now) {
+        const existing = this.activeOutages.get(key);
+        if (!existing)
+            return;
+        const resolved = {
+            ...existing,
+            endTs: now,
+            durationMs: Math.max(0, now - existing.startTs),
+            active: false,
+            lastObservedTs: now
+        };
+        this.activeOutages.delete(key);
+        this.recentOutages = [resolved, ...this.recentOutages].slice(0, this.maxRecentOutages);
+        console.log("VCX_MEDIA_OUTAGE_END=", this.toOutageLogPayload(resolved));
+    }
+    resolveAllActiveOutages(now) {
+        for (const key of Array.from(this.activeOutages.keys())) {
+            this.resolveOutage(key, now);
+        }
+    }
+    buildOutageSnapshot(now) {
+        return {
+            active: Array.from(this.activeOutages.values())
+                .sort((a, b) => a.startTs - b.startTs)
+                .map((record) => ({
+                ...record,
+                durationMs: Math.max(0, now - record.startTs)
+            })),
+            recent: this.recentOutages.map((record) => ({ ...record })),
+            ts: now
+        };
+    }
+    toOutageLogPayload(record) {
+        return {
+            key: record.key,
+            label: record.label,
+            scope: record.scope,
+            kind: record.kind,
+            mode: record.mode,
+            trigger: record.trigger,
+            active: record.active,
+            startAt: new Date(record.startTs).toISOString(),
+            endAt: record.endTs === null ? null : new Date(record.endTs).toISOString(),
+            durationMs: record.durationMs
+        };
     }
 }
 class JanusGateway {
@@ -4296,6 +4534,10 @@ class RemoteFeedManager {
                     }
                     if (parsed?.type === "vcx-peer-network") {
                         this.observer?.onRemoteNetworkTelemetry?.(feedId, parsed);
+                        return;
+                    }
+                    if (parsed?.type === "vcx-peer-message") {
+                        this.observer?.onRemoteCallMessage?.(feedId, parsed);
                         return;
                     }
                     if (parsed?.type === "vcx-peer-hold") {
@@ -4713,8 +4955,15 @@ class CallController {
                     .length;
             },
             getPreferredAudioTrack: () => this.getPreferredAudioTrack(),
+            getPreferredVideoTrack: () => this.getPreferredVideoTrack(),
             isLocalAudioMuted: () => {
                 return !this.localAudioEnabled;
+            },
+            isLocalVideoMuted: () => {
+                return !this.localVideoEnabled;
+            },
+            isRemoteHoldActive: () => {
+                return Array.from(this.peerHoldStateByFeed.values()).some(Boolean);
             },
             getPeerTelemetry: (now) => this.pickFreshPeerTelemetry(now),
             emitPeerTelemetry: (payload) => this.sendPeerTelemetry(payload),
@@ -5250,6 +5499,9 @@ class CallController {
                 onRemoteNetworkTelemetry: (feedId, payload) => {
                     this.peerNetworkTelemetryByFeed.set(feedId, payload);
                     this.bus.emit("peer-network-telemetry", { feedId, payload });
+                },
+                onRemoteCallMessage: (feedId, payload) => {
+                    this.bus.emit("peer-call-message", { feedId, payload });
                 },
                 onRemoteHoldState: (feedId, payload) => {
                     if (feedId === this.selfId)
@@ -6742,6 +6994,21 @@ class CallController {
         }
         return latest;
     }
+    relayCallMessageToPeer(entry) {
+        if (this.userType !== "customer")
+            return;
+        const message = String(entry.message || "").trim();
+        if (!message)
+            return;
+        this.sendPeerTelemetry({
+            type: "vcx-peer-message",
+            ts: entry.ts,
+            severity: entry.severity,
+            message,
+            fromUserType: this.userType,
+            fromParticipantId: this.selfId ?? null
+        });
+    }
     sendPeerTelemetry(payload) {
         if (!APP_CONFIG.mediaTelemetry.enablePeerTelemetry)
             return;
@@ -6754,6 +7021,97 @@ class CallController {
         catch { }
     }
 }
+class FloatingDialogSupport {
+    static attach(shell, card, handle, options) {
+        if (!shell || !card || !handle)
+            return;
+        if (card.__floatingDialogAttached)
+            return;
+        card.__floatingDialogAttached = true;
+        card.dataset.dialogInitialLeft = String(options.initialLeft);
+        card.dataset.dialogInitialTop = String(options.initialTop);
+        card.dataset.dialogMargin = String(options.margin ?? 12);
+        card.dataset.dialogPositioned = "false";
+        FloatingDialogSupport.cards.add(card);
+        FloatingDialogSupport.ensureInitialized();
+        const bringToFront = () => FloatingDialogSupport.bringToFront(shell);
+        card.addEventListener("pointerdown", bringToFront);
+        handle.classList.add("dialog-drag-handle");
+        handle.addEventListener("pointerdown", (ev) => {
+            const target = ev.target;
+            if (target?.closest("button, a, input, select, textarea, label"))
+                return;
+            if (ev.pointerType !== "touch" && ev.button !== 0)
+                return;
+            ev.preventDefault();
+            bringToFront();
+            const rect = card.getBoundingClientRect();
+            const offsetX = ev.clientX - rect.left;
+            const offsetY = ev.clientY - rect.top;
+            const onMove = (moveEv) => {
+                moveEv.preventDefault();
+                FloatingDialogSupport.positionCard(card, moveEv.clientX - offsetX, moveEv.clientY - offsetY);
+            };
+            const onUp = () => {
+                window.removeEventListener("pointermove", onMove);
+                window.removeEventListener("pointerup", onUp);
+            };
+            window.addEventListener("pointermove", onMove);
+            window.addEventListener("pointerup", onUp, { once: true });
+        });
+    }
+    static show(shell, card) {
+        if (!shell || !card)
+            return;
+        shell.classList.add("show");
+        shell.setAttribute("aria-hidden", "false");
+        FloatingDialogSupport.ensurePosition(card);
+        FloatingDialogSupport.bringToFront(shell);
+    }
+    static hide(shell) {
+        if (!shell)
+            return;
+        shell.classList.remove("show");
+        shell.setAttribute("aria-hidden", "true");
+    }
+    static ensureInitialized() {
+        if (FloatingDialogSupport.initialized)
+            return;
+        FloatingDialogSupport.initialized = true;
+        window.addEventListener("resize", () => {
+            FloatingDialogSupport.cards.forEach((card) => {
+                FloatingDialogSupport.ensurePosition(card);
+            });
+        });
+    }
+    static ensurePosition(card) {
+        if (card.dataset.dialogPositioned !== "true") {
+            const left = Number(card.dataset.dialogInitialLeft ?? 24);
+            const top = Number(card.dataset.dialogInitialTop ?? 96);
+            FloatingDialogSupport.positionCard(card, left, top);
+            return;
+        }
+        const left = Number(card.style.left.replace("px", "")) || 0;
+        const top = Number(card.style.top.replace("px", "")) || 0;
+        FloatingDialogSupport.positionCard(card, left, top);
+    }
+    static positionCard(card, left, top) {
+        const margin = Math.max(8, Number(card.dataset.dialogMargin ?? 12));
+        const maxLeft = Math.max(margin, window.innerWidth - card.offsetWidth - margin);
+        const maxTop = Math.max(margin, window.innerHeight - card.offsetHeight - margin);
+        const clampedLeft = Math.min(Math.max(margin, left), maxLeft);
+        const clampedTop = Math.min(Math.max(margin, top), maxTop);
+        card.style.left = `${clampedLeft}px`;
+        card.style.top = `${clampedTop}px`;
+        card.dataset.dialogPositioned = "true";
+    }
+    static bringToFront(shell) {
+        shell.style.zIndex = String(++FloatingDialogSupport.nextZIndex);
+    }
+}
+FloatingDialogSupport.nextZIndex = 80;
+FloatingDialogSupport.cards = new Set();
+FloatingDialogSupport.initialized = false;
 const NETWORK_GRAPH_METRICS = [
     { key: "upload", label: "Upload", unit: "kbps", color: "#2563eb" },
     { key: "download", label: "Download", unit: "kbps", color: "#16a34a" },
@@ -6761,10 +7119,10 @@ const NETWORK_GRAPH_METRICS = [
     { key: "remoteDownload", label: "Remote Download", unit: "kbps", color: "#ea580c" },
     { key: "localRttMs", label: "Local RTT", unit: "ms", color: "#0f766e" },
     { key: "localJitterMs", label: "Local Jitter", unit: "ms", color: "#0891b2" },
-    { key: "localLossPct", label: "Local Loss", unit: "%", color: "#dc2626" },
+    { key: "localLossPct", label: "Local Packet Loss (sampled)", unit: "%", color: "#dc2626" },
     { key: "remoteRttMs", label: "Remote RTT", unit: "ms", color: "#8b5cf6" },
     { key: "remoteJitterMs", label: "Remote Jitter", unit: "ms", color: "#db2777" },
-    { key: "remoteLossPct", label: "Remote Loss", unit: "%", color: "#b91c1c" },
+    { key: "remoteLossPct", label: "Remote Packet Loss (sampled)", unit: "%", color: "#b91c1c" },
     { key: "uplinkSlowLink", label: "Uplink SlowLink", unit: "flag", color: "#f59e0b" },
     { key: "downlinkSlowLink", label: "Downlink SlowLink", unit: "flag", color: "#ef4444" }
 ];
@@ -6897,6 +7255,11 @@ class NetworkPanelController {
             !this.networkPanelClose) {
             return;
         }
+        FloatingDialogSupport.attach(this.networkPanelPopup, this.networkPopupCard, this.networkPopupHead, {
+            initialLeft: Math.max(24, window.innerWidth - 390),
+            initialTop: 110,
+            margin: 12
+        });
         const toggleSideMinimized = () => {
             this.setParticipantNetworkSideMinimized(!this.networkSidePanelMinimized);
         };
@@ -6968,27 +7331,6 @@ class NetworkPanelController {
             ev.preventDefault();
             toggleSideMinimized();
         };
-        this.networkPopupHead.onclick = (ev) => {
-            const target = ev.target;
-            if (target?.closest("#networkPanelClose") ||
-                target?.closest("#networkPopupToggle") ||
-                this.isNetworkHeaderAction(target)) {
-                return;
-            }
-            togglePopupMinimized();
-        };
-        this.networkPopupHead.onkeydown = (ev) => {
-            const target = ev.target;
-            if (target?.closest("#networkPanelClose") ||
-                target?.closest("#networkPopupToggle") ||
-                this.isNetworkHeaderAction(target)) {
-                return;
-            }
-            if (ev.key !== "Enter" && ev.key !== " ")
-                return;
-            ev.preventDefault();
-            togglePopupMinimized();
-        };
         this.networkPopupToggle.onclick = (ev) => {
             ev.stopPropagation();
             togglePopupMinimized();
@@ -6996,10 +7338,6 @@ class NetworkPanelController {
         this.networkPanelClose.onclick = (ev) => {
             ev.stopPropagation();
             this.closeParticipantNetworkPopup();
-        };
-        this.networkPanelPopup.onclick = (ev) => {
-            if (ev.target === this.networkPanelPopup)
-                this.closeParticipantNetworkPopup();
         };
         window.addEventListener("resize", () => {
             if (!this.isParticipantNetworkPopupMode()) {
@@ -7021,8 +7359,6 @@ class NetworkPanelController {
             target?.closest("#networkViewConnectivityPopup"));
     }
     showNetworkSummaryView() {
-        this.closeParticipantNetworkGraphDialog();
-        this.closeConnectivityDialog();
         if (this.isParticipantNetworkPopupMode()) {
             this.openParticipantNetworkPopup();
             this.setParticipantNetworkPopupMinimized(false);
@@ -7032,14 +7368,10 @@ class NetworkPanelController {
         this.setParticipantNetworkSideMinimized(false);
     }
     openParticipantNetworkPopup() {
-        if (!this.networkPanelPopup)
-            return;
-        this.networkPanelPopup.classList.add("show");
+        FloatingDialogSupport.show(this.networkPanelPopup, this.networkPopupCard);
     }
     closeParticipantNetworkPopup() {
-        if (!this.networkPanelPopup)
-            return;
-        this.networkPanelPopup.classList.remove("show");
+        FloatingDialogSupport.hide(this.networkPanelPopup);
     }
     applyParticipantNetworkSideMinimizedState() {
         if (!this.networkSidePanel || !this.networkSideToggle || !this.networkSideHead)
@@ -7075,7 +7407,7 @@ class NetworkPanelController {
             this.networkPopupBody.innerHTML = '<div class="network-empty">Pending stats...</div>';
     }
     isParticipantNetworkPopupMode() {
-        return window.innerWidth <= APP_CONFIG.networkQuality.participantPanel.popupBreakpointPx;
+        return true;
     }
     renderParticipantNetwork(snapshot) {
         this.lastParticipantNetworkSnapshot = snapshot;
@@ -7157,6 +7489,11 @@ class NetworkPanelController {
             !this.networkGraphClear) {
             return;
         }
+        FloatingDialogSupport.attach(this.networkGraphDialog, this.networkGraphCard, this.networkGraphCard.querySelector(".network-graph-head"), {
+            initialLeft: 140,
+            initialTop: 90,
+            margin: 12
+        });
         this.renderNetworkGraphMetricControls();
         this.syncNetworkGraphParticipantOptions();
         this.networkGraphParticipant.onchange = () => {
@@ -7174,11 +7511,6 @@ class NetworkPanelController {
             this.renderParticipantNetworkGraph();
         };
         this.networkGraphClose.onclick = () => this.closeParticipantNetworkGraphDialog();
-        this.networkGraphDialog.onclick = (ev) => {
-            if (ev.target === this.networkGraphDialog) {
-                this.closeParticipantNetworkGraphDialog();
-            }
-        };
         window.addEventListener("keydown", (ev) => {
             if (ev.key === "Escape" && this.networkGraphVisible) {
                 this.closeParticipantNetworkGraphDialog();
@@ -7188,12 +7520,8 @@ class NetworkPanelController {
     openParticipantNetworkGraphDialog() {
         if (!this.networkGraphDialog)
             return;
-        this.closeConnectivityDialog();
-        this.setParticipantNetworkSideMinimized(true);
-        this.setParticipantNetworkPopupMinimized(true);
         this.networkGraphVisible = true;
-        this.networkGraphDialog.classList.add("show");
-        this.networkGraphDialog.setAttribute("aria-hidden", "false");
+        FloatingDialogSupport.show(this.networkGraphDialog, this.networkGraphCard);
         this.syncNetworkGraphParticipantOptions();
         this.renderParticipantNetworkGraph();
     }
@@ -7201,8 +7529,7 @@ class NetworkPanelController {
         if (!this.networkGraphDialog)
             return;
         this.networkGraphVisible = false;
-        this.networkGraphDialog.classList.remove("show");
-        this.networkGraphDialog.setAttribute("aria-hidden", "true");
+        FloatingDialogSupport.hide(this.networkGraphDialog);
     }
     syncNetworkGraphParticipantOptions() {
         if (!this.networkGraphParticipant)
@@ -7518,12 +7845,12 @@ class NetworkPanelController {
             !this.connectivitySecondary) {
             return;
         }
+        FloatingDialogSupport.attach(this.connectivityDialog, this.connectivityCard, this.connectivityCard.querySelector(".network-graph-head"), {
+            initialLeft: 250,
+            initialTop: 126,
+            margin: 12
+        });
         this.connectivityClose.onclick = () => this.closeConnectivityDialog();
-        this.connectivityDialog.onclick = (ev) => {
-            if (ev.target === this.connectivityDialog) {
-                this.closeConnectivityDialog();
-            }
-        };
         window.addEventListener("keydown", (ev) => {
             if (ev.key === "Escape" && this.connectivityVisible) {
                 this.closeConnectivityDialog();
@@ -7533,20 +7860,24 @@ class NetworkPanelController {
     openConnectivityDialog() {
         if (!this.connectivityDialog)
             return;
-        this.closeParticipantNetworkGraphDialog();
-        this.setParticipantNetworkSideMinimized(true);
-        this.setParticipantNetworkPopupMinimized(true);
         this.connectivityVisible = true;
-        this.connectivityDialog.classList.add("show");
-        this.connectivityDialog.setAttribute("aria-hidden", "false");
+        FloatingDialogSupport.show(this.connectivityDialog, this.connectivityCard);
         this.renderConnectivityDialog();
     }
     closeConnectivityDialog() {
         if (!this.connectivityDialog)
             return;
         this.connectivityVisible = false;
-        this.connectivityDialog.classList.remove("show");
-        this.connectivityDialog.setAttribute("aria-hidden", "true");
+        FloatingDialogSupport.hide(this.connectivityDialog);
+    }
+    openNetworkSummaryDialog() {
+        this.showNetworkSummaryView();
+    }
+    openNetworkGraphDialog() {
+        this.openParticipantNetworkGraphDialog();
+    }
+    openConnectivityInfoDialog() {
+        this.openConnectivityDialog();
     }
     renderConnectivityDialog() {
         if (!this.connectivityUpdated ||
@@ -7655,10 +7986,10 @@ class NetworkPanelController {
         const q = row.quality;
         const localRtt = this.renderParticipantQualityMetric("Local RTT", q.localRttMs, "ms", this.classifyRttTier(q.localRttMs));
         const localJitter = this.renderParticipantQualityMetric("Local Jitter", q.localJitterMs, "ms", this.classifyJitterTier(q.localJitterMs));
-        const localLoss = this.renderParticipantQualityMetric("Local Loss", q.localLossPct, "%", this.classifyLossTier(q.localLossPct));
+        const localLoss = this.renderParticipantQualityMetric("Local Packet Loss (sampled)", q.localLossPct, "%", this.classifyLossTier(q.localLossPct));
         const remoteRtt = this.renderParticipantQualityMetric("Remote RTT", q.remoteRttMs, "ms", this.classifyRttTier(q.remoteRttMs));
         const remoteJitter = this.renderParticipantQualityMetric("Remote Jitter", q.remoteJitterMs, "ms", this.classifyJitterTier(q.remoteJitterMs));
-        const remoteLoss = this.renderParticipantQualityMetric("Remote Loss", q.remoteLossPct, "%", this.classifyLossTier(q.remoteLossPct));
+        const remoteLoss = this.renderParticipantQualityMetric("Remote Packet Loss (sampled)", q.remoteLossPct, "%", this.classifyLossTier(q.remoteLossPct));
         return (`<div class="network-row-grid network-row-grid-quality">` +
             localRtt + localJitter + localLoss + remoteRtt + remoteJitter + remoteLoss +
             `</div>`);
@@ -7761,6 +8092,11 @@ class UIController {
         this.btnScreen = document.getElementById("btnScreen");
         this.btnVB = document.getElementById("btnVB");
         this.btnScreenshot = document.getElementById("btnScreenshot");
+        this.linkOpenNetwork = document.getElementById("linkOpenNetwork");
+        this.linkOpenNetworkGraph = document.getElementById("linkOpenNetworkGraph");
+        this.linkOpenConnectivity = document.getElementById("linkOpenConnectivity");
+        this.linkOpenHealthStats = document.getElementById("linkOpenHealthStats");
+        this.linkOpenMessages = document.getElementById("linkOpenMessages");
         // ✅ NEW
         this.btnRecord = document.getElementById("btnRecord");
         this.lastCfg = null;
@@ -7802,7 +8138,15 @@ class UIController {
         this.diagAudioRecv = document.getElementById("diagAudioRecv");
         this.diagVideoSent = document.getElementById("diagVideoSent");
         this.diagVideoRecv = document.getElementById("diagVideoRecv");
+        this.mediaOutageActive = document.getElementById("mediaOutageActive");
+        this.mediaOutageRecent = document.getElementById("mediaOutageRecent");
         this.mediaIoIssues = document.getElementById("mediaIoIssues");
+        this.messagesDialog = document.getElementById("messagesDialog");
+        this.messagesCard = document.getElementById("messagesCard");
+        this.messagesHead = document.getElementById("messagesHead");
+        this.messagesClose = document.getElementById("messagesClose");
+        this.messagesTableWrap = document.getElementById("messagesTableWrap");
+        this.messagesTableBody = document.getElementById("messagesTableBody");
         this.mRemoteRecvVideo = document.getElementById("mRemoteRecvVideo");
         this.mRemoteRecvAudio = document.getElementById("mRemoteRecvAudio");
         this.mRemoteAudioPlayback = document.getElementById("mRemoteAudioPlayback");
@@ -7839,6 +8183,12 @@ class UIController {
         this.connectionStatus = null;
         this.remoteVideoMonitorTimer = null;
         this.diagPanelMinimized = false;
+        this.healthStatsVisible = false;
+        this.messagesDialogVisible = false;
+        this.callMessages = [];
+        this.messageLogActive = false;
+        this.maxCallMessages = 400;
+        this.removeLoggerMessageListener = null;
         const qn = this.getQueryParam("name");
         if (qn)
             Logger.setUserName(qn);
@@ -7857,6 +8207,8 @@ class UIController {
         this.updateSwapCameraButton();
         this.applyHoldControlState();
         this.renderAudioInputInfo();
+        this.bindLoggerMessageCapture();
+        this.renderMessagesDialog();
         this.bus.on("joined", j => {
             this.joined = j;
             this.setJoinedState(j);
@@ -7976,13 +8328,38 @@ class UIController {
                 this.renderConnectionStatus(this.connectionStatus);
             }
         });
+        this.bus.on("peer-call-message", (evt) => {
+            if (this.userType !== "agent")
+                return;
+            const payload = evt?.payload;
+            const message = String(payload?.message || "").trim();
+            if (!message)
+                return;
+            const severity = payload?.severity === "error"
+                ? "error"
+                : payload?.severity === "warn"
+                    ? "warn"
+                    : "info";
+            const ts = typeof payload?.ts === "number" && Number.isFinite(payload.ts)
+                ? payload.ts
+                : Date.now();
+            this.appendCallMessage({
+                message,
+                severity,
+                ts,
+                source: "remote",
+                sourceLabel: this.resolvePeerMessageSourceLabel(payload)
+            });
+        });
         this.bus.on("call-ended", (payload) => {
             Logger.user(`Call ended event received: ${payload?.reason || "unknown"}`);
             this.setEndedState(true);
         });
         this.wire();
+        this.setupToolLinks();
         this.setupNetworkUI();
         this.setupDiagnosticsPanel();
+        this.setupMessagesDialog();
         this.setupParentBridge();
         this.setupScreenshotDialog();
         this.setupRemoteFallbackMonitor();
@@ -8373,6 +8750,7 @@ class UIController {
         this.btnLeave.title = "End";
     }
     async autoJoin() {
+        this.startMessageLogSession();
         let req;
         try {
             req = UrlConfig.buildJoinConfig();
@@ -8776,10 +9154,10 @@ class UIController {
             return `${(bytes / 1024).toFixed(1)}KB`;
         return `${(bytes / (1024 * 1024)).toFixed(2)}MB`;
     }
-    formatQuality(v) {
+    formatQuality(v, unit) {
         if (v === null || !Number.isFinite(v))
             return "n/a";
-        return `${v.toFixed(1)}`;
+        return `${v.toFixed(1)}${unit}`;
     }
     formatFlowBytes(current, previous, minDeltaBytes, forceStopped = false) {
         const delta = previous === null ? 0 : Math.max(0, current - previous);
@@ -8912,10 +9290,11 @@ class UIController {
         this.renderStatusBadge(this.mLocalRecvAudio, stats.matrix.localReceivingYourAudio);
         this.renderStatusBadge(this.mLocalAudioPlayback, stats.matrix.localAudioPlaybackStatus);
         this.renderStatusBadge(this.mLocalVideoPlayback, stats.matrix.localVideoPlaybackStatus);
+        this.renderMediaOutages(stats.outages);
         this.localQD.textContent =
-            `jitter=${this.formatQuality(stats.quality.localJitterMs)}ms loss=${this.formatQuality(stats.quality.localLossPct)}%`;
+            `jitter=${this.formatQuality(stats.quality.localJitterMs, "ms")} packet-loss(sampled)=${this.formatQuality(stats.quality.localLossPct, "%")}`;
         this.remoteQD.textContent =
-            `jitter=${this.formatQuality(stats.quality.remoteJitterMs)}ms loss=${this.formatQuality(stats.quality.remoteLossPct)}%`;
+            `jitter=${this.formatQuality(stats.quality.remoteJitterMs, "ms")} packet-loss(sampled)=${this.formatQuality(stats.quality.remoteLossPct, "%")}`;
         this.prevMediaBytes = { ...stats.bytes };
     }
     renderFlowValue(el, flow) {
@@ -8925,16 +9304,270 @@ class UIController {
         el.style.color = flow.color;
         el.style.fontWeight = "700";
     }
+    setupToolLinks() {
+        if (this.linkOpenNetwork) {
+            this.linkOpenNetwork.onclick = () => this.networkPanelController.openNetworkSummaryDialog();
+        }
+        if (this.linkOpenNetworkGraph) {
+            this.linkOpenNetworkGraph.onclick = () => this.networkPanelController.openNetworkGraphDialog();
+        }
+        if (this.linkOpenConnectivity) {
+            this.linkOpenConnectivity.onclick = () => this.networkPanelController.openConnectivityInfoDialog();
+        }
+        if (this.linkOpenHealthStats) {
+            this.linkOpenHealthStats.onclick = () => this.openHealthStatsDialog();
+        }
+        if (this.linkOpenMessages) {
+            this.linkOpenMessages.onclick = () => this.openMessagesDialog();
+        }
+    }
+    bindLoggerMessageCapture() {
+        if (this.removeLoggerMessageListener)
+            return;
+        this.removeLoggerMessageListener = Logger.onMessage((entry) => {
+            this.appendCallMessage({
+                ...entry,
+                source: entry.source ?? "local",
+                sourceLabel: entry.sourceLabel ?? null
+            });
+        });
+    }
+    startMessageLogSession() {
+        this.messageLogActive = true;
+        this.callMessages = [];
+        this.renderMessagesDialog();
+    }
+    appendCallMessage(entry) {
+        if (!this.messageLogActive)
+            return;
+        const message = String(entry.message || "").trim();
+        if (!message)
+            return;
+        const source = entry.source ?? "local";
+        const sourceLabel = source === "remote"
+            ? String(entry.sourceLabel || "Remote").trim()
+            : null;
+        this.callMessages.push({
+            message,
+            severity: entry.severity,
+            ts: entry.ts,
+            source,
+            sourceLabel
+        });
+        if (this.callMessages.length > this.maxCallMessages) {
+            this.callMessages.splice(0, this.callMessages.length - this.maxCallMessages);
+        }
+        if (source === "local") {
+            this.relayLocalCallMessage({
+                message,
+                severity: entry.severity,
+                ts: entry.ts,
+                source,
+                sourceLabel
+            });
+        }
+        this.renderMessagesDialog();
+    }
+    relayLocalCallMessage(entry) {
+        if (this.userType !== "customer")
+            return;
+        this.controller.relayCallMessageToPeer(entry);
+    }
+    setupMessagesDialog() {
+        if (!this.messagesDialog || !this.messagesCard || !this.messagesHead || !this.messagesClose) {
+            return;
+        }
+        FloatingDialogSupport.attach(this.messagesDialog, this.messagesCard, this.messagesHead, {
+            initialLeft: 320,
+            initialTop: 84,
+            margin: 12
+        });
+        this.messagesClose.onclick = () => this.closeMessagesDialog();
+        window.addEventListener("keydown", (ev) => {
+            if (ev.key === "Escape" && this.messagesDialogVisible) {
+                this.closeMessagesDialog();
+            }
+        });
+    }
+    openHealthStatsDialog() {
+        if (!this.diagPanel)
+            return;
+        this.healthStatsVisible = true;
+        FloatingDialogSupport.show(this.diagPanel, this.diagPanel);
+    }
+    closeHealthStatsDialog() {
+        if (!this.diagPanel)
+            return;
+        this.healthStatsVisible = false;
+        FloatingDialogSupport.hide(this.diagPanel);
+    }
+    openMessagesDialog() {
+        if (!this.messagesDialog || !this.messagesCard)
+            return;
+        this.messagesDialogVisible = true;
+        FloatingDialogSupport.show(this.messagesDialog, this.messagesCard);
+        this.renderMessagesDialog();
+    }
+    closeMessagesDialog() {
+        if (!this.messagesDialog)
+            return;
+        this.messagesDialogVisible = false;
+        FloatingDialogSupport.hide(this.messagesDialog);
+    }
+    renderMessagesDialog() {
+        if (!this.messagesTableBody)
+            return;
+        const shouldStickToBottom = this.shouldStickMessagesToBottom();
+        if (this.callMessages.length === 0) {
+            this.messagesTableBody.innerHTML = '<tr><td class="messages-empty" colspan="3">No call messages yet.</td></tr>';
+            return;
+        }
+        this.messagesTableBody.innerHTML = this.callMessages
+            .map((entry) => {
+            const rowClass = this.getMessageSeverityClass(entry.severity);
+            const message = this.escapeHtml(this.formatCallMessageDisplay(entry)).replace(/\n/g, "<br />");
+            const actor = this.escapeHtml(this.formatCallMessageActor(entry));
+            const ts = this.formatCallMessageTimestamp(entry.ts);
+            return (`<tr class="${rowClass}">` +
+                `<td>${message}</td>` +
+                `<td>${actor}</td>` +
+                `<td>${ts}</td>` +
+                `</tr>`);
+        })
+            .join("");
+        if (shouldStickToBottom && this.messagesTableWrap) {
+            window.requestAnimationFrame(() => {
+                if (!this.messagesTableWrap)
+                    return;
+                this.messagesTableWrap.scrollTop = this.messagesTableWrap.scrollHeight;
+            });
+        }
+    }
+    getMessageSeverityClass(severity) {
+        if (severity === "error")
+            return "messages-row-error";
+        if (severity === "warn")
+            return "messages-row-warn";
+        return "messages-row-info";
+    }
+    formatCallMessageDisplay(entry) {
+        return entry.message;
+    }
+    formatCallMessageActor(entry) {
+        const source = entry.source ?? "local";
+        if (source === "remote") {
+            const label = String(entry.sourceLabel || "Remote").trim();
+            return label || "Remote";
+        }
+        return this.userType === "agent" ? "Agent" : "Customer";
+    }
+    resolvePeerMessageSourceLabel(payload) {
+        if (payload?.fromUserType === "customer")
+            return "Customer";
+        if (payload?.fromUserType === "agent")
+            return "Agent";
+        return "Remote";
+    }
+    shouldStickMessagesToBottom() {
+        if (!this.messagesTableWrap)
+            return false;
+        const distanceFromBottom = this.messagesTableWrap.scrollHeight -
+            this.messagesTableWrap.scrollTop -
+            this.messagesTableWrap.clientHeight;
+        return distanceFromBottom <= 24;
+    }
+    formatCallMessageTimestamp(ts) {
+        const d = new Date(ts);
+        return `${d.getFullYear()}:${this.padNumber(d.getMonth() + 1)}:${this.padNumber(d.getDate())} ` +
+            `${this.padNumber(d.getHours())}:${this.padNumber(d.getMinutes())}:${this.padNumber(d.getSeconds())}.` +
+            this.padNumber(d.getMilliseconds(), 3);
+    }
+    renderMediaOutages(outages) {
+        this.renderMediaOutageList(this.mediaOutageActive, outages.active, true, 4);
+        this.renderMediaOutageList(this.mediaOutageRecent, outages.recent, false, 6);
+    }
+    renderMediaOutageList(container, records, active, limit) {
+        if (!container)
+            return;
+        const fragment = document.createDocumentFragment();
+        const visible = records.slice(0, limit);
+        if (visible.length === 0) {
+            const empty = document.createElement("div");
+            empty.className = "diag-outage-empty";
+            empty.textContent = active ? "No active outages." : "No recent outages.";
+            fragment.appendChild(empty);
+            container.replaceChildren(fragment);
+            return;
+        }
+        visible.forEach((record) => {
+            const item = document.createElement("div");
+            item.className = `diag-outage-item ${active ? "active" : "recent"}`;
+            const title = document.createElement("div");
+            title.className = "diag-outage-title";
+            title.textContent = record.label;
+            item.appendChild(title);
+            const start = document.createElement("div");
+            start.className = "diag-outage-meta";
+            start.textContent = `Start: ${this.formatOutageDateTime(record.startTs)}`;
+            item.appendChild(start);
+            const end = document.createElement("div");
+            end.className = "diag-outage-meta";
+            end.textContent = `End: ${record.endTs === null ? "In progress" : this.formatOutageDateTime(record.endTs)}`;
+            item.appendChild(end);
+            const duration = document.createElement("div");
+            duration.className = "diag-outage-meta";
+            duration.textContent = `Duration: ${this.formatOutageDuration(record.durationMs)} | Signal: ${record.trigger}`;
+            item.appendChild(duration);
+            fragment.appendChild(item);
+        });
+        container.replaceChildren(fragment);
+    }
+    formatOutageDateTime(ts) {
+        const d = new Date(ts);
+        return `${d.getFullYear()}-${this.padNumber(d.getMonth() + 1)}-${this.padNumber(d.getDate())} ` +
+            `${this.padNumber(d.getHours())}:${this.padNumber(d.getMinutes())}:${this.padNumber(d.getSeconds())}.` +
+            this.padNumber(d.getMilliseconds(), 3);
+    }
+    formatOutageDuration(ms) {
+        if (!Number.isFinite(ms) || ms <= 0)
+            return "0s";
+        if (ms < 1000)
+            return `${Math.round(ms)}ms`;
+        const totalSeconds = ms / 1000;
+        if (totalSeconds < 60)
+            return `${totalSeconds.toFixed(1)}s`;
+        const totalWholeSeconds = Math.floor(totalSeconds);
+        const hours = Math.floor(totalWholeSeconds / 3600);
+        const minutes = Math.floor((totalWholeSeconds % 3600) / 60);
+        const seconds = totalWholeSeconds % 60;
+        if (hours > 0) {
+            return `${hours}h ${this.padNumber(minutes)}m ${this.padNumber(seconds)}s`;
+        }
+        return `${minutes}m ${this.padNumber(seconds)}s`;
+    }
+    padNumber(value, width = 2) {
+        return String(Math.max(0, Math.trunc(value))).padStart(width, "0");
+    }
+    escapeHtml(text) {
+        return String(text)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+    }
     setupDiagnosticsPanel() {
         if (!this.diagPanel ||
             !this.diagPanelHead ||
             !this.diagPanelToggle ||
-            !this.diagPanelBtn ||
             !this.diagPanelClose) {
             return;
         }
-        const isMobile = () => window.innerWidth <= 900;
-        const closeMobile = () => this.diagPanel.classList.remove("show-mobile");
+        FloatingDialogSupport.attach(this.diagPanel, this.diagPanel, this.diagPanelHead, {
+            initialLeft: 24,
+            initialTop: 96,
+            margin: 12
+        });
         const applyMinimizedState = () => {
             this.diagPanel.classList.toggle("minimized", this.diagPanelMinimized);
             this.diagPanelToggle.textContent = this.diagPanelMinimized ? "+" : "-";
@@ -8944,33 +9577,14 @@ class UIController {
             this.diagPanelMinimized = !this.diagPanelMinimized;
             applyMinimizedState();
         };
-        this.diagPanelHead.onclick = (ev) => {
-            const target = ev.target;
-            if (target?.closest("#diagPanelClose"))
-                return;
+        this.diagPanelToggle.onclick = (ev) => {
+            ev.stopPropagation();
             toggleMinimized();
-        };
-        this.diagPanelHead.onkeydown = (ev) => {
-            if (ev.key !== "Enter" && ev.key !== " ")
-                return;
-            ev.preventDefault();
-            toggleMinimized();
-        };
-        this.diagPanelBtn.onclick = () => {
-            if (!isMobile()) {
-                toggleMinimized();
-                return;
-            }
-            this.diagPanel.classList.toggle("show-mobile");
         };
         this.diagPanelClose.onclick = (ev) => {
             ev.stopPropagation();
-            closeMobile();
+            this.closeHealthStatsDialog();
         };
-        window.addEventListener("resize", () => {
-            if (!isMobile())
-                closeMobile();
-        });
         applyMinimizedState();
     }
     setupNetworkUI() {
@@ -9009,6 +9623,7 @@ class UIController {
             switch (cmd.type) {
                 case "START_CALL":
                     if (this.lastCfg) {
+                        this.startMessageLogSession();
                         this.controller.join(this.lastCfg);
                     }
                     else {

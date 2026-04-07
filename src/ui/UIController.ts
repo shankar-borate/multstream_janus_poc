@@ -25,6 +25,11 @@ class UIController {
   private btnScreen = document.getElementById("btnScreen") as HTMLButtonElement;
   private btnVB = document.getElementById("btnVB") as HTMLButtonElement;
   private btnScreenshot = document.getElementById("btnScreenshot") as HTMLButtonElement;
+  private linkOpenNetwork = document.getElementById("linkOpenNetwork") as HTMLButtonElement;
+  private linkOpenNetworkGraph = document.getElementById("linkOpenNetworkGraph") as HTMLButtonElement;
+  private linkOpenConnectivity = document.getElementById("linkOpenConnectivity") as HTMLButtonElement;
+  private linkOpenHealthStats = document.getElementById("linkOpenHealthStats") as HTMLButtonElement;
+  private linkOpenMessages = document.getElementById("linkOpenMessages") as HTMLButtonElement;
 
   // ✅ NEW
   private btnRecord = document.getElementById("btnRecord") as HTMLButtonElement;
@@ -71,7 +76,15 @@ class UIController {
   private diagAudioRecv = document.getElementById("diagAudioRecv") as HTMLSpanElement;
   private diagVideoSent = document.getElementById("diagVideoSent") as HTMLSpanElement;
   private diagVideoRecv = document.getElementById("diagVideoRecv") as HTMLSpanElement;
+  private mediaOutageActive = document.getElementById("mediaOutageActive") as HTMLDivElement;
+  private mediaOutageRecent = document.getElementById("mediaOutageRecent") as HTMLDivElement;
   private mediaIoIssues = document.getElementById("mediaIoIssues") as HTMLDivElement;
+  private messagesDialog = document.getElementById("messagesDialog") as HTMLDivElement;
+  private messagesCard = document.getElementById("messagesCard") as HTMLDivElement;
+  private messagesHead = document.getElementById("messagesHead") as HTMLDivElement;
+  private messagesClose = document.getElementById("messagesClose") as HTMLButtonElement;
+  private messagesTableWrap = document.getElementById("messagesTableWrap") as HTMLDivElement;
+  private messagesTableBody = document.getElementById("messagesTableBody") as HTMLTableSectionElement;
   private mRemoteRecvVideo = document.getElementById("mRemoteRecvVideo") as HTMLDivElement;
   private mRemoteRecvAudio = document.getElementById("mRemoteRecvAudio") as HTMLDivElement;
   private mRemoteAudioPlayback = document.getElementById("mRemoteAudioPlayback") as HTMLDivElement;
@@ -116,6 +129,12 @@ class UIController {
   private connectionStatus: ConnectionStatusView | null = null;
   private remoteVideoMonitorTimer: number | null = null;
   private diagPanelMinimized = false;
+  private healthStatsVisible = false;
+  private messagesDialogVisible = false;
+  private callMessages: CallMessageEntry[] = [];
+  private messageLogActive = false;
+  private readonly maxCallMessages = 400;
+  private removeLoggerMessageListener: (() => void) | null = null;
 
   constructor() {
     const qn = this.getQueryParam("name");
@@ -142,6 +161,8 @@ class UIController {
     this.updateSwapCameraButton();
     this.applyHoldControlState();
     this.renderAudioInputInfo();
+    this.bindLoggerMessageCapture();
+    this.renderMessagesDialog();
 
     this.bus.on<boolean>("joined", j=>{
         this.joined = j;
@@ -266,14 +287,39 @@ class UIController {
         this.renderConnectionStatus(this.connectionStatus);
       }
     });
+    this.bus.on<{ feedId: number; payload: PeerCallMessage }>("peer-call-message", (evt) => {
+      if (this.userType !== "agent") return;
+      const payload = evt?.payload;
+      const message = String(payload?.message || "").trim();
+      if (!message) return;
+      const severity: CallMessageSeverity =
+        payload?.severity === "error"
+          ? "error"
+          : payload?.severity === "warn"
+            ? "warn"
+            : "info";
+      const ts =
+        typeof payload?.ts === "number" && Number.isFinite(payload.ts)
+          ? payload.ts
+          : Date.now();
+      this.appendCallMessage({
+        message,
+        severity,
+        ts,
+        source: "remote",
+        sourceLabel: this.resolvePeerMessageSourceLabel(payload)
+      });
+    });
     this.bus.on<any>("call-ended", (payload) => {
       Logger.user(`Call ended event received: ${payload?.reason || "unknown"}`);
       this.setEndedState(true);
     });
 
     this.wire();
+    this.setupToolLinks();
     this.setupNetworkUI();
     this.setupDiagnosticsPanel();
+    this.setupMessagesDialog();
     this.setupParentBridge();
     this.setupScreenshotDialog();
     this.setupRemoteFallbackMonitor();
@@ -680,6 +726,7 @@ class UIController {
   }
 
   private async autoJoin() {
+    this.startMessageLogSession();
     let req: JoinBootstrapConfig;
     try {
       req = UrlConfig.buildJoinConfig();
@@ -1235,9 +1282,9 @@ class UIController {
     return `${(bytes / (1024 * 1024)).toFixed(2)}MB`;
   }
 
-  private formatQuality(v: number | null): string {
+  private formatQuality(v: number | null, unit: "ms" | "%"): string {
     if (v === null || !Number.isFinite(v)) return "n/a";
-    return `${v.toFixed(1)}`;
+    return `${v.toFixed(1)}${unit}`;
   }
 
   private formatFlowBytes(
@@ -1400,11 +1447,12 @@ class UIController {
     this.renderStatusBadge(this.mLocalRecvAudio, stats.matrix.localReceivingYourAudio);
     this.renderStatusBadge(this.mLocalAudioPlayback, stats.matrix.localAudioPlaybackStatus);
     this.renderStatusBadge(this.mLocalVideoPlayback, stats.matrix.localVideoPlaybackStatus);
+    this.renderMediaOutages(stats.outages);
 
     this.localQD.textContent =
-      `jitter=${this.formatQuality(stats.quality.localJitterMs)}ms loss=${this.formatQuality(stats.quality.localLossPct)}%`;
+      `jitter=${this.formatQuality(stats.quality.localJitterMs, "ms")} packet-loss(sampled)=${this.formatQuality(stats.quality.localLossPct, "%")}`;
     this.remoteQD.textContent =
-      `jitter=${this.formatQuality(stats.quality.remoteJitterMs)}ms loss=${this.formatQuality(stats.quality.remoteLossPct)}%`;
+      `jitter=${this.formatQuality(stats.quality.remoteJitterMs, "ms")} packet-loss(sampled)=${this.formatQuality(stats.quality.remoteLossPct, "%")}`;
     this.prevMediaBytes = { ...stats.bytes };
   }
 
@@ -1415,18 +1463,310 @@ class UIController {
     el.style.fontWeight = "700";
   }
 
+  private setupToolLinks() {
+    if (this.linkOpenNetwork) {
+      this.linkOpenNetwork.onclick = () => this.networkPanelController.openNetworkSummaryDialog();
+    }
+    if (this.linkOpenNetworkGraph) {
+      this.linkOpenNetworkGraph.onclick = () => this.networkPanelController.openNetworkGraphDialog();
+    }
+    if (this.linkOpenConnectivity) {
+      this.linkOpenConnectivity.onclick = () => this.networkPanelController.openConnectivityInfoDialog();
+    }
+    if (this.linkOpenHealthStats) {
+      this.linkOpenHealthStats.onclick = () => this.openHealthStatsDialog();
+    }
+    if (this.linkOpenMessages) {
+      this.linkOpenMessages.onclick = () => this.openMessagesDialog();
+    }
+  }
+
+  private bindLoggerMessageCapture() {
+    if (this.removeLoggerMessageListener) return;
+    this.removeLoggerMessageListener = Logger.onMessage((entry: CallMessageEntry) => {
+      this.appendCallMessage({
+        ...entry,
+        source: entry.source ?? "local",
+        sourceLabel: entry.sourceLabel ?? null
+      });
+    });
+  }
+
+  private startMessageLogSession() {
+    this.messageLogActive = true;
+    this.callMessages = [];
+    this.renderMessagesDialog();
+  }
+
+  private appendCallMessage(entry: CallMessageEntry) {
+    if (!this.messageLogActive) return;
+    const message = String(entry.message || "").trim();
+    if (!message) return;
+    const source = entry.source ?? "local";
+    const sourceLabel = source === "remote"
+      ? String(entry.sourceLabel || "Remote").trim()
+      : null;
+
+    this.callMessages.push({
+      message,
+      severity: entry.severity,
+      ts: entry.ts,
+      source,
+      sourceLabel
+    });
+    if (this.callMessages.length > this.maxCallMessages) {
+      this.callMessages.splice(0, this.callMessages.length - this.maxCallMessages);
+    }
+    if (source === "local") {
+      this.relayLocalCallMessage({
+        message,
+        severity: entry.severity,
+        ts: entry.ts,
+        source,
+        sourceLabel
+      });
+    }
+    this.renderMessagesDialog();
+  }
+
+  private relayLocalCallMessage(entry: CallMessageEntry) {
+    if (this.userType !== "customer") return;
+    this.controller.relayCallMessageToPeer(entry);
+  }
+
+  private setupMessagesDialog() {
+    if (!this.messagesDialog || !this.messagesCard || !this.messagesHead || !this.messagesClose) {
+      return;
+    }
+
+    FloatingDialogSupport.attach(
+      this.messagesDialog,
+      this.messagesCard,
+      this.messagesHead,
+      {
+        initialLeft: 320,
+        initialTop: 84,
+        margin: 12
+      }
+    );
+
+    this.messagesClose.onclick = () => this.closeMessagesDialog();
+    window.addEventListener("keydown", (ev: KeyboardEvent) => {
+      if (ev.key === "Escape" && this.messagesDialogVisible) {
+        this.closeMessagesDialog();
+      }
+    });
+  }
+
+  private openHealthStatsDialog() {
+    if (!this.diagPanel) return;
+    this.healthStatsVisible = true;
+    FloatingDialogSupport.show(this.diagPanel, this.diagPanel);
+  }
+
+  private closeHealthStatsDialog() {
+    if (!this.diagPanel) return;
+    this.healthStatsVisible = false;
+    FloatingDialogSupport.hide(this.diagPanel);
+  }
+
+  private openMessagesDialog() {
+    if (!this.messagesDialog || !this.messagesCard) return;
+    this.messagesDialogVisible = true;
+    FloatingDialogSupport.show(this.messagesDialog, this.messagesCard);
+    this.renderMessagesDialog();
+  }
+
+  private closeMessagesDialog() {
+    if (!this.messagesDialog) return;
+    this.messagesDialogVisible = false;
+    FloatingDialogSupport.hide(this.messagesDialog);
+  }
+
+  private renderMessagesDialog() {
+    if (!this.messagesTableBody) return;
+    const shouldStickToBottom = this.shouldStickMessagesToBottom();
+    if (this.callMessages.length === 0) {
+      this.messagesTableBody.innerHTML = '<tr><td class="messages-empty" colspan="3">No call messages yet.</td></tr>';
+      return;
+    }
+
+    this.messagesTableBody.innerHTML = this.callMessages
+      .map((entry: CallMessageEntry) => {
+        const rowClass = this.getMessageSeverityClass(entry.severity);
+        const message = this.escapeHtml(this.formatCallMessageDisplay(entry)).replace(/\n/g, "<br />");
+        const actor = this.escapeHtml(this.formatCallMessageActor(entry));
+        const ts = this.formatCallMessageTimestamp(entry.ts);
+        return (
+          `<tr class="${rowClass}">` +
+          `<td>${message}</td>` +
+          `<td>${actor}</td>` +
+          `<td>${ts}</td>` +
+          `</tr>`
+        );
+      })
+      .join("");
+    if (shouldStickToBottom && this.messagesTableWrap) {
+      window.requestAnimationFrame(() => {
+        if (!this.messagesTableWrap) return;
+        this.messagesTableWrap.scrollTop = this.messagesTableWrap.scrollHeight;
+      });
+    }
+  }
+
+  private getMessageSeverityClass(severity: CallMessageSeverity): string {
+    if (severity === "error") return "messages-row-error";
+    if (severity === "warn") return "messages-row-warn";
+    return "messages-row-info";
+  }
+
+  private formatCallMessageDisplay(entry: CallMessageEntry): string {
+    return entry.message;
+  }
+
+  private formatCallMessageActor(entry: CallMessageEntry): string {
+    const source = entry.source ?? "local";
+    if (source === "remote") {
+      const label = String(entry.sourceLabel || "Remote").trim();
+      return label || "Remote";
+    }
+    return this.userType === "agent" ? "Agent" : "Customer";
+  }
+
+  private resolvePeerMessageSourceLabel(payload: PeerCallMessage | null | undefined): string {
+    if (payload?.fromUserType === "customer") return "Customer";
+    if (payload?.fromUserType === "agent") return "Agent";
+    return "Remote";
+  }
+
+  private shouldStickMessagesToBottom(): boolean {
+    if (!this.messagesTableWrap) return false;
+    const distanceFromBottom =
+      this.messagesTableWrap.scrollHeight -
+      this.messagesTableWrap.scrollTop -
+      this.messagesTableWrap.clientHeight;
+    return distanceFromBottom <= 24;
+  }
+
+  private formatCallMessageTimestamp(ts: number): string {
+    const d = new Date(ts);
+    return `${d.getFullYear()}:${this.padNumber(d.getMonth() + 1)}:${this.padNumber(d.getDate())} ` +
+      `${this.padNumber(d.getHours())}:${this.padNumber(d.getMinutes())}:${this.padNumber(d.getSeconds())}.` +
+      this.padNumber(d.getMilliseconds(), 3);
+  }
+
+  private renderMediaOutages(outages: MediaOutageSnapshot) {
+    this.renderMediaOutageList(this.mediaOutageActive, outages.active, true, 4);
+    this.renderMediaOutageList(this.mediaOutageRecent, outages.recent, false, 6);
+  }
+
+  private renderMediaOutageList(
+    container: HTMLDivElement | null,
+    records: MediaOutageRecord[],
+    active: boolean,
+    limit: number
+  ) {
+    if (!container) return;
+    const fragment = document.createDocumentFragment();
+    const visible = records.slice(0, limit);
+
+    if (visible.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "diag-outage-empty";
+      empty.textContent = active ? "No active outages." : "No recent outages.";
+      fragment.appendChild(empty);
+      container.replaceChildren(fragment);
+      return;
+    }
+
+    visible.forEach((record: MediaOutageRecord) => {
+      const item = document.createElement("div");
+      item.className = `diag-outage-item ${active ? "active" : "recent"}`;
+
+      const title = document.createElement("div");
+      title.className = "diag-outage-title";
+      title.textContent = record.label;
+      item.appendChild(title);
+
+      const start = document.createElement("div");
+      start.className = "diag-outage-meta";
+      start.textContent = `Start: ${this.formatOutageDateTime(record.startTs)}`;
+      item.appendChild(start);
+
+      const end = document.createElement("div");
+      end.className = "diag-outage-meta";
+      end.textContent = `End: ${record.endTs === null ? "In progress" : this.formatOutageDateTime(record.endTs)}`;
+      item.appendChild(end);
+
+      const duration = document.createElement("div");
+      duration.className = "diag-outage-meta";
+      duration.textContent = `Duration: ${this.formatOutageDuration(record.durationMs)} | Signal: ${record.trigger}`;
+      item.appendChild(duration);
+
+      fragment.appendChild(item);
+    });
+
+    container.replaceChildren(fragment);
+  }
+
+  private formatOutageDateTime(ts: number): string {
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${this.padNumber(d.getMonth() + 1)}-${this.padNumber(d.getDate())} ` +
+      `${this.padNumber(d.getHours())}:${this.padNumber(d.getMinutes())}:${this.padNumber(d.getSeconds())}.` +
+      this.padNumber(d.getMilliseconds(), 3);
+  }
+
+  private formatOutageDuration(ms: number): string {
+    if (!Number.isFinite(ms) || ms <= 0) return "0s";
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+
+    const totalSeconds = ms / 1000;
+    if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
+
+    const totalWholeSeconds = Math.floor(totalSeconds);
+    const hours = Math.floor(totalWholeSeconds / 3600);
+    const minutes = Math.floor((totalWholeSeconds % 3600) / 60);
+    const seconds = totalWholeSeconds % 60;
+    if (hours > 0) {
+      return `${hours}h ${this.padNumber(minutes)}m ${this.padNumber(seconds)}s`;
+    }
+    return `${minutes}m ${this.padNumber(seconds)}s`;
+  }
+
+  private padNumber(value: number, width: number = 2): string {
+    return String(Math.max(0, Math.trunc(value))).padStart(width, "0");
+  }
+
+  private escapeHtml(text: string): string {
+    return String(text)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
   private setupDiagnosticsPanel() {
     if (
       !this.diagPanel ||
       !this.diagPanelHead ||
       !this.diagPanelToggle ||
-      !this.diagPanelBtn ||
       !this.diagPanelClose
     ) {
       return;
     }
-    const isMobile = () => window.innerWidth <= 900;
-    const closeMobile = () => this.diagPanel.classList.remove("show-mobile");
+
+    FloatingDialogSupport.attach(
+      this.diagPanel,
+      this.diagPanel,
+      this.diagPanelHead,
+      {
+        initialLeft: 24,
+        initialTop: 96,
+        margin: 12
+      }
+    );
+
     const applyMinimizedState = () => {
       this.diagPanel.classList.toggle("minimized", this.diagPanelMinimized);
       this.diagPanelToggle.textContent = this.diagPanelMinimized ? "+" : "-";
@@ -1437,31 +1777,14 @@ class UIController {
       applyMinimizedState();
     };
 
-    this.diagPanelHead.onclick = (ev: MouseEvent) => {
-      const target = ev.target as HTMLElement;
-      if (target?.closest("#diagPanelClose")) return;
+    this.diagPanelToggle.onclick = (ev: MouseEvent) => {
+      ev.stopPropagation();
       toggleMinimized();
-    };
-    this.diagPanelHead.onkeydown = (ev: KeyboardEvent) => {
-      if (ev.key !== "Enter" && ev.key !== " ") return;
-      ev.preventDefault();
-      toggleMinimized();
-    };
-
-    this.diagPanelBtn.onclick = () => {
-      if (!isMobile()) {
-        toggleMinimized();
-        return;
-      }
-      this.diagPanel.classList.toggle("show-mobile");
     };
     this.diagPanelClose.onclick = (ev: MouseEvent) => {
       ev.stopPropagation();
-      closeMobile();
+      this.closeHealthStatsDialog();
     };
-    window.addEventListener("resize", () => {
-      if (!isMobile()) closeMobile();
-    });
     applyMinimizedState();
   }
 
@@ -1507,6 +1830,7 @@ class UIController {
       switch (cmd.type) {
         case "START_CALL":
           if (this.lastCfg) {
+            this.startMessageLogSession();
             this.controller.join(this.lastCfg);
           } else {
             void this.autoJoin();

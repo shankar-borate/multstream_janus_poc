@@ -25,8 +25,8 @@ Local Jitter
 Variation in packet arrival timing on your path. Lower is better.
 Example: 6.4 ms is good/stable.
 
-Local Loss
-Packet loss % for your local path.
+Local Packet Loss (sampled)
+Packet loss % for your local path, based on sampled WebRTC stats.
 Example: Pending = stats not available yet.
 If it were 2.5%, packets are dropping and call quality may suffer.
 
@@ -38,8 +38,8 @@ Remote Jitter
 Remote-side timing variation.
 Example: 5.0 ms good.
 
-Remote Loss
-Remote-side packet loss %.
+Remote Packet Loss (sampled)
+Remote-side packet loss %, based on sampled WebRTC stats.
 Example: 0.1% almost no loss.
 
 SlowLink: None

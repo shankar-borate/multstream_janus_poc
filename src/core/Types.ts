@@ -7,6 +7,15 @@ type YesNoUnknown = "Yes" | "No" | "Pending" | "Not possible";
 type PlaybackState = "Active" | "Stalled" | "Pending" | "Not possible";
 type ConnectionOwner = "LOCAL" | "REMOTE" | "SYSTEM" | "NEUTRAL";
 type ConnectionSeverity = "info" | "warn" | "error";
+type CallMessageSeverity = "info" | "warn" | "error";
+type CallMessageSource = "local" | "remote";
+type CallMessageEntry = {
+  message: string;
+  severity: CallMessageSeverity;
+  ts: number;
+  source?: CallMessageSource;
+  sourceLabel?: string | null;
+};
 type ConnectionProductState =
   | "INIT"
   | "MEDIA_PREP"
@@ -36,6 +45,7 @@ type RemoteFeedObserver = {
   onRemoteFeedRetryExhausted?: (feedId: number, attempts: number) => void;
   onRemoteTelemetry?: (feedId: number, payload: PeerPlaybackTelemetry) => void;
   onRemoteNetworkTelemetry?: (feedId: number, payload: PeerNetworkTelemetry) => void;
+  onRemoteCallMessage?: (feedId: number, payload: PeerCallMessage) => void;
   onRemoteHoldState?: (feedId: number, payload: PeerHoldState) => void;
   onSlowLink?: (feedId: number, payload: JanusSlowLinkEvent) => void;
 };
@@ -52,6 +62,14 @@ type PeerNetworkTelemetry = {
   downloadKbps: number | null;
   lossPct: number | null;
   jitterMs: number | null;
+};
+type PeerCallMessage = {
+  type: "vcx-peer-message";
+  ts: number;
+  severity: CallMessageSeverity;
+  message: string;
+  fromUserType: "agent" | "customer";
+  fromParticipantId?: number | null;
 };
 type PeerHoldState = {
   type: "vcx-peer-hold";
@@ -128,6 +146,37 @@ type MediaStatusMatrix = {
   localAudioPlaybackStatus: PlaybackState;
   localVideoPlaybackStatus: PlaybackState;
 };
+type MediaOutageKey =
+  | "local-receive-audio"
+  | "local-receive-video"
+  | "local-playback-audio"
+  | "local-playback-video"
+  | "remote-receive-audio"
+  | "remote-receive-video"
+  | "remote-playback-audio"
+  | "remote-playback-video";
+type MediaOutageKind = "audio" | "video";
+type MediaOutageScope = "local" | "remote";
+type MediaOutageMode = "receive" | "playback";
+type MediaOutageTrigger = "No" | "Stalled";
+type MediaOutageRecord = {
+  key: MediaOutageKey;
+  label: string;
+  kind: MediaOutageKind;
+  scope: MediaOutageScope;
+  mode: MediaOutageMode;
+  trigger: MediaOutageTrigger;
+  startTs: number;
+  endTs: number | null;
+  durationMs: number;
+  active: boolean;
+  lastObservedTs: number;
+};
+type MediaOutageSnapshot = {
+  active: MediaOutageRecord[];
+  recent: MediaOutageRecord[];
+  ts: number;
+};
 type MediaIoSnapshot = {
   bytes: {
     audioSent: number;
@@ -143,5 +192,6 @@ type MediaIoSnapshot = {
   };
   issues: string[];
   matrix: MediaStatusMatrix;
+  outages: MediaOutageSnapshot;
   ts: number;
 };

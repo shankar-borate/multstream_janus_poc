@@ -132,8 +132,15 @@ class CallController {
           .length;
       },
       getPreferredAudioTrack: () => this.getPreferredAudioTrack(),
+      getPreferredVideoTrack: () => this.getPreferredVideoTrack(),
       isLocalAudioMuted: () => {
         return !this.localAudioEnabled;
+      },
+      isLocalVideoMuted: () => {
+        return !this.localVideoEnabled;
+      },
+      isRemoteHoldActive: () => {
+        return Array.from(this.peerHoldStateByFeed.values()).some(Boolean);
       },
       getPeerTelemetry: (now: number) => this.pickFreshPeerTelemetry(now),
       emitPeerTelemetry: (payload: PeerPlaybackTelemetry) => this.sendPeerTelemetry(payload),
@@ -757,6 +764,9 @@ class CallController {
           onRemoteNetworkTelemetry: (feedId: number, payload: PeerNetworkTelemetry) => {
             this.peerNetworkTelemetryByFeed.set(feedId, payload);
             this.bus.emit("peer-network-telemetry", { feedId, payload });
+          },
+          onRemoteCallMessage: (feedId: number, payload: PeerCallMessage) => {
+            this.bus.emit("peer-call-message", { feedId, payload });
           },
           onRemoteHoldState: (feedId: number, payload: PeerHoldState) => {
             if (feedId === this.selfId) return;
@@ -2319,7 +2329,23 @@ class CallController {
     return latest;
   }
 
-  private sendPeerTelemetry(payload: PeerPlaybackTelemetry | PeerNetworkTelemetry | PeerHoldState) {
+  relayCallMessageToPeer(entry: CallMessageEntry) {
+    if (this.userType !== "customer") return;
+    const message = String(entry.message || "").trim();
+    if (!message) return;
+    this.sendPeerTelemetry({
+      type: "vcx-peer-message",
+      ts: entry.ts,
+      severity: entry.severity,
+      message,
+      fromUserType: this.userType,
+      fromParticipantId: this.selfId ?? null
+    });
+  }
+
+  private sendPeerTelemetry(
+    payload: PeerPlaybackTelemetry | PeerNetworkTelemetry | PeerCallMessage | PeerHoldState
+  ) {
     if (!APP_CONFIG.mediaTelemetry.enablePeerTelemetry) return;
     const channel = this.plugin?.data;
     if (typeof channel !== "function") return;

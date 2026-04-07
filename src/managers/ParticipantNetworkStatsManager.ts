@@ -265,6 +265,7 @@ class ParticipantNetworkStatsManager {
 
   private async collectPeerRates(key: string, pc: RTCPeerConnection): Promise<ParticipantPeerRates> {
     const report = await pc.getStats();
+    const minPacketsForLoss = APP_CONFIG.connectionStatus.packetLossMinPackets;
     let sentBytes = 0;
     let receivedBytes = 0;
     let rttMs: number | null = null;
@@ -300,7 +301,7 @@ class ParticipantNetworkStatsManager {
         const packetsReceivedOrSent = typeof anyS.packetsReceived === "number"
           ? anyS.packetsReceived
           : (typeof anyS.packetsSent === "number" ? anyS.packetsSent : 0);
-        if (packetsLost > 0 || packetsReceivedOrSent > 0) {
+        if (packetsReceivedOrSent > 0) {
           lost += packetsLost;
           total += packetsLost + packetsReceivedOrSent;
         }
@@ -313,7 +314,7 @@ class ParticipantNetworkStatsManager {
       receivedBytes,
       rttMs,
       jitterMs,
-      total > 0 ? (lost / total) * 100 : null
+      total >= minPacketsForLoss ? (lost / total) * 100 : null
     );
   }
 

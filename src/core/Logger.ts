@@ -3,6 +3,7 @@ class Logger {
   private static readonly STATUS_COLOR_DEFAULT = "#111827";
   private static readonly STATUS_COLOR_WARN = "#d97706";
   private static readonly STATUS_COLOR_ERROR = "#dc2626";
+  private static readonly messageListeners = new Set<(entry: CallMessageEntry) => void>();
 
   private static userName = "User";
   private static remoteName = "Remote";
@@ -36,38 +37,68 @@ class Logger {
     Logger.level = level;
   }
 
+  static onMessage(listener: (entry: CallMessageEntry) => void): () => void {
+    Logger.messageListeners.add(listener);
+    return () => {
+      Logger.messageListeners.delete(listener);
+    };
+  }
+
   private static canLog(level: LogLevel): boolean {
     return Logger.LEVEL_PRIORITY[level] >= Logger.LEVEL_PRIORITY[Logger.level];
   }
 
+  private static emitMessage(severity: CallMessageSeverity, msg: string): void {
+    const message = String(msg ?? "").trim();
+    if (!message) return;
+    const entry: CallMessageEntry = {
+      message,
+      severity,
+      ts: Date.now(),
+      source: "local",
+      sourceLabel: null
+    };
+    Logger.messageListeners.forEach((listener) => {
+      try {
+        listener(entry);
+      } catch (e) {
+        console.error(e);
+      }
+    });
+  }
+
+  private static writeStatus(statusEl: HTMLElement | undefined, msg: string, color: string): void {
+    if (!statusEl) return;
+    statusEl.textContent = msg;
+    statusEl.style.color = color;
+  }
+
+  private writeInfo(msg: string): void {
+    if (this.infoEl) this.infoEl.textContent = msg;
+  }
+
   // Instance UI updates
   setStatus(msg: string): void {
-    if (this.statusEl) {
-      this.statusEl.textContent = msg;
-      this.statusEl.style.color = Logger.STATUS_COLOR_DEFAULT;
-    }
+    Logger.writeStatus(this.statusEl, msg, Logger.STATUS_COLOR_DEFAULT);
     Logger.user(msg);
   }
 
   setInfo(msg: string): void {
-    if (this.infoEl) this.infoEl.textContent = msg;
-    if (msg) Logger.flow(msg);
+    this.writeInfo(msg);
+    if (msg) {
+      Logger.emitMessage("info", msg);
+      Logger.flow(msg);
+    }
   }
 
   private setErrorStatus(msg: string): void {
-    if (this.statusEl) {
-      this.statusEl.textContent = msg;
-      this.statusEl.style.color = Logger.STATUS_COLOR_ERROR;
-    }
-    Logger.user(msg);
+    Logger.writeStatus(this.statusEl, msg, Logger.STATUS_COLOR_ERROR);
+    Logger.logError(msg);
   }
 
   private setWarnStatus(msg: string): void {
-    if (this.statusEl) {
-      this.statusEl.textContent = msg;
-      this.statusEl.style.color = Logger.STATUS_COLOR_WARN;
-    }
-    Logger.user(msg);
+    Logger.writeStatus(this.statusEl, msg, Logger.STATUS_COLOR_WARN);
+    Logger.logWarn(msg);
   }
 
   setStatusBySeverity(msg: string, severity: "info" | "warn" | "error"): void {
@@ -114,29 +145,26 @@ class Logger {
   }
   static info(msg: string): void { Logger.setInfo(msg); }
   static warn(msg: string): void {
-    if (!Logger.canLog("warn")) return;
-    console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#f59e0b;font-weight:bold");
     if (Logger.instance) {
-      Logger.instance.setWarnStatus(msg);
+      Logger.writeStatus(Logger.instance.statusEl, msg, Logger.STATUS_COLOR_WARN);
     }
+    Logger.logWarn(msg);
   }
   static error(msg: string, err?: unknown): void {
-    if (!Logger.canLog("error")) return;
-    console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#fb7185;font-weight:bold");
-    if (err) console.error(err);
     if (Logger.instance) {
-      Logger.instance.setErrorStatus(msg);
-      return;
+      Logger.writeStatus(Logger.instance.statusEl, msg, Logger.STATUS_COLOR_ERROR);
     }
-    Logger.user(msg);
+    Logger.logError(msg, err);
   }
 
   // Friendly narration logs
   static user(msg: string, data?: any): void {
+    Logger.emitMessage("info", msg);
     if (!Logger.canLog("info")) return;
     console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#22c55e;font-weight:bold", data ?? "");
   }
   static remote(msg: string, data?: any): void {
+    Logger.emitMessage("info", msg);
     if (!Logger.canLog("info")) return;
     console.log(`%cRemote(${Logger.remoteName}): ${msg}`, "color:#60a5fa;font-weight:bold", data ?? "");
   }
@@ -147,5 +175,18 @@ class Logger {
   static flow(msg: string, data?: any): void {
     if (!Logger.canLog("debug")) return;
     console.log(`%cFlow: ${msg}`, "color:#a78bfa;font-weight:bold", data ?? "");
+  }
+
+  private static logWarn(msg: string): void {
+    Logger.emitMessage("warn", msg);
+    if (!Logger.canLog("warn")) return;
+    console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#f59e0b;font-weight:bold");
+  }
+
+  private static logError(msg: string, err?: unknown): void {
+    Logger.emitMessage("error", msg);
+    if (!Logger.canLog("error")) return;
+    console.log(`%cUser(${Logger.userName}): ${msg}`, "color:#fb7185;font-weight:bold");
+    if (err) console.error(err);
   }
 }

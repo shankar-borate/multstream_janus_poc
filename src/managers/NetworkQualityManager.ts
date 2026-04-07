@@ -7,7 +7,7 @@ type NetworkPeerProvider = () => NetworkPeerSnapshot;
 type PeerMetrics = {
   rttMs: number;
   jitterMs: number;
-  lossPct: number;
+  lossPct: number | null;
   bitrateKbps: number;
 };
 
@@ -46,10 +46,10 @@ class NetworkQualityManager {
           const details = [
             "src=webrtc-stats",
             localMetrics
-              ? `local(rtt=${Math.round(localMetrics.rttMs)}ms jitter=${Math.round(localMetrics.jitterMs)}ms loss=${localMetrics.lossPct.toFixed(1)}% bitrate=${Math.round(localMetrics.bitrateKbps)}kbps)`
+              ? `local(rtt=${Math.round(localMetrics.rttMs)}ms jitter=${Math.round(localMetrics.jitterMs)}ms loss=${this.formatLoss(localMetrics.lossPct)} bitrate=${Math.round(localMetrics.bitrateKbps)}kbps)`
               : "local(n/a)",
             remoteMetrics
-              ? `remote(rtt=${Math.round(remoteMetrics.rttMs)}ms jitter=${Math.round(remoteMetrics.jitterMs)}ms loss=${remoteMetrics.lossPct.toFixed(1)}% bitrate=${Math.round(remoteMetrics.bitrateKbps)}kbps)`
+              ? `remote(rtt=${Math.round(remoteMetrics.rttMs)}ms jitter=${Math.round(remoteMetrics.jitterMs)}ms loss=${this.formatLoss(remoteMetrics.lossPct)} bitrate=${Math.round(remoteMetrics.bitrateKbps)}kbps)`
               : "remote(n/a)"
           ].join(" ");
           cb(local, remote, details);
@@ -59,7 +59,7 @@ class NetworkQualityManager {
         if (APP_CONFIG.networkQuality.useSimulatedFallback) {
           const sim = this.sampleSimulatedMetrics();
           const q = this.calc(sim.rttMs, sim.jitterMs, sim.lossPct, sim.bitrateKbps);
-          cb(q, q, `[simulated] rtt=${Math.round(sim.rttMs)}ms jitter=${Math.round(sim.jitterMs)}ms loss=${sim.lossPct.toFixed(1)}% bitrate=${Math.round(sim.bitrateKbps)}kbps`);
+          cb(q, q, `[simulated] rtt=${Math.round(sim.rttMs)}ms jitter=${Math.round(sim.jitterMs)}ms loss=${this.formatLoss(sim.lossPct)} bitrate=${Math.round(sim.bitrateKbps)}kbps`);
           return;
         }
 
@@ -87,19 +87,27 @@ class NetworkQualityManager {
     this.previousBytes.clear();
   }
 
-  private calc(rtt:number,jitter:number,loss:number,bitrate:number):NetQuality{
+  private calc(rtt:number,jitter:number,loss:number | null,bitrate:number):NetQuality{
     let score=0;
+    let checks=0;
+    checks++;
     if(rtt<APP_CONFIG.networkQuality.thresholds.rttGoodMs) score++;
+    checks++;
     if(jitter<APP_CONFIG.networkQuality.thresholds.jitterGoodMs) score++;
-    if(loss<APP_CONFIG.networkQuality.thresholds.lossGoodPct) score++;
+    if(loss !== null){
+      checks++;
+      if(loss<APP_CONFIG.networkQuality.thresholds.lossGoodPct) score++;
+    }
+    checks++;
     if(bitrate>APP_CONFIG.networkQuality.thresholds.bitrateGoodKbps) score++;
-    if(score>=4) return "High";
-    if(score>=2) return "Medium";
+    if(score>=checks) return "High";
+    if(score>=Math.max(2, Math.ceil(checks / 2))) return "Medium";
     return "Low";
   }
 
   private async collectPeerMetrics(key: string, pc: RTCPeerConnection): Promise<PeerMetrics> {
     const report = await pc.getStats();
+    const minPacketsForLoss = APP_CONFIG.connectionStatus.packetLossMinPackets;
     let rttMs = 0;
     let jitterMs = 0;
     let packetsTotal = 0;
@@ -119,37 +127,55 @@ class NetworkQualityManager {
         if (typeof anyS.jitter === "number") {
           jitterMs = Math.max(jitterMs, anyS.jitter * 1000);
         }
-        const recv = typeof anyS.packetsReceived === "number" ? anyS.packetsReceived : 0;
+        const recv = typeof anyS.packetsReceived === "number"
+          ? anyS.packetsReceived
+          : (typeof anyS.packetsSent === "number" ? anyS.packetsSent : 0);
         const lost = typeof anyS.packetsLost === "number" ? anyS.packetsLost : 0;
-        packetsTotal += recv + lost;
-        packetsLost += lost;
+        if (recv > 0) {
+          packetsTotal += recv + lost;
+          packetsLost += lost;
+        }
         const bytesReceived = typeof anyS.bytesReceived === "number" ? anyS.bytesReceived : 0;
         const bytesSent = typeof anyS.bytesSent === "number" ? anyS.bytesSent : 0;
         bytesTotal += bytesReceived + bytesSent;
       }
     });
 
-    const lossPct = packetsTotal > 0 ? (packetsLost / packetsTotal) * 100 : 0;
+    const lossPct = packetsTotal >= minPacketsForLoss ? (packetsLost / packetsTotal) * 100 : null;
     const bitrateKbps = this.computeBitrateKbps(key, bytesTotal);
     return { rttMs, jitterMs, lossPct, bitrateKbps };
   }
 
   private mergePeerMetrics(metrics: PeerMetrics[]): PeerMetrics | null {
     if (metrics.length === 0) return null;
-    const totals = metrics.reduce((acc, m) => {
+    const totals = metrics.reduce((acc: {
+      rttMs: number;
+      jitterMs: number;
+      lossPct: number;
+      lossCount: number;
+      bitrateKbps: number;
+    }, m) => {
       acc.rttMs += m.rttMs;
       acc.jitterMs += m.jitterMs;
-      acc.lossPct += m.lossPct;
+      if (m.lossPct !== null) {
+        acc.lossPct += m.lossPct;
+        acc.lossCount += 1;
+      }
       acc.bitrateKbps += m.bitrateKbps;
       return acc;
-    }, { rttMs: 0, jitterMs: 0, lossPct: 0, bitrateKbps: 0 });
+    }, { rttMs: 0, jitterMs: 0, lossPct: 0, lossCount: 0, bitrateKbps: 0 });
     const n = metrics.length;
     return {
       rttMs: totals.rttMs / n,
       jitterMs: totals.jitterMs / n,
-      lossPct: totals.lossPct / n,
+      lossPct: totals.lossCount > 0 ? totals.lossPct / totals.lossCount : null,
       bitrateKbps: totals.bitrateKbps / n
     };
+  }
+
+  private formatLoss(lossPct: number | null): string {
+    if (lossPct === null || !Number.isFinite(lossPct)) return "n/a";
+    return `${lossPct.toFixed(1)}%`;
   }
 
   private computeBitrateKbps(key: string, bytes: number): number {
